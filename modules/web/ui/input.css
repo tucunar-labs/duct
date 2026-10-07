@@ -632,6 +632,9 @@
   }
 
   /* Charts (dashboards): skeleton until the island sets data-loaded. */
+  .chart-frame {
+    position: relative;
+  }
   .chart-skeleton {
     position: absolute;
     inset: 0.25rem;
@@ -641,7 +644,7 @@
     padding: 0.5rem;
     pointer-events: none;
   }
-  [data-loaded="1"] .chart-skeleton {
+  .chart-frame:has(duct-chart[data-loaded="1"]) .chart-skeleton {
     display: none;
   }
 
