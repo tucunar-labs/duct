@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -356,7 +357,7 @@ func TestSQLPageIsPrefilled(t *testing.T) {
 	if strings.Contains(body, "<script>x</script>") {
 		t.Error("query parameter injected unescaped")
 	}
-	for _, want := range []string{"data-sql-editor", "data-bind:sql", "/sql/run", "editor.js", "datastar.js", "wordmark"} {
+	for _, want := range []string{"data-sql-editor", "data-bind:sql", "/sql/run", "editor.js", "grid.js", "datastar.js", "wordmark"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("editor page missing %q", want)
 		}
@@ -372,7 +373,14 @@ func TestRunQuery(t *testing.T) {
 	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("status %d type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
-	for _, want := range []string{"datastar-patch-elements", `id="results"`, "2 filas", "NULL", "&lt;script&gt;alert(1)&lt;/script&gt;", "label"} {
+	for _, want := range []string{
+		"datastar-patch-elements", "mode replace", `id="results"`, // replaced, not morphed
+		"2 filas", `data-rows="2"`, // meta line for the history recorder
+		"<duct-grid data-spec='", // virtualized island fed with compact JSON
+		`"rows":[`,               // raw JSON in a single-quoted attribute
+		`"name":"label"`,
+		`\u003cscript\u003ealert(1)\u003c/script\u003e`, // < > & are \u-escaped by encoding/json
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("result missing %q in %s", want, body)
 		}
@@ -596,6 +604,8 @@ func TestCatalogTableDetail(t *testing.T) {
 		">No<", ">Sí<",            // nullable badges
 		"42",            // row count through QueryHandler
 		"2 filas",       // preview
+		"<duct-grid",    // preview rendered by the virtualized island
+		"grid.js",       // island loaded on this page
 		"/sql?q=SELECT", // open in editor
 		"data-copy-text",
 	} {
@@ -670,5 +680,36 @@ func TestErrPos(t *testing.T) {
 		if l != tc.line || c != tc.col {
 			t.Errorf("errPos(%q) = %d,%d want %d,%d", tc.msg, l, c, tc.line, tc.col)
 		}
+	}
+}
+
+// TestGridSpecEscaping pins the single-quoted data-spec contract: raw JSON
+// (encoding/json escapes <, > and &), apostrophes entity-encoded, and the
+// payload parses back to the original cells.
+func TestGridSpecEscaping(t *testing.T) {
+	r := &queryResult{
+		Columns: []resultColumn{{Name: "c", Type: "TEXT"}},
+		Rows:    [][]cell{{{Text: `it's </script> "q" & <b>`}}, {{Null: true}}},
+	}
+	var sb strings.Builder
+	if err := (gridSpecElem{spec: resultsSpec(r)}).Render(context.Background(), &sb); err != nil {
+		t.Fatal(err)
+	}
+	out := sb.String()
+	if n := strings.Count(out, "'"); n != 2 {
+		t.Errorf("raw apostrophe outside the delimiters: %q", out)
+	}
+	if strings.Contains(out, "<b>") || strings.Contains(out, "</script>") {
+		t.Errorf("HTML not neutralised: %q", out)
+	}
+	spec := out[strings.IndexByte(out, '\'')+1 : strings.LastIndex(out, "'")]
+	var parsed struct {
+		Rows [][]any `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(spec, "&#39;", "'")), &parsed); err != nil {
+		t.Fatalf("payload does not parse back: %v (%q)", err, spec)
+	}
+	if len(parsed.Rows) != 2 || parsed.Rows[0][0] != `it's </script> "q" & <b>` || parsed.Rows[1][0] != nil {
+		t.Errorf("round trip lost data: %#v", parsed.Rows)
 	}
 }

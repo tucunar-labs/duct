@@ -1,6 +1,9 @@
 package web
 
 import (
+	"context"
+	"encoding/json"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -61,17 +64,73 @@ func msString(d time.Duration) string {
 	return strconv.FormatFloat(ms/1000, 'f', 2, 64) + " s"
 }
 
-// resultsView is the patch target of the SQL editor: always rendered with
-// id="results" so Datastar can morph it in place. The data-* attributes are
-// read by shell.js to record the local query history.
+// resultsGrid is the patch target content: a small wrapper whose meta line is
+// server-rendered and whose body is a <duct-grid> island fed with compact
+// JSON (columns + rows arrays). Rendering is left to the island (row
+// virtualization), so a 1,000-row result never becomes 15,000 DOM nodes and
+// the SSE payload stays small. The wrapper carries data-nonce/data-rows/…
+// for the local history recorder in shell.js.
 templ resultsView(r *queryResult) {
-	<div id="results" aria-live="polite">
+	// The live region sits on the stable host (sql.templ): this container is
+	// replaced, not morphed, so a change inside it would not be announced.
+	<div id="results">
 		if r == nil {
 			@emptyState("sparkle", "Sin resultados todavía", "Escribe una consulta y pulsa Ejecutar.")
 		} else {
 			@resultsGrid(r, true)
 		}
 	</div>
+}
+
+// gridColumnSpec / resultsSpec build the JSON payload of the island. Cells
+// are plain strings or null (no HTML): the browser escapes them by using
+// textContent.
+type gridColumnSpec struct {
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
+}
+
+func resultsSpec(r *queryResult) string {
+	spec := struct {
+		Columns []gridColumnSpec `json:"columns"`
+		Rows    [][]any          `json:"rows"`
+	}{Columns: make([]gridColumnSpec, 0, len(r.Columns)), Rows: make([][]any, 0, len(r.Rows))}
+	for _, c := range r.Columns {
+		spec.Columns = append(spec.Columns, gridColumnSpec{Name: c.Name, Type: c.Type})
+	}
+	for _, row := range r.Rows {
+		jr := make([]any, len(row))
+		for i, cell := range row {
+			if cell.Null {
+				jr[i] = nil
+			} else {
+				jr[i] = cell.Text
+			}
+		}
+		spec.Rows = append(spec.Rows, jr)
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return `{"columns":[],"rows":[]}`
+	}
+	return string(b)
+}
+
+// gridSpecElem writes the <duct-grid> island with its JSON payload in a
+// single-quoted attribute. json.Marshal escapes <, > and & as \uXXXX and
+// never emits a raw newline, so the only character that could close the
+// attribute is an apostrophe, which is entity-encoded here. The raw quotes
+// of the JSON keep the SSE payload small: HTML-escaping every string quote
+// (&#34;) used to add ~80 KB to a 1,000-row result.
+type gridSpecElem struct{ spec string }
+
+func (g gridSpecElem) Render(_ context.Context, w io.Writer) error {
+	_, err := io.WriteString(w, "<duct-grid data-spec='"+strings.ReplaceAll(g.spec, "'", "&#39;")+"'></duct-grid>")
+	return err
+}
+
+func gridSpecElemOf(r *queryResult) templ.Component {
+	return gridSpecElem{spec: resultsSpec(r)}
 }
 
 templ resultsGrid(r *queryResult, meta bool) {
@@ -92,51 +151,8 @@ templ resultsGrid(r *queryResult, meta bool) {
 				if len(r.Columns) == 0 {
 					<p class="text-sm text-muted">La consulta no devolvió columnas.</p>
 				} else {
-					<div
-						class="max-h-[inherit] overflow-auto rounded-lg border border-line bg-surface"
-						tabindex="0"
-						role="region"
-						aria-label="Resultados de la consulta"
-					>
-						<table class="data-table min-w-full">
-							<thead>
-								<tr>
-									<th scope="col" class="w-10 text-right">#</th>
-									for _, c := range r.Columns {
-										<th scope="col">
-											<span class="flex items-center gap-1.5">
-												<span data-col={ c.Name } class="font-mono text-xs font-semibold normal-case tracking-normal text-ink">{ c.Name }</span>
-												@typeBadge(c.Type)
-											</span>
-										</th>
-									}
-								</tr>
-							</thead>
-							<tbody>
-								for i, row := range r.Rows {
-									<tr class="group">
-										<td class="w-10 text-right font-mono text-xs text-muted">
-											<span class="inline-flex items-center gap-1">
-												{ strconv.Itoa(i + 1) }
-												<button type="button" data-copy-row class="row-copy btn btn-ghost btn-icon h-5 w-5" title="Copiar fila (TSV)" aria-label={ "Copiar fila " + strconv.Itoa(i+1) }>
-													@icon("copy", "h-3 w-3")
-												</button>
-											</span>
-										</td>
-										for _, cell := range row {
-											if cell.Null {
-												<td data-col="" class="results-cell results-null" title="NULL">NULL</td>
-											} else {
-												<td data-col="" class="results-cell" title="Clic para copiar">{ cell.Text }</td>
-											}
-										}
-									</tr>
-								}
-							</tbody>
-						</table>
-					</div>
-				}
-			}
+					@gridSpecElemOf(r)
+				}			}
 		</div>
 	}
 }

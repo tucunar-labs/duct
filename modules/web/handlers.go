@@ -399,5 +399,8 @@ func (a *app) sqlRun(w http.ResponseWriter, r *http.Request, sess session) {
 			res = &queryResult{Err: err.Error(), Nonce: time.Now().UnixNano()}
 		}
 	}
-	_ = sse.PatchElementTempl(resultsView(res))
+	// The results body is a <duct-grid> island fed with compact JSON: replace
+	// the container instead of morphing the old subtree (which used to cost
+	// ~1 MB of HTML and 15k DOM nodes for 1,000 rows).
+	_ = sse.PatchElementTempl(resultsView(res), datastar.WithMode(datastar.ElementPatchModeReplace))
 }

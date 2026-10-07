@@ -249,7 +249,7 @@
         toast("Copiado");
         return;
       }
-      var cell = e.target.closest ? e.target.closest("td[data-copy]") : null;
+      var cell = e.target.closest ? e.target.closest("[data-copy]") : null;
       if (cell) {
         var sel = window.getSelection();
         if (sel && String(sel).length > 0) return; // the user is selecting text
@@ -263,20 +263,27 @@
       }
       var rowBtn = e.target.closest ? e.target.closest("[data-copy-row]") : null;
       if (rowBtn) {
-        var tr = rowBtn.closest("tr");
+        var tr = rowBtn.closest("tr, .dgrid-row");
         if (!tr) return;
-        var vals = $$("td[data-col]", tr).map(function (td) {
-          return td.classList.contains("results-null") ? "" : td.textContent;
+        var vals = $$("td[data-col], .dgrid-cell[data-col]", tr).map(function (td) {
+          return td.classList.contains("results-null") || td.classList.contains("dgrid-null") ? "" : td.textContent;
         });
         copyText(vals.join("\t"));
         toast("Fila copiada");
       }
     });
 
-    // Export CSV of the visible results grid.
+    // Export CSV of the visible results grid (the <duct-grid> island holds
+    // the full result; legacy <table> grids read the rendered cells).
     $$("[data-export-csv]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var res = $(btn.getAttribute("data-export-csv") || "[data-results]");
+        var grid = res ? res.querySelector("duct-grid") : null;
+        if (grid && grid.exportCSV) {
+          grid.exportCSV();
+          toast("CSV exportado");
+          return;
+        }
         var table = res ? $("table", res) : null;
         if (!table) {
           toast("No hay resultados que exportar", "error");
@@ -594,9 +601,11 @@
     });
   }
 
-  // Records every result patch into the local query history.
+  // Records every result patch into the local query history. The results
+  // container arrives as a replaced node (patch mode "replace"), so both
+  // childList additions and attribute changes are watched; a unique nonce
+  // per render keeps each result recorded exactly once.
   function recordResults() {
-    var pending = null;
     var run = $("#run-btn");
     if (run && !window.ductPendingRun) {
       run.addEventListener("click", function () {
@@ -606,29 +615,49 @@
       });
     }
     var host = $("[data-results-host]") || document.body;
+    var lastNonce = null;
+    function record(el) {
+      if (!el || !el.getAttribute) return;
+      var nonce = el.getAttribute("data-nonce");
+      if (nonce == null || nonce === lastNonce) return;
+      lastNonce = nonce;
+      var p = window.ductPendingRun;
+      window.ductPendingRun = null;
+      var error = el.getAttribute("data-error") || "";
+      var entry = {
+        ts: p ? p.ts : Date.now(),
+        sql: (p && (p.sel || p.sql)) || "",
+        rows: parseInt(el.getAttribute("data-rows") || "0", 10),
+        ms: Math.round(parseFloat(el.getAttribute("data-ms") || "0")),
+        error: error,
+      };
+      if (!entry.sql) return;
+      var items = loadJSON(HIST_KEY, []);
+      items.unshift(entry);
+      saveJSON(HIST_KEY, items.slice(0, MAX_HIST));
+      if (window.ductHistoryRender) window.ductHistoryRender();
+    }
     var obs = new MutationObserver(function (muts) {
       muts.forEach(function (m) {
-        if (m.type !== "attributes") return;
-        var el = m.target;
-        if (!el.getAttribute || !el.hasAttribute("data-nonce")) return;
-        var p = window.ductPendingRun;
-        window.ductPendingRun = null;
-        var error = el.getAttribute("data-error") || "";
-        var entry = {
-          ts: p ? p.ts : Date.now(),
-          sql: (p && (p.sel || p.sql)) || "",
-          rows: parseInt(el.getAttribute("data-rows") || "0", 10),
-          ms: Math.round(parseFloat(el.getAttribute("data-ms") || "0")),
-          error: error,
-        };
-        if (!entry.sql) return;
-        var items = loadJSON(HIST_KEY, []);
-        items.unshift(entry);
-        saveJSON(HIST_KEY, items.slice(0, MAX_HIST));
-        if (window.ductHistoryRender) window.ductHistoryRender();
+        if (m.type === "attributes") {
+          if (m.target.hasAttribute && m.target.hasAttribute("data-nonce")) record(m.target);
+          return;
+        }
+        if (m.type === "childList" && m.addedNodes) {
+          Array.prototype.forEach.call(m.addedNodes, function (n) {
+            if (n.nodeType !== 1) return;
+            if (n.hasAttribute("data-nonce")) record(n);
+            else if (n.querySelector) record(n.querySelector("[data-nonce]"));
+          });
+        }
       });
     });
-    obs.observe(host, { subtree: true, attributes: true, attributeFilter: ["data-nonce"] });
+    obs.observe(host, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-nonce"],
+      childList: true,
+    });
   }
 
   if (document.readyState === "loading") {
