@@ -1,0 +1,5 @@
+# Paso 2a: un CSV a bronze.ventas (reemplazo completo en cada corrida).
+name: ventas
+source: files
+options:
+  path: data/ventas.csv

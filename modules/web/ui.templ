@@ -1,0 +1,263 @@
+package web
+
+import (
+	"net/url"
+	"strconv"
+)
+
+// Pages are plain templ components: templUI would add generated component
+// code and its own JS for a handful of buttons and tables, against ADR 0012's
+// "minimal surface"; the tokens in ui/input.css keep the look consistent.
+
+type pageData struct {
+	Title  string
+	Active string // "catalog" | "sql" | ""
+	User   string
+	Role   string
+	CSRF   string
+	Assets assets
+}
+
+templ layout(p pageData) {
+	<!DOCTYPE html>
+	<html lang="es">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<meta name="color-scheme" content="light dark"/>
+			<title>{ p.Title } · Duct</title>
+			<link rel="icon" type="image/png" href={ p.Assets.URL("brand/icon.png") }/>
+			<link rel="stylesheet" href={ p.Assets.URL("app.css") }/>
+			<script type="module" src={ p.Assets.URL("datastar.js") }></script>
+		</head>
+		<body class="min-h-screen bg-bg text-ink font-sans antialiased">
+			if p.User != "" {
+				@header(p)
+			}
+			<main class="mx-auto max-w-7xl px-4 py-6">
+				{ children... }
+			</main>
+		</body>
+	</html>
+}
+
+templ wordmark(a assets, class string) {
+	<picture>
+		<source media="(prefers-color-scheme: dark)" srcset={ a.URL("brand/wordmark-dark.svg") }/>
+		<img src={ a.URL("brand/wordmark.svg") } alt="Duct" class={ class }/>
+	</picture>
+}
+
+templ header(p pageData) {
+	<header class="border-b border-line bg-surface">
+		<div class="mx-auto flex max-w-7xl items-center gap-6 px-4 py-2">
+			<a href="/" aria-label="Duct">
+				@wordmark(p.Assets, "h-8 w-auto")
+			</a>
+			<nav class="flex gap-1 text-sm" aria-label="Principal">
+				@navLink("/catalog", "Catálogo", p.Active == "catalog")
+				@navLink("/sql", "Editor SQL", p.Active == "sql")
+			</nav>
+			<div class="ml-auto flex items-center gap-3 text-sm">
+				<span class="text-muted">{ p.User }</span>
+				<span class="rounded bg-surface2 px-2 py-0.5 font-mono text-xs" title="Rol">{ p.Role }</span>
+				<form method="post" action="/logout">
+					<input type="hidden" name="csrf" value={ p.CSRF }/>
+					<button type="submit" class="rounded border border-line px-3 py-1 hover:bg-hover">Salir</button>
+				</form>
+			</div>
+		</div>
+	</header>
+}
+
+templ navLink(href, label string, active bool) {
+	if active {
+		<a href={ templ.SafeURL(href) } aria-current="page" class="rounded px-3 py-1.5 font-medium text-brand-strong bg-hover">{ label }</a>
+	} else {
+		<a href={ templ.SafeURL(href) } class="rounded px-3 py-1.5 text-muted hover:bg-hover hover:text-ink">{ label }</a>
+	}
+}
+
+templ loginPage(a assets, csrf, next, errMsg string) {
+	@layout(pageData{Title: "Ingresar", Assets: a}) {
+		<div class="mx-auto mt-16 w-full max-w-sm">
+			<div class="mb-6 flex justify-center">
+				@wordmark(a, "h-14 w-auto")
+			</div>
+			<form method="post" action="/login" class="space-y-4 rounded-lg border border-line bg-surface p-6 shadow-sm">
+				<h1 class="text-lg font-semibold">Ingresar</h1>
+				if errMsg != "" {
+					<p role="alert" class="rounded border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
+				}
+				<input type="hidden" name="csrf" value={ csrf }/>
+				<input type="hidden" name="next" value={ next }/>
+				<label class="block text-sm">
+					<span class="mb-1 block text-muted">Usuario</span>
+					<input name="user" type="text" required autofocus autocomplete="username" class="w-full rounded border border-line bg-bg px-3 py-2"/>
+				</label>
+				<label class="block text-sm">
+					<span class="mb-1 block text-muted">Contraseña</span>
+					<input name="password" type="password" required autocomplete="current-password" class="w-full rounded border border-line bg-bg px-3 py-2"/>
+				</label>
+				<button type="submit" class="w-full rounded bg-brand px-3 py-2 font-medium text-[#161b22] hover:brightness-95">Entrar</button>
+			</form>
+		</div>
+	}
+}
+
+// ---- Catálogo ----
+
+type column struct {
+	Name string
+	Type string
+}
+
+type table struct {
+	Name    string
+	Columns []column
+}
+
+type schema struct {
+	Name   string
+	Tables []table
+}
+
+func colCount(n int) string {
+	if n == 1 {
+		return "1 columna"
+	}
+	return strconv.Itoa(n) + " columnas"
+}
+
+func previewURL(schemaName, tableName string) templ.SafeURL {
+	q := "SELECT * FROM " + quoteIdent(schemaName) + "." + quoteIdent(tableName) + " LIMIT 100"
+	return templ.URL("/sql?" + url.Values{"q": {q}}.Encode())
+}
+
+templ catalogPage(p pageData, schemas []schema, errMsg string) {
+	@layout(p) {
+		<div class="mb-4 flex items-baseline justify-between">
+			<h1 class="text-xl font-semibold">Catálogo</h1>
+			<p class="text-sm text-muted">Lo que tu rol puede ver</p>
+		</div>
+		if errMsg != "" {
+			<p role="alert" class="rounded border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
+		} else if len(schemas) == 0 {
+			<p class="rounded-lg border border-dashed border-line p-8 text-center text-muted">No hay tablas visibles para este rol.</p>
+		}
+		<div class="space-y-6">
+			for _, s := range schemas {
+				<section aria-labelledby={ "schema-" + s.Name }>
+					<h2 id={ "schema-" + s.Name } class="mb-2 font-mono text-sm font-semibold text-brand-strong">{ s.Name }</h2>
+					<div class="divide-y divide-line rounded-lg border border-line bg-surface">
+						for _, t := range s.Tables {
+							<details class="group">
+								<summary class="flex cursor-pointer items-center gap-3 px-4 py-2 hover:bg-hover">
+									<span class="font-mono text-sm">{ t.Name }</span>
+									<span class="text-xs text-muted">{ colCount(len(t.Columns)) }</span>
+									<a href={ previewURL(s.Name, t.Name) } class="ml-auto text-xs text-brand-strong hover:underline">Consultar</a>
+								</summary>
+								<table class="w-full border-t border-line text-sm">
+									<tbody>
+										for _, c := range t.Columns {
+											<tr class="border-b border-line/60 last:border-0">
+												<td class="px-4 py-1 pl-8 font-mono">{ c.Name }</td>
+												<td class="px-4 py-1 font-mono text-xs text-muted">{ c.Type }</td>
+											</tr>
+										}
+									</tbody>
+								</table>
+							</details>
+						}
+					</div>
+				</section>
+			}
+		</div>
+	}
+}
+
+// ---- Editor SQL ----
+
+type editorSignals struct {
+	SQL  string `json:"sql"`
+	CSRF string `json:"_csrf"`
+}
+
+templ sqlPage(p pageData, initial string) {
+	@layout(p) {
+		<div class="mb-4 flex items-baseline justify-between">
+			<h1 class="text-xl font-semibold">Editor SQL</h1>
+			<p class="text-sm text-muted"><kbd class="rounded border border-line px-1 font-mono text-xs">Ctrl</kbd>+<kbd class="rounded border border-line px-1 font-mono text-xs">Enter</kbd> para ejecutar</p>
+		</div>
+		<div data-signals={ templ.JSONString(editorSignals{SQL: initial, CSRF: p.CSRF}) }>
+			<div class="relative">
+				<div data-sql-editor data-run="#run-btn"></div>
+				<textarea data-bind:sql name="sql" rows="8" aria-label="Consulta SQL" class="w-full rounded border border-line bg-surface p-3 font-mono text-sm">{ initial }</textarea>
+			</div>
+			<div class="mt-3 flex items-center gap-3">
+				<button
+					id="run-btn"
+					type="button"
+					data-indicator:running
+					data-attr:disabled="$running"
+					data-on:click="@post('/sql/run', {headers: {'X-CSRF-Token': $_csrf}})"
+					class="rounded bg-brand px-4 py-2 text-sm font-medium text-[#161b22] hover:brightness-95 disabled:opacity-60"
+				>Ejecutar</button>
+				<span data-show="$running" class="text-sm text-muted" style="display:none">Ejecutando…</span>
+			</div>
+		</div>
+		<div class="mt-6">
+			@resultsView(nil)
+		</div>
+		<script type="module" src={ p.Assets.URL("editor.js") }></script>
+	}
+}
+
+// resultsView is the patch target of the editor: always rendered with
+// id="results" so Datastar can morph it in place.
+templ resultsView(r *queryResult) {
+	<div id="results" aria-live="polite">
+		if r != nil {
+			if r.Err != "" {
+				<p role="alert" class="whitespace-pre-wrap rounded border border-danger/40 bg-danger-bg px-3 py-2 font-mono text-sm text-danger">{ r.Err }</p>
+			} else {
+				<p class="mb-2 text-sm text-muted">
+					{ strconv.Itoa(len(r.Rows)) } filas
+					if r.Truncated {
+						(truncado al límite de { strconv.Itoa(r.Limit) })
+					}
+					· { r.Elapsed.Round(1000000).String() }
+				</p>
+				if len(r.Columns) > 0 {
+					<div class="max-h-[32rem] overflow-auto rounded-lg border border-line bg-surface">
+						<table class="min-w-full text-sm">
+							<thead class="sticky top-0 bg-surface2">
+								<tr>
+									for _, c := range r.Columns {
+										<th scope="col" class="whitespace-nowrap px-3 py-2 text-left font-mono text-xs font-semibold">
+											{ c.Name }
+											<span class="ml-1 font-normal text-muted">{ c.Type }</span>
+										</th>
+									}
+								</tr>
+							</thead>
+							<tbody>
+								for _, row := range r.Rows {
+									<tr class="border-t border-line/60 hover:bg-hover">
+										for _, cell := range row {
+											if cell.Null {
+												<td class="whitespace-nowrap px-3 py-1 font-mono text-xs italic text-muted">NULL</td>
+											} else {
+												<td class="whitespace-nowrap px-3 py-1 font-mono text-xs">{ cell.Text }</td>
+											}
+										}
+									</tr>
+								}
+							</tbody>
+						</table>
+					</div>
+				}
+			}
+		}
+	</div>
+}

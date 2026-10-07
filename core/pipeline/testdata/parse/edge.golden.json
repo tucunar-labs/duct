@@ -1,0 +1,20 @@
+[
+  {
+    "Schema": "My Schema",
+    "Name": "Tab\"le",
+    "Streaming": false,
+    "Expectations": null,
+    "Query": "WITH a AS (SELECT ';' AS s, $$x;y$$ AS d) SELECT * FROM a",
+    "File": "x.sql",
+    "Line": 2
+  },
+  {
+    "Schema": "main",
+    "Name": "events",
+    "Streaming": true,
+    "Expectations": null,
+    "Query": "SELECT 1 AS one",
+    "File": "x.sql",
+    "Line": 5
+  }
+]

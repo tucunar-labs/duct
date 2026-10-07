@@ -1,0 +1,67 @@
+@import "tailwindcss" source(none);
+@source "../*.templ";
+
+/* Brand palette (assets/brand/README.md): orange #F26B1D, steel #2B3440,
+   flange #161B22, bolt #8A96A3, bone #E6EAEE. Light/dark follow the OS. */
+:root {
+  color-scheme: light dark;
+  --duct-orange: #f26b1d;
+  --duct-orange-strong: #c8500c;
+  --duct-bg: #f4f6f8;
+  --duct-surface: #ffffff;
+  --duct-surface-2: #eceff3;
+  --duct-border: #d5dbe2;
+  --duct-text: #2b3440;
+  --duct-muted: #647080;
+  --duct-hover: #eef1f5;
+  --duct-selection: #f26b1d33;
+  --duct-danger: #b42318;
+  --duct-danger-bg: #fef0ee;
+  --duct-tok-string: #1b7f4b;
+  --duct-tok-number: #7a4bd6;
+  --duct-tok-type: #1f6fa8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --duct-orange-strong: #f26b1d;
+    --duct-bg: #161b22;
+    --duct-surface: #1e252e;
+    --duct-surface-2: #2b3440;
+    --duct-border: #3a4552;
+    --duct-text: #e6eaee;
+    --duct-muted: #8a96a3;
+    --duct-hover: #27303b;
+    --duct-selection: #f26b1d55;
+    --duct-danger: #ffb4a9;
+    --duct-danger-bg: #3b1f1c;
+    --duct-tok-string: #7fd6a2;
+    --duct-tok-number: #c2a4ff;
+    --duct-tok-type: #7cc0f0;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--duct-bg);
+  --color-surface: var(--duct-surface);
+  --color-surface2: var(--duct-surface-2);
+  --color-line: var(--duct-border);
+  --color-ink: var(--duct-text);
+  --color-muted: var(--duct-muted);
+  --color-hover: var(--duct-hover);
+  --color-brand: var(--duct-orange);
+  --color-brand-strong: var(--duct-orange-strong);
+  --color-danger: var(--duct-danger);
+  --color-danger-bg: var(--duct-danger-bg);
+  --font-mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  body {
+    background: var(--duct-bg);
+    color: var(--duct-text);
+  }
+  :focus-visible {
+    outline: 2px solid var(--duct-orange);
+    outline-offset: 2px;
+  }
+}

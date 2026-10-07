@@ -1,0 +1,34 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        # modules/ may import core/contract and core/registry, never other
+        # modules or the binary wiring.
+        modules:
+          files:
+            - "**/modules/**/*.go"
+            # A module's external tests (package x_test) import the module itself.
+            - "!$test"
+          deny:
+            - pkg: github.com/alonsoburon/duct/modules
+              desc: modules must not import other modules (ADR 0015)
+            - pkg: github.com/alonsoburon/duct/cmd
+              desc: modules must not import cmd
+        # core/ is independent of any concrete module.
+        core:
+          files:
+            - "**/core/**/*.go"
+          deny:
+            - pkg: github.com/alonsoburon/duct/modules
+              desc: core must not import modules
+            - pkg: github.com/alonsoburon/duct/cmd
+              desc: core must not import cmd
+
+formatters:
+  enable:
+    - gofmt

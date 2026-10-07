@@ -1,0 +1,10 @@
+# Paso 2b: una tabla de Postgres por ODBC a bronze.clientes.
+# Variables de entorno (las pone el test, o las defines tú):
+#   PG_ODBC_DRIVER  ruta del driver, p. ej. /usr/lib/psqlodbcw.so
+#   PGPORT          puerto de Postgres en 127.0.0.1
+#   PGPW            contraseña del usuario postgres
+name: clientes
+source: odbc
+options:
+  connection: "Driver=${PG_ODBC_DRIVER};Server=127.0.0.1;Port=${PGPORT};Database=postgres;Uid=postgres;Pwd=${PGPW}"
+  table: public.clientes

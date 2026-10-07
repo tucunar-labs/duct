@@ -1,0 +1,73 @@
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+import duct
+from duct import registry
+
+
+def test_function_bare_and_options() -> None:
+    @duct.function
+    def double(x: int) -> int:
+        return x * 2
+
+    @duct.function(name="plus", vectorized=True)
+    def add(a: float, b: float) -> float:
+        return a + b
+
+    specs = {s.name: s for s in registry.functions()}
+    assert specs["double"].input_types == ["int"]
+    assert specs["double"].return_type == "int"
+    assert not specs["double"].vectorized
+    assert specs["plus"].vectorized
+    assert specs["plus"].input_types == ["float", "float"]
+    assert double(2) == 4
+
+
+def test_table_registers_expectations() -> None:
+    exp = duct.Expectation("id_ok", "id IS NOT NULL", "drop_row")
+
+    @duct.table(name="silver.events", expectations=[exp])
+    def events() -> None: ...
+
+    (spec,) = registry.tables()
+    assert spec.name == "silver.events"
+    assert spec.expectations == [exp]
+
+
+def test_duplicate_rejected() -> None:
+    @duct.function
+    def f() -> None: ...
+
+    with pytest.raises(ValueError, match="duplicate"):
+
+        @duct.function(name="f")
+        def g() -> None: ...
+
+
+def test_to_dict_is_json() -> None:
+    @duct.function
+    def f(x: int) -> int:
+        return x
+
+    d = json.loads(json.dumps(registry.to_dict()))
+    assert d["schema_version"] == 1
+    assert d["functions"][0]["name"] == "f"
+    assert "fn" not in d["functions"][0]
+
+
+def test_cli_json(tmp_path: Path) -> None:
+    (tmp_path / "udfs.py").write_text(
+        "import duct\n\n@duct.function\ndef inc(x: int) -> int:\n    return x + 1\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-m", "duct.registry", "--json", "--load", str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(out.stdout)["functions"][0]["name"] == "inc"
+    assert out.stderr == ""

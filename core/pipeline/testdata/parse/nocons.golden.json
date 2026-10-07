@@ -1,0 +1,11 @@
+[
+  {
+    "Schema": "gold",
+    "Name": "t",
+    "Streaming": false,
+    "Expectations": null,
+    "Query": "(SELECT 1 AS a UNION ALL SELECT 2)",
+    "File": "x.sql",
+    "Line": 1
+  }
+]

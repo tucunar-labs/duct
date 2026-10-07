@@ -1,0 +1,13 @@
+{
+  "name": "duct-web-islands",
+  "private": true,
+  "description": "Pinned npm inputs of the JS islands bundled by tools/bundle (never installed with npm at build time).",
+  "dependencies": {
+    "@codemirror/lang-sql": "6.10.0",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.13",
+    "@lezer/highlight": "1.2.5",
+    "codemirror": "6.0.2"
+  }
+}

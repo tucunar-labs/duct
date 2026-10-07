@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://duct.dev/specs/ingest.schema.json",
+  "title": "Duct ingestion (ingest/<name>.yaml)",
+  "description": "One ingestion: reads a source and loads it into a Bronze table of the lake. Run with `duct ingest [name]`. Incremental state lives in duct.duct_ingest_state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "source"],
+  "properties": {
+    "name": {
+      "description": "Unique ingestion name; also the default table name.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "source": {
+      "description": "Source module: files (CSV/Parquet/JSON), odbc (any ODBC source) or bento (REST and other Bento inputs).",
+      "enum": ["files", "odbc", "bento"]
+    },
+    "target": {
+      "description": "Destination table. Always in the bronze schema. Default: bronze.<name>.",
+      "type": "string",
+      "pattern": "^bronze\\.[a-z][a-z0-9_]*$"
+    },
+    "mode": {
+      "description": "full: replace the table content on each run (default). incremental: append rows whose watermark column is above the highest value of the last successful run; the first run loads everything.",
+      "enum": ["full", "incremental"],
+      "default": "full"
+    },
+    "watermark": {
+      "description": "Column that only grows (updated_at, id). Required when mode is incremental, not allowed otherwise.",
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "options": {
+      "description": "Source-specific options; see modules/source-<source>/AGENTS.md.",
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "incremental" } }, "required": ["mode"] },
+      "then": { "required": ["watermark"] },
+      "else": { "not": { "required": ["watermark"] } }
+    },
+    {
+      "if": { "properties": { "source": { "const": "files" } } },
+      "then": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "Local path or glob, or a list of them. Relative to the project root.",
+                "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" }, "minItems": 1 }]
+              },
+              "format": { "enum": ["csv", "parquet", "json"] },
+              "reader": { "description": "Extra DuckDB reader parameters (header, delim, ...).", "type": "object" }
+            }
+          }
+        },
+        "required": ["options"]
+      }
+    },
+    {
+      "if": { "properties": { "source": { "const": "odbc" } } },
+      "then": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "required": ["connection"],
+            "additionalProperties": false,
+            "properties": {
+              "connection": { "description": "DSN=name or an ODBC connection string. ${VAR} is expanded from the environment.", "type": "string" },
+              "table": { "description": "[catalog.][schema.]name", "type": "string" },
+              "query": { "description": "Remote SQL SELECT (alternative to table).", "type": "string" }
+            },
+            "oneOf": [{ "required": ["table"] }, { "required": ["query"] }]
+          }
+        },
+        "required": ["options"]
+      }
+    },
+    {
+      "if": { "properties": { "source": { "const": "bento" } } },
+      "then": {
+        "properties": {
+          "options": {
+            "type": "object",
+            "required": ["input"],
+            "additionalProperties": false,
+            "properties": {
+              "input": { "description": "A Bento input component (map or YAML string).", "type": ["object", "string"] },
+              "processors": { "description": "Bento processors applied in order.", "type": "array" }
+            }
+          }
+        },
+        "required": ["options"]
+      }
+    }
+  ]
+}

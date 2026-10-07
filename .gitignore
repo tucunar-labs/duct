@@ -1,0 +1,25 @@
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+
+# Duct local state
+.duct/
+lake/
+
+# Secrets
+.env*
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

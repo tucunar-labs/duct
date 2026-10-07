@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "duct-data"
+version = "0.0.1"
+description = "Python SDK for Duct: connect to a lake, define UDFs and Python tables."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = []
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+arrow = ["pyarrow>=17"]
+pandas = ["pandas>=2", "pyarrow>=17"]
+polars = ["polars>=1", "pyarrow>=17"]
+pg = ["psycopg[binary]>=3.2"]
+marimo = ["marimo>=0.9"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/duct"]

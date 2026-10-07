@@ -1,0 +1,14 @@
+# Runs through mise so the pinned toolchain is used even when the shell
+# hasn't activated it. Recipes come from the justfile (which sets GOFLAGS).
+pre-commit:
+  parallel: true
+  commands:
+    gofmt:
+      glob: "*.go"
+      run: test -z "$(gofmt -l {staged_files})" || { gofmt -l {staged_files}; exit 1; }
+    vet:
+      glob: "*.go"
+      run: mise exec -- just vet
+    golangci-lint:
+      glob: "*.go"
+      run: mise exec -- just lint

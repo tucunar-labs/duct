@@ -1,0 +1,27 @@
+[
+  {
+    "Schema": "silver",
+    "Name": "orders",
+    "Streaming": false,
+    "Expectations": [
+      {
+        "Name": "id_present",
+        "Expr": "id IS NOT NULL",
+        "Action": "fail_update"
+      },
+      {
+        "Name": "positive",
+        "Expr": "amount \u003e 0 AND amount \u003c (SELECT max(x) FROM lim)",
+        "Action": "drop_row"
+      },
+      {
+        "Name": "Odd Name",
+        "Expr": "note \u003c\u003e ')'",
+        "Action": "warn"
+      }
+    ],
+    "Query": "SELECT id, amount, note -- trailing; comment\nFROM bronze.orders",
+    "File": "x.sql",
+    "Line": 2
+  }
+]

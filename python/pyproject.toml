@@ -1,0 +1,32 @@
+[project]
+name = "duct-workspace"
+version = "0.0.0"
+description = "Workspace root for the Duct Python SDK (not published)."
+requires-python = ">=3.12"
+dependencies = ["duct-data"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8", "pyright>=1.1.380"]
+
+[tool.uv.sources]
+duct-data = { workspace = true }
+
+[tool.uv.workspace]
+members = ["duct-data"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["duct-data/src", "duct-data/tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PT"]
+
+[tool.pyright]
+include = ["duct-data/src", "duct-data/tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+extraPaths = ["duct-data/src"]
+
+[tool.pytest.ini_options]
+testpaths = ["duct-data/tests"]
