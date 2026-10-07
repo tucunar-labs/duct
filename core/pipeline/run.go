@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/txretry"
 )
 
 // RunsTable is the Duct-owned table where every refresh is recorded.
@@ -116,7 +118,7 @@ func Run(ctx context.Context, eng contract.Engine, tables []Table, opt Options) 
 	for _, t := range tables {
 		byID[t.ID()] = t
 	}
-	rep := &Report{RunID: time.Now().UnixMicro()}
+	rep := &Report{RunID: newRunID()}
 	bad := map[string]bool{}
 	for _, id := range plan {
 		if err := ctx.Err(); err != nil {
@@ -149,6 +151,11 @@ func Run(ctx context.Context, eng contract.Engine, tables []Table, opt Options) 
 	}
 	return rep, nil
 }
+
+// newRunID is unique across processes sharing one state: microseconds times
+// 1000 plus a random 0..999 (still fits int64 until the year 2255). Two
+// processes starting in the same microsecond do happen when launched together.
+func newRunID() int64 { return time.Now().UnixMicro()*1000 + rand.Int64N(1000) }
 
 // sqlString is a SQL string literal (json_serialize_sql needs a constant, not a parameter).
 func sqlString(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
@@ -246,9 +253,14 @@ func refresh(ctx context.Context, eng contract.Engine, t Table) (res Result) {
 		proj = "* EXCLUDE (" + strings.Join(exclude, ", ") + ")"
 	}
 	target := quoteIdent(t.Schema) + "." + quoteIdent(t.Name)
-	err = eng.ExecTx(ctx,
-		"CREATE SCHEMA IF NOT EXISTS "+quoteIdent(t.Schema),
-		"CREATE OR REPLACE TABLE "+target+" AS SELECT "+proj+" FROM "+stage+" WHERE "+keep)
+	// Schema and table in one transaction, retried on a commit conflict with
+	// another process writing the same catalog (see doc.go: the staged rows are
+	// not recomputed, so the last writer wins with data from its own read).
+	err = txretry.Do(ctx, txretry.Default, func(ctx context.Context) error {
+		return eng.ExecTx(ctx,
+			"CREATE SCHEMA IF NOT EXISTS "+quoteIdent(t.Schema),
+			"CREATE OR REPLACE TABLE "+target+" AS SELECT "+proj+" FROM "+stage+" WHERE "+keep)
+	})
 	if err != nil {
 		res.Err = fmt.Errorf("write %s: %w", t.ID(), err)
 		return res

@@ -32,6 +32,18 @@ type AuditRecord struct {
 	Err string
 }
 
+// Administrator is an OPTIONAL interface of a QueryHandler for protocols that
+// run statements by themselves (serve-pg). Administer is asked about every
+// statement first: handled=false means "not an administrative statement, treat
+// it as a normal query"; handled=true with an error means it was refused or
+// failed (the protocol reports the error, which also audits it); handled=true
+// without an error means it ran, and resultSQL is a trusted constant SELECT
+// with its result (a command tag or rows) that the protocol returns instead of
+// the statement. Only an admin identity gets handled && err == nil.
+type Administrator interface {
+	Administer(ctx context.Context, id Identity, sql string) (resultSQL string, handled bool, err error)
+}
+
 // Auditor is an OPTIONAL interface of a QueryHandler. A Protocol that runs
 // statements by itself (the Postgres wire protocol has its own DuckDB session)
 // reports each one through it so every protocol lands in the same audit log.

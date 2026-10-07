@@ -44,9 +44,17 @@
 - **Locked mode** (set after ATTACH): `allowed_directories=[data_path/]`,
   `enable_external_access=false`, autoinstall/autoload off, plus `allow_persistent_secrets=false` set before the first ATTACH (DuckDB refuses to change it once the secret manager was used), `lock_configuration=true`.
   Lake reads and writes (Parquet) keep working; `read_csv('/etc/passwd')`, `COPY ... TO`,
-  `ATTACH`, `INSTALL` and `SET` of those options are denied. Not supported with a remote
-  `data_path` yet (needs httpfs + secrets, M4). Spill-to-disk (`temp_directory`) is not
+  `ATTACH`, `INSTALL` and `SET` of those options are denied. Spill-to-disk (`temp_directory`) is not
   allowed in locked mode.
+- **S3 storage** (`data_path = s3://bucket/prefix`, key `s3` = `core/s3conn.Config`, built by
+  `core/project` from `[s3]` + env): `INSTALL/LOAD httpfs`, `CREATE OR REPLACE TEMPORARY SECRET
+  duct_s3 (TYPE s3, KEY_ID, SECRET, [SESSION_TOKEN], REGION, URL_STYLE, ENDPOINT, USE_SSL)`
+  before the ATTACH (`OVERRIDE_DATA_PATH true`, so a lake copied from `./lake` just works), and
+  locked mode uses `allowed_directories=['s3://bucket/prefix/']`. SQLite and Postgres catalogs
+  both work. With `role_arn` the credentials are STS AssumeRole ones (session policy = lake
+  prefix) and a goroutine re-issues the secret before they expire (`CREATE SECRET` stays
+  allowed after the lock, ADR 0007). Errors are scrubbed of the keys. Tested end to end in
+  `test/integration/s3_rustfs_test.go`.
 - **Gotcha:** Arrow strings alias memory owned by the batch; copy (`strings.Clone`) before
   `Release`/next `Next`.
 - **Tests:** `engine_test.go` (round trip, WAL header, tx rollback, locked mode, Postgres

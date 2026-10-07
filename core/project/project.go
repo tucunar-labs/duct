@@ -15,6 +15,7 @@ import (
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/pgconn"
+	"github.com/alonsoburon/duct/core/s3conn"
 )
 
 // Environment variables for a Postgres catalog (keeps secrets out of duct.toml).
@@ -47,8 +48,32 @@ type Config struct {
 	// The password goes in DUCT_CATALOG_PASSWORD, or the whole string in
 	// DUCT_CATALOG_URL.
 	Catalog string `toml:"catalog"`
+	// S3 is the [s3] table: how to reach an s3:// storage. Never credentials.
+	S3 S3Config `toml:"s3"`
 	// Serve configures `duct serve` (the [serve] table).
 	Serve ServeConfig `toml:"serve"`
+}
+
+// S3Config is the [s3] table of duct.toml, used when storage is s3://...:
+//
+//	storage = "s3://lake/prod"
+//	[s3]
+//	endpoint  = "rustfs.internal:9000"   # host[:port]; empty = AWS S3
+//	region    = "us-east-1"
+//	url_style = "path"                   # path (RustFS, Garage) or vhost
+//	use_ssl   = true                     # default true
+//	role_arn  = "arn:aws:iam::duct:role/lake"  # optional: STS AssumeRole scoped to the prefix
+//
+// Credentials never go here: DUCT_S3_ACCESS_KEY_ID / DUCT_S3_SECRET_ACCESS_KEY /
+// DUCT_S3_SESSION_TOKEN, or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+// AWS_SESSION_TOKEN. The DUCT_S3_ENDPOINT, _REGION, _URL_STYLE, _USE_SSL and
+// _ROLE_ARN variables override the table.
+type S3Config struct {
+	Endpoint string `toml:"endpoint"`
+	Region   string `toml:"region"`
+	URLStyle string `toml:"url_style"`
+	UseSSL   *bool  `toml:"use_ssl"`
+	RoleARN  string `toml:"role_arn"`
 }
 
 // ServeConfig is the [serve] table of duct.toml:
@@ -99,6 +124,11 @@ func Load(dir string) (*Project, error) {
 				cfg.Serve.Modules = map[string]map[string]any{}
 			}
 			cfg.Serve.Modules[k] = m
+		}
+	}
+	if s3conn.Scheme(cfg.Storage) != "" {
+		if _, _, err := s3conn.ParseStorage(cfg.Storage); err != nil {
+			return nil, fmt.Errorf("%s: storage: only s3://bucket/prefix is supported as remote storage", ConfigFile)
 		}
 	}
 	if pgconn.IsDSN(cfg.Catalog) {
@@ -211,6 +241,66 @@ func (p *Project) LakeCatalogRef() string {
 // StatePath is the absolute path of the SQLite file with Duct-owned tables.
 func (p *Project) StatePath() string { return p.abs(StateFile) }
 
+// StorageIsS3 reports whether the lake lives in an S3-compatible store.
+func (p *Project) StorageIsS3() bool { return s3conn.Scheme(p.Config.Storage) == "s3" }
+
+func firstEnv(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// S3 is the object-store connection: the [s3] table overridden by DUCT_S3_*,
+// credentials from DUCT_S3_* or AWS_*. ok is false for local storage.
+func (p *Project) S3() (cfg s3conn.Config, ok bool, err error) {
+	if !p.StorageIsS3() {
+		return cfg, false, nil
+	}
+	t := p.Config.S3
+	cfg = s3conn.Config{
+		Endpoint:     firstEnv(s3conn.EnvEndpoint),
+		Region:       firstEnv(s3conn.EnvRegion, "AWS_REGION", "AWS_DEFAULT_REGION"),
+		URLStyle:     firstEnv(s3conn.EnvURLStyle),
+		RoleARN:      firstEnv(s3conn.EnvRoleARN),
+		UseSSL:       true,
+		KeyID:        firstEnv(s3conn.EnvKeyID, "AWS_ACCESS_KEY_ID"),
+		Secret:       firstEnv(s3conn.EnvSecret, "AWS_SECRET_ACCESS_KEY"),
+		SessionToken: firstEnv(s3conn.EnvSessionToken, "AWS_SESSION_TOKEN"),
+	}
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = t.Endpoint
+	}
+	if cfg.Region == "" {
+		cfg.Region = t.Region
+	}
+	if cfg.URLStyle == "" {
+		cfg.URLStyle = t.URLStyle
+	}
+	if cfg.RoleARN == "" {
+		cfg.RoleARN = t.RoleARN
+	}
+	if t.UseSSL != nil {
+		cfg.UseSSL = *t.UseSSL
+	}
+	if v := os.Getenv(s3conn.EnvUseSSL); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes":
+			cfg.UseSSL = true
+		case "0", "false", "no":
+			cfg.UseSSL = false
+		default:
+			return cfg, true, fmt.Errorf("%s must be true or false", s3conn.EnvUseSSL)
+		}
+	}
+	if cfg.Endpoint != "" && cfg.URLStyle == "" {
+		cfg.URLStyle = "path" // custom endpoints (RustFS, Garage) are path style
+	}
+	return cfg, true, cfg.Validate()
+}
+
 // DataPath is the absolute local lake directory, or the URL for remote storage.
 func (p *Project) DataPath() string {
 	if strings.Contains(p.Config.Storage, "://") {
@@ -234,7 +324,30 @@ func (p *Project) EngineConfig(locked bool) contract.Config {
 	if p.CatalogIsPostgres() {
 		cfg["state"] = cfg["catalog"]
 	}
+	p.addS3(cfg)
 	return cfg
+}
+
+// addS3 adds the "s3" key (an s3conn.Config) for an s3:// storage. A
+// configuration error travels in "s3_error" and is reported by the module's
+// Init (EngineConfig cannot fail).
+func (p *Project) addS3(cfg contract.Config) {
+	s3, ok, err := p.S3()
+	if !ok {
+		return
+	}
+	cfg["s3"] = s3
+	if err != nil {
+		cfg["s3_error"] = err.Error()
+	}
+}
+
+// ModuleConfig adds the lake location to a protocol module's config: catalog,
+// data_path and, for s3:// storage, s3.
+func (p *Project) ModuleConfig(cfg contract.Config) {
+	cfg["catalog"] = p.LakeCatalogRef()
+	cfg["data_path"] = p.DataPath()
+	p.addS3(cfg)
 }
 
 const gitignore = `# Duct local state and secrets
@@ -242,11 +355,6 @@ lake/
 .duct/
 .env*
 !.env.example
-`
-
-const configTemplate = `# Duct project. Paths are relative to this file.
-storage = "./lake"                 # data files (Parquet); or s3://bucket/prefix
-catalog = ".duct/catalog.sqlite"   # DuckLake catalog (SQLite, WAL)
 `
 
 // Scaffold creates the project layout in dir (duct.toml, lake/, .duct/,
@@ -257,12 +365,40 @@ func Scaffold(dir string) (*Project, error) {
 	return p, err
 }
 
+// ScaffoldOptions tunes ScaffoldWith.
+type ScaffoldOptions struct {
+	// Catalog is a Postgres connection string (empty: SQLite). A password in it
+	// is stripped from duct.toml.
+	Catalog string
+	// Storage is "" or "./lake" for the local lake, or s3://bucket/prefix.
+	Storage string
+	// S3 fills the [s3] table (only with s3:// storage).
+	S3 S3Config
+}
+
 // ScaffoldWithCatalog is Scaffold with a Postgres catalog connection string
 // (empty: SQLite). A password in it is not written to duct.toml: the returned
 // project uses the full string for this process only, and stripped is true so
 // the caller can tell the user to export DUCT_CATALOG_PASSWORD.
 func ScaffoldWithCatalog(dir, catalog string) (p *Project, stripped bool, err error) {
-	toml := configTemplate
+	return ScaffoldWith(dir, ScaffoldOptions{Catalog: catalog})
+}
+
+// ScaffoldWith is ScaffoldWithCatalog with a storage choice. With s3:// storage
+// no lake/ folder is created and duct.toml gets an [s3] table (no credentials).
+func ScaffoldWith(dir string, o ScaffoldOptions) (p *Project, stripped bool, err error) {
+	catalog := o.Catalog
+	storage := o.Storage
+	if storage == "" {
+		storage = "./lake"
+	}
+	remote := s3conn.Scheme(storage) != ""
+	if remote {
+		if _, _, err := s3conn.ParseStorage(storage); err != nil {
+			return nil, false, errors.New("storage must be a local folder or s3://bucket/prefix")
+		}
+	}
+	catLine := fmt.Sprintf("catalog = %q   # DuckLake catalog (SQLite, WAL)\n", CatalogFile)
 	full := ""
 	if catalog != "" {
 		clean, had, err := pgconn.StripPassword(catalog)
@@ -273,7 +409,12 @@ func ScaffoldWithCatalog(dir, catalog string) (p *Project, stripped bool, err er
 			full = catalog
 		}
 		stripped = had
-		toml = pgConfigTemplate(clean)
+		catLine = fmt.Sprintf("catalog = %q  # DuckLake catalog in Postgres; password in DUCT_CATALOG_PASSWORD\n", clean)
+	}
+	toml := "# Duct project. Paths are relative to this file.\n" +
+		fmt.Sprintf("storage = %q   # data files (Parquet); or s3://bucket/prefix\n", storage) + catLine
+	if remote {
+		toml += s3Template(o.S3)
 	}
 	root, err := filepath.Abs(dir)
 	if err != nil {
@@ -283,7 +424,11 @@ func ScaffoldWithCatalog(dir, catalog string) (p *Project, stripped bool, err er
 	if _, err := os.Stat(cfgPath); err == nil {
 		return nil, false, fmt.Errorf("%s already exists: this folder is already a Duct project", cfgPath)
 	}
-	for _, d := range []string{root, filepath.Join(root, LakeDir), filepath.Join(root, StateDir)} {
+	dirs := []string{root, filepath.Join(root, StateDir)}
+	if !remote {
+		dirs = append(dirs, filepath.Join(root, storage))
+	}
+	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return nil, false, err
 		}
@@ -306,11 +451,28 @@ func ScaffoldWithCatalog(dir, catalog string) (p *Project, stripped bool, err er
 	return p, stripped, nil
 }
 
-func pgConfigTemplate(catalog string) string {
-	return fmt.Sprintf(`# Duct project. Paths are relative to this file.
-storage = "./lake"                 # data files (Parquet); or s3://bucket/prefix
-catalog = %q  # DuckLake catalog in Postgres; password in DUCT_CATALOG_PASSWORD
-`, catalog)
+// s3Template is the [s3] table written by `duct init --storage s3://...`.
+func s3Template(c S3Config) string {
+	var b strings.Builder
+	b.WriteString("\n# Object store. Credentials: DUCT_S3_ACCESS_KEY_ID / DUCT_S3_SECRET_ACCESS_KEY\n# (or AWS_*), never in this file.\n[s3]\n")
+	if c.Endpoint != "" {
+		fmt.Fprintf(&b, "endpoint  = %q\n", c.Endpoint)
+	} else {
+		b.WriteString("# endpoint = \"host:9000\"   # empty = AWS S3\n")
+	}
+	if c.Region != "" {
+		fmt.Fprintf(&b, "region    = %q\n", c.Region)
+	}
+	if c.URLStyle != "" {
+		fmt.Fprintf(&b, "url_style = %q\n", c.URLStyle)
+	}
+	if c.UseSSL != nil {
+		fmt.Fprintf(&b, "use_ssl   = %t\n", *c.UseSSL)
+	}
+	if c.RoleARN != "" {
+		fmt.Fprintf(&b, "role_arn  = %q\n", c.RoleARN)
+	}
+	return b.String()
 }
 
 func writeGitignore(path string) error {

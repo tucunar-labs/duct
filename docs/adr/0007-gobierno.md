@@ -57,6 +57,46 @@ SET lock_configuration=true;
   `pg_settings`, `pg_collation`, `key_column_usage`, `table_constraints`) para JDBC y psql.
 - Roles restringidos son solo lectura; las escrituras van por otra vía de Duct.
 
+## Gobierno en SQL (v0.2)
+Además de `duct role|grant|policy`, el mismo efecto con sentencias estilo Unity Catalog. Parser
+propio en `core/governance/sql.go` (errores `línea:columna`); ejecuta sobre el `Store` (cambia las
+tablas `duct_*`, regenera las vistas `role_<rol>` y audita).
+```sql
+CREATE ROLE r;                       DROP ROLE r;
+GRANT SELECT ON [TABLE] s.t TO [ROLE] r;     REVOKE SELECT ON [TABLE] s.t FROM [ROLE] r;
+GRANT ROLE r TO USER u;              -- fija el (único) rol del usuario; REVOKE ROLE no existe
+SHOW GRANTS [ON [TABLE] s.t | TO [ROLE] r];  -- role, privilege, object, row_filter, masks
+ALTER TABLE s.t SET ROW FILTER <expr> FOR ROLE r;     ALTER TABLE s.t DROP ROW FILTER FOR ROLE r;
+ALTER TABLE s.t ALTER COLUMN c SET MASK <expr> FOR ROLE r;   ... DROP MASK FOR ROLE r;
+```
+- **Divergencia con Databricks:** allí el filtro/máscara es una UDF SQL aplicada a la tabla
+  (`SET ROW FILTER fn ON (cols)`, `SET MASK fn`) para todos. Duct no tiene UDFs SQL en el catálogo
+  y sus políticas son por rol: la expresión va en línea y nombra el rol (`FOR ROLE`). La forma
+  Databricks se reconoce solo para responder con un error claro. Sin `CREATE USER` en SQL (llevaría
+  la contraseña en la sentencia y en la auditoría): usuarios y tokens siguen en el CLI.
+- **Entradas:** `duct sql "<sentencia>"` (local; lo que no es gobierno va al motor, como `duct query`)
+  y `duct serve` (pg y HTTP).
+- **Admin = rol integrado `duct_admin`** (`duct role create duct_admin`, usuarios con ese rol).
+  Solo ese rol ejecuta sentencias de gobierno por `duct serve`; es una constante, no una columna,
+  y no hay otra forma de volverse admin que `GRANT ROLE duct_admin TO USER u` por un admin o el CLI
+  local. El resto de sus consultas siguen sujetas al guard (solo SELECT sobre vistas de su rol).
+- **Guard:** `Handler.Administer` reconoce estas sentencias ANTES de las comprobaciones de solo
+  lectura y de schema del rol. No admin: `permission denied` (se audita con su texto; el detalle de
+  sintaxis no se filtra). Admin: se ejecuta serializado, se audita con el texto original. En pg,
+  duckgres no puede ejecutarlas (no son SQL de Postgres): el fork tiene `QueryAccessPolicy.Intercept`,
+  que ejecuta la sentencia y devuelve un `SELECT` constante con el resultado. En el protocolo
+  extendido se ejecuta en `Parse` (una vez por preparación). Los errores de pg llegan con SQLSTATE
+  `42501`, también los de sintaxis.
+- **Expresiones de filtro/máscara** (también las de `duct policy`): se validan con
+  `json_serialize_sql` de `SELECT (<expr>\n) FROM s.t` y deben ser UNA expresión escalar sobre las
+  columnas de esa tabla: sin subconsultas, funciones de tabla, `*`, WITH, WHERE/GROUP/ORDER/LIMIT,
+  operaciones de conjuntos ni referencias a otras tablas/schemas; las funciones siguen la misma
+  lista negra que las consultas de rol (`read_*`, `glob`, `getenv`, `current_setting`, `sqlite_*`…).
+  Después se comprueba que enlaza contra la tabla (columnas inexistentes fallan al crear, no al
+  consultar). El `\n` antes del paréntesis de cierre evita que un comentario `--` final se coma la
+  vista. Quien necesite un cruce (p. ej. filtrar por una tabla de permisos) lo materializa en la
+  tabla base o en un pipeline: no se permite en la expresión.
+
 ## Por probar
 - Madurez de quack-oauth.
 

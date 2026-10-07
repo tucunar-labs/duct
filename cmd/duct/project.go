@@ -44,6 +44,8 @@ func runProject(cmd string, args []string, stdout, stderr io.Writer) int {
 		err = cmdInit(ctx, args, stdout, stderr)
 	case "query":
 		err = cmdQuery(ctx, args, stdout, stderr)
+	case "sql":
+		err = cmdSQL(ctx, args, stdout, stderr)
 	case "migrate":
 		err = cmdMigrate(ctx, args, stdout, stderr)
 	case "catalog":
@@ -114,6 +116,12 @@ func cmdInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "create the project even on a network or synchronised folder")
 	catalog := fs.String("catalog", "", "Postgres catalog (postgres://user@host/db or postgres:dbname=... host=...); default: SQLite in .duct/. Password via DUCT_CATALOG_PASSWORD")
+	storage := fs.String("storage", "", "lake location: a local folder (default ./lake) or s3://bucket/prefix (credentials from DUCT_S3_* or AWS_* variables)")
+	s3Endpoint := fs.String("s3-endpoint", "", "S3 endpoint host[:port] (RustFS, Garage...); empty = AWS S3")
+	s3Region := fs.String("s3-region", "", "S3 region (default us-east-1)")
+	s3Style := fs.String("s3-url-style", "", "S3 URL style: path (default with an endpoint) or vhost")
+	s3NoSSL := fs.Bool("s3-no-ssl", false, "reach the S3 endpoint over plain http")
+	s3Role := fs.String("s3-role-arn", "", "STS role to assume with a session policy scoped to the lake prefix")
 	// Accept flags after the directory too: duct init demo --force.
 	var dir string
 	rest := args
@@ -141,7 +149,13 @@ func cmdInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if *catalog != "" && !pgconn.IsDSN(*catalog) {
 		return usageErr("--catalog must be a postgres connection string (postgres://user@host/db)")
 	}
-	p, stripped, err := project.ScaffoldWithCatalog(dir, *catalog)
+	opts := project.ScaffoldOptions{Catalog: *catalog, Storage: *storage,
+		S3: project.S3Config{Endpoint: *s3Endpoint, Region: *s3Region, URLStyle: *s3Style, RoleARN: *s3Role}}
+	if *s3NoSSL {
+		off := false
+		opts.S3.UseSSL = &off
+	}
+	p, stripped, err := project.ScaffoldWith(dir, opts)
 	if err != nil {
 		return err
 	}
@@ -152,6 +166,14 @@ func cmdInit(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	defer func() { _ = eng.Close() }()
 	if _, err := project.Migrate(ctx, eng); err != nil {
 		return err
+	}
+	if p.StorageIsS3() {
+		_, _ = fmt.Fprintf(stdout, "Created Duct project in %s\n  duct.toml  lake in %s  catalog in %s\n", p.Root, p.Config.Storage, p.CatalogRef())
+		if stripped {
+			_, _ = fmt.Fprintf(stdout, "The password was not written to duct.toml: export %s (or %s) before running duct here.\n", project.EnvCatalogPassword, project.EnvCatalogURL)
+		}
+		_, _ = fmt.Fprintf(stdout, "Credentials come from DUCT_S3_ACCESS_KEY_ID / DUCT_S3_SECRET_ACCESS_KEY (or AWS_*), never from duct.toml.\n")
+		return nil
 	}
 	if p.CatalogIsPostgres() {
 		_, _ = fmt.Fprintf(stdout, "Created Duct project in %s\n  duct.toml  lake/  catalog and Duct state in %s (schema duct)\n", p.Root, p.CatalogRef())

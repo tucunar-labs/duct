@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/s3conn"
 )
 
 func open(t *testing.T, locked bool) (*Engine, string) {
@@ -194,3 +195,34 @@ func TestParseConfigPostgres(t *testing.T) {
 type scrubErr struct{ s string }
 
 func (e *scrubErr) Error() string { return e.s }
+
+func TestParseConfigS3(t *testing.T) {
+	base := func() contract.Config {
+		return contract.Config{"catalog": "/tmp/c.sqlite", "data_path": "s3://lake/prod"}
+	}
+	if _, err := parseConfig(base()); err == nil || !strings.Contains(err.Error(), "s3 key") {
+		t.Errorf("s3 data_path without s3 key: %v", err)
+	}
+	cfg := base()
+	cfg["s3"] = s3conn.Config{Endpoint: "h:9000", KeyID: "a", Secret: "b"}
+	c, err := parseConfig(cfg)
+	if err != nil || c.localData || c.s3Scope != "s3://lake/prod/" {
+		t.Fatalf("parse: %+v %v", c, err)
+	}
+	if got := lockStatements(c)[0]; got != "SET allowed_directories = ['s3://lake/prod/']" {
+		t.Errorf("lock: %s", got)
+	}
+	if !strings.Contains(strings.Join(loadStatements(c), ";"), "LOAD httpfs") {
+		t.Error("httpfs not loaded for s3 storage")
+	}
+	cfg["s3"] = s3conn.Config{}
+	if _, err := parseConfig(cfg); err == nil || !strings.Contains(err.Error(), "no credentials") {
+		t.Errorf("missing credentials: %v", err)
+	}
+	bad := base()
+	bad["data_path"] = "gs://b/p"
+	bad["s3"] = s3conn.Config{KeyID: "a", Secret: "b"}
+	if _, err := parseConfig(bad); err == nil {
+		t.Error("gs:// accepted")
+	}
+}

@@ -475,7 +475,10 @@ func (s *Store) SetRowFilter(ctx context.Context, role, relation, predicate stri
 	}
 	schema, table, _ := NormalizeRelation(rel)
 	base := ident(schema) + "." + ident(table)
-	if err := s.checkExpr(ctx, "SELECT * FROM "+base+" WHERE ("+predicate+")"); err != nil {
+	if err := s.checkPolicy(ctx, predicate, schema, table); err != nil {
+		return fmt.Errorf("row filter: %w", err)
+	}
+	if err := s.checkExpr(ctx, "SELECT * FROM "+base+" WHERE ("+predicate+"\n)"); err != nil {
 		return fmt.Errorf("row filter: %w", err)
 	}
 	return s.execTx(ctx,
@@ -510,12 +513,37 @@ func (s *Store) SetMask(ctx context.Context, role, relation, column, expr string
 	if !found {
 		return fmt.Errorf("%s has no column %q", rel, column)
 	}
-	if err := s.checkExpr(ctx, "SELECT ("+expr+") AS "+ident(column)+" FROM "+ident(schema)+"."+ident(table)); err != nil {
+	if err := s.checkPolicy(ctx, expr, schema, table); err != nil {
+		return fmt.Errorf("mask: %w", err)
+	}
+	if err := s.checkExpr(ctx, "SELECT ("+expr+"\n) AS "+ident(column)+" FROM "+ident(schema)+"."+ident(table)); err != nil {
 		return fmt.Errorf("mask: %w", err)
 	}
 	return s.execTx(ctx,
 		"DELETE FROM duct.duct_masks WHERE role = "+lit(role)+" AND relation = "+lit(rel)+" AND column_name = "+lit(column),
 		"INSERT INTO duct.duct_masks (role, relation, column_name, expr) VALUES ("+lit(role)+", "+lit(rel)+", "+lit(column)+", "+lit(expr)+")")
+}
+
+// checkPolicy parses `SELECT (<expr>) FROM schema.table` with DuckDB's parser
+// and applies the structural rules of checkPolicyExpr.
+func (s *Store) checkPolicy(ctx context.Context, expr, schema, table string) error {
+	rs, err := s.rows(ctx, `SELECT CAST(json_serialize_sql(`+lit("SELECT ("+expr+"\n) FROM "+ident(schema)+"."+ident(table))+`) AS VARCHAR)`)
+	if err != nil {
+		return err
+	}
+	if len(rs) != 1 {
+		return errors.New("cannot parse")
+	}
+	return checkPolicyExpr(rs[0][0], schema, table)
+}
+
+// SetUserRole changes the (single) role of a user. Sessions already open keep
+// the old role until they log in again.
+func (s *Store) SetUserRole(ctx context.Context, user, role string) error {
+	if err := s.requireRole(ctx, role); err != nil {
+		return err
+	}
+	return s.mustChange(ctx, user, `UPDATE duct.duct_users SET role = ? WHERE name = ?`, role, user)
 }
 
 // checkExpr parses a statement with DuckDB's parser (exactly one SELECT) and

@@ -1,0 +1,6 @@
+{
+  "kind": "set_row_filter",
+  "role": "analistas",
+  "relation": "gold.ventas",
+  "expr": "region = 'CL' AND monto \u003e 0"
+}

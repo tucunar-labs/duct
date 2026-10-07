@@ -150,8 +150,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 		}
 		// Reserved keys: where the lake is, for protocols that run their own
 		// read-only DuckDB session (serve-pg).
-		cfg["catalog"] = p.LakeCatalogRef()
-		cfg["data_path"] = p.DataPath()
+		p.ModuleConfig(cfg)
 		if name == "web" { // persistent web sessions survive restarts
 			if _, ok := cfg["session_key_file"]; !ok {
 				cfg["session_key_file"] = filepath.Join(filepath.Dir(p.StatePath()), "web_session.key")

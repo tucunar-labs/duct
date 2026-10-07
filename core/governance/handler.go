@@ -30,6 +30,8 @@ type Handler struct {
 	eng   contract.Engine
 	opt   HandlerOptions
 	audit *auditLog
+
+	adminMu sync.Mutex // serialises governance statements
 }
 
 var (
@@ -91,9 +93,16 @@ func (h *Handler) query(ctx context.Context, proto string, id contract.Identity,
 		h.audit.add(rec)
 		return nil, err
 	}
-	rewritten, err := h.authorize(ctx, id, sql)
+	// Governance statements first: they are neither SELECTs nor on the role
+	// schema, and only the admin role may run them.
+	rewritten, handled, err := h.Administer(ctx, id, sql)
 	if err != nil {
 		return fail(err)
+	}
+	if !handled {
+		if rewritten, err = h.authorize(ctx, id, sql); err != nil {
+			return fail(err)
+		}
 	}
 	qctx, cancel := ctx, context.CancelFunc(func() {})
 	if h.opt.Timeout > 0 {
@@ -226,6 +235,11 @@ func (h *Handler) Catalog(ctx context.Context, id contract.Identity) (contract.S
 	}
 	return h.eng.Query(ctx, `SELECT table_schema, table_name, column_name, data_type FROM information_schema.columns
 		WHERE table_catalog = 'lake' AND table_schema = `+lit(contract.RoleSchema(id.Role))+` ORDER BY table_name, ordinal_position`)
+}
+
+// Administer forwards to the Handler.
+func (p *protocolHandler) Administer(ctx context.Context, id contract.Identity, sql string) (string, bool, error) {
+	return p.h.Administer(ctx, id, sql)
 }
 
 // Catalog forwards to the Handler.

@@ -1,0 +1,6 @@
+{
+  "kind": "drop_mask",
+  "role": "analistas",
+  "relation": "gold.ventas",
+  "column": "rut"
+}

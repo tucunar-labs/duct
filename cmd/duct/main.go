@@ -18,8 +18,9 @@ const usage = `usage: duct <command>
 commands:
   version              print the version
   modules              list registered modules
-  init <dir>           create a project (duct.toml, lake/, SQLite catalog)
+  init <dir>           create a project (duct.toml, lake/ or --storage s3://..., SQLite catalog)
   query "SQL"          run SQL against the lake (--format table|csv|json)
+  sql "STATEMENT"      governance SQL (CREATE ROLE, GRANT, SHOW GRANTS, ALTER TABLE ... SET ROW FILTER|MASK) or any SQL
   migrate              apply Duct-owned table migrations
   catalog              catalog tools: info, migrate --to postgres://... (SQLite -> Postgres)
   gc                   checkpoint the catalog WAL and run DuckLake maintenance
@@ -58,7 +59,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		for _, m := range registry.List("") {
 			_, _ = fmt.Fprintf(stdout, "%s\t%s\n", m.Kind, m.Name)
 		}
-	case "init", "query", "migrate", "catalog", "gc", "run", "serve", "role", "user", "token", "grant", "revoke", "policy":
+	case "init", "query", "sql", "migrate", "catalog", "gc", "run", "serve", "role", "user", "token", "grant", "revoke", "policy":
 		return runProject(fs.Arg(0), fs.Args()[1:], stdout, stderr)
 	case "ingest":
 		return runIngest(fs.Args()[1:], stdout, stderr)

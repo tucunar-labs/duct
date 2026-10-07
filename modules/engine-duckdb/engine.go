@@ -21,6 +21,7 @@ import (
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/pgconn"
 	"github.com/alonsoburon/duct/core/registry"
+	"github.com/alonsoburon/duct/core/s3conn"
 )
 
 // Catalog names fixed by the Engine contract.
@@ -48,6 +49,8 @@ type Engine struct {
 	mu     sync.Mutex
 	db     *sql.DB
 	closed bool
+	stop   context.CancelFunc // stops the STS credential refresher
+	done   chan struct{}
 }
 
 var _ contract.Engine = (*Engine)(nil)
@@ -62,6 +65,11 @@ type config struct {
 	locked    bool
 	busyMS    int
 	localData bool
+
+	// s3:// data_path (ADR 0001): connection and credentials of the object store.
+	s3       s3conn.Config
+	s3Scope  string // allowed_directories entry: s3://bucket/prefix/
+	provider *s3conn.Provider
 
 	// Postgres catalog (ADR 0001): DuckLake metadata in the public schema and
 	// the Duct-owned tables in stateSchema of the same (or another) database.
@@ -138,6 +146,11 @@ func parseConfig(cfg contract.Config) (config, error) {
 		return c, errors.New("engine-duckdb: catalog and state must be absolute paths or postgres connection strings")
 	}
 	c.localData = !strings.Contains(c.dataPath, "://")
+	if !c.localData {
+		if err := c.parseS3(cfg); err != nil {
+			return c, err
+		}
+	}
 	if c.localData {
 		if !filepath.IsAbs(c.dataPath) {
 			return c, errors.New("engine-duckdb: a local data_path must be absolute")
@@ -145,6 +158,25 @@ func parseConfig(cfg contract.Config) (config, error) {
 		c.dataPath = filepath.Clean(c.dataPath)
 	}
 	return c, nil
+}
+
+// parseS3 reads the "s3" key (an s3conn.Config built by core/project) for an
+// s3:// data_path.
+func (c *config) parseS3(cfg contract.Config) error {
+	var err error
+	if c.s3Scope, err = s3conn.Scope(c.dataPath); err != nil {
+		return fmt.Errorf("engine-duckdb: %w (only s3:// is supported as remote data_path)", err)
+	}
+	if msg, _ := cfg["s3_error"].(string); msg != "" {
+		return errors.New("engine-duckdb: s3 config: " + msg)
+	}
+	s3, ok := cfg["s3"].(s3conn.Config)
+	if !ok {
+		return errors.New("engine-duckdb: an s3:// data_path needs the s3 key (connection and credentials; `duct` builds it from duct.toml and the environment)")
+	}
+	c.s3 = s3
+	c.provider, err = s3conn.NewProvider(s3, c.dataPath, false)
+	return err
 }
 
 func strKey(cfg contract.Config, key string, required bool) (string, error) {
@@ -181,9 +213,6 @@ func (e *Engine) Init(ctx context.Context, cfg contract.Config) error {
 	c, err := parseConfig(cfg)
 	if err != nil {
 		return err
-	}
-	if c.locked && !c.localData {
-		return errors.New("engine-duckdb: locked mode with a remote data_path is not supported yet")
 	}
 
 	var ready atomic.Bool
@@ -230,6 +259,15 @@ func (e *Engine) Init(ctx context.Context, cfg contract.Config) error {
 	if err := run(loadStatements(c)); err != nil {
 		return fail(c.scrub(err))
 	}
+	if !c.localData {
+		cr, err := c.provider.Credentials(ctx)
+		if err != nil {
+			return fail(err)
+		}
+		if err := run([]string{c.s3.SecretSQL(cr)}); err != nil {
+			return fail(c.scrub(err))
+		}
+	}
 	if c.pgCatalog != nil {
 		if err := attachPostgres(ctx, conn, c); err != nil {
 			return fail(c.scrub(err))
@@ -258,14 +296,52 @@ func (e *Engine) Init(ctx context.Context, cfg contract.Config) error {
 	}
 	e.mu.Lock()
 	e.db = db
+	if c.provider != nil && c.provider.Temporary() {
+		rctx, cancel := context.WithCancel(context.Background())
+		e.stop, e.done = cancel, make(chan struct{})
+		go refreshS3(rctx, e.done, db, c)
+	}
 	e.mu.Unlock()
 	return nil
+}
+
+// refreshS3 renews the STS credentials of the S3 secret before they expire.
+// CREATE SECRET is allowed after the lock (ADR 0007), and the secret is
+// database-wide, so one pooled connection is enough.
+func refreshS3(ctx context.Context, done chan<- struct{}, db *sql.DB, c config) {
+	defer close(done)
+	tk := time.NewTicker(30 * time.Second)
+	defer tk.Stop()
+	last := ""
+	if cr, err := c.provider.Credentials(ctx); err == nil {
+		last = cr.SessionToken
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+		}
+		cr, err := c.provider.Credentials(ctx)
+		if err != nil {
+			continue // keep the current secret; retried on the next tick
+		}
+		if cr.SessionToken == last {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.s3.SecretSQL(cr)); err == nil {
+			last = cr.SessionToken
+		}
+	}
 }
 
 func loadStatements(c config) []string {
 	exts := append([]string{}, extensions...)
 	if c.pgCatalog != nil || c.pgState != nil {
 		exts = append(exts, "postgres")
+	}
+	if !c.localData {
+		exts = append(exts, "httpfs")
 	}
 	exts = append(exts, c.extra...)
 	var s []string
@@ -286,7 +362,7 @@ func (c config) scrub(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := err.Error()
+	msg := c.s3.Redact(err.Error())
 	for _, p := range []pgconn.Params{c.pgCatalog, c.pgState} {
 		msg = p.Redact(msg)
 	}
@@ -344,9 +420,7 @@ func attachPostgres(ctx context.Context, conn *sql.Conn, c config) error {
 		return err
 	}
 	opts := fmt.Sprintf("DATA_PATH %s, META_SECRET %s", quote(c.dataPath), catalogSecret)
-	if c.localData {
-		opts += ", OVERRIDE_DATA_PATH true"
-	}
+	opts += ", OVERRIDE_DATA_PATH true" // storage may have moved (rclone sync ./lake s3://...)
 	if err := withRetry(ctx, func() error {
 		return ex(fmt.Sprintf("ATTACH 'ducklake:postgres:' AS %s (%s)", lakeCatalog, opts))
 	}); err != nil {
@@ -430,11 +504,9 @@ func ensureWAL(ctx context.Context, conn *sql.Conn, c config) error {
 
 func attachStatements(c config) []string {
 	opts := fmt.Sprintf("DATA_PATH %s, BUSY_TIMEOUT %d", quote(c.dataPath), c.busyMS)
-	if c.localData {
-		// Relative layout (ADR 0001): the project folder may move, so the data
-		// path recorded in the catalog must not pin it.
-		opts += ", OVERRIDE_DATA_PATH true"
-	}
+	// Relative layout (ADR 0001): the project folder may move, and the lake may
+	// move to s3://, so the data path recorded in the catalog must not pin it.
+	opts += ", OVERRIDE_DATA_PATH true"
 	s := []string{fmt.Sprintf("ATTACH %s AS %s (%s)", quote("ducklake:sqlite:"+c.catalog), lakeCatalog, opts)}
 	if c.state != "" {
 		s = append(s, fmt.Sprintf("ATTACH %s AS %s (TYPE sqlite, JOURNAL_MODE 'WAL', BUSY_TIMEOUT %d)", quote(c.state), stateCatalog, c.busyMS))
@@ -443,8 +515,12 @@ func attachStatements(c config) []string {
 }
 
 func lockStatements(c config) []string {
+	dir := c.dataPath + "/"
+	if !c.localData {
+		dir = c.s3Scope
+	}
 	return []string{
-		"SET allowed_directories = [" + quote(c.dataPath+"/") + "]",
+		"SET allowed_directories = [" + quote(dir) + "]",
 		"SET enable_external_access = false",
 		"SET autoinstall_known_extensions = false",
 		"SET autoload_known_extensions = false",
@@ -625,5 +701,9 @@ func (e *Engine) Close() error {
 		return nil
 	}
 	e.closed = true
+	if e.stop != nil {
+		e.stop()
+		<-e.done
+	}
 	return e.db.Close()
 }

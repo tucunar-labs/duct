@@ -12,10 +12,15 @@
   then ADR 0007's lockdown (allowed_directories, enable_external_access=false, no autoinstall/
   autoload, lock_configuration=true). Statements pass duckgres' `QueryAccessPolicy` (read only,
   role schema only, bare names resolved into it, `sqlite_*`/`read_*`/ATTACH/SET refused).
+- **Governance SQL:** statements of `core/governance/sql.go` (CREATE ROLE, GRANT, SHOW GRANTS,
+  ALTER TABLE ... SET ROW FILTER ...) are not Postgres SQL, so the policy's `Intercept` hook (fork
+  patch) asks the handler's optional `contract.Administrator` first: admin (`duct_admin`) runs them
+  and gets a constant SELECT back (prefixed `/*duct:admin*/`, skipped by the audit hook because the
+  original is audited by `intercept`); others get 42501.
 - **Config** (`[serve.pg]`): `listen` (default `127.0.0.1:5433`), `tls_cert`+`tls_key`
   (when set, plaintext logins are refused), `allow_insecure` (needed for non-loopback without TLS),
   `max_connections` (32), `idle_timeout` (15m), `memory_limit` (256MB/session), `threads` (2).
-  `catalog` and `data_path` are injected by `duct serve`. Local data path only for now.
+  `catalog` and `data_path` are injected by `duct serve`. Works with an `s3://` lake too: each session gets the S3 temporary secret (read-only STS credentials scoped to the prefix when `role_arn` is set, renewed during the session), `httpfs`, and `allowed_directories=[s3://bucket/prefix/]`.
 - **Gotchas:** 10 bad logins from one IP in 5 min ban it; duckgres logs per statement at INFO
   (`duct serve` raises the default level to WARN). Depends on `../duckgres` (go.mod `replace`).
 - **Tests:** end-to-end in `cmd/duct/serve_test.go` (pgx over TLS).

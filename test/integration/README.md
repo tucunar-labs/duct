@@ -6,3 +6,10 @@ RustFS). Run with `just test-integration`. Today: `odbc_postgres_test.go` (Postg
 Postgres catalog + Duct state (init, ingest, run, serve), `duct catalog migrate` from SQLite,
 concurrent writers. Needs `podman` (rootless) and the `postgres` DuckDB extension (network the
 first time).
+`s3_rustfs_test.go` runs RustFS (`docker.io/rustfs/rustfs`, bound to 127.0.0.1, removed at the end)
+and drives the binary with `storage = "s3://bucket/prefix"`: init -> ingest -> run -> gc -> serve
+(pg + http) as a role, locked DuckDB denying another prefix of the same bucket, STS AssumeRole
+scoped to the prefix, and the `./lake` -> `s3://` move. For the CI job: Podman is enough (first run
+also downloads the `httpfs` extension); with an S3 service container set `DUCT_TEST_S3_ENDPOINT`,
+`DUCT_TEST_S3_ACCESS_KEY`, `DUCT_TEST_S3_SECRET_KEY` (the STS test needs a server with AssumeRole,
+i.e. RustFS) and `DUCT_TEST_RUSTFS_IMAGE` pins the image.

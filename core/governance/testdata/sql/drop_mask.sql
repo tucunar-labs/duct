@@ -1,0 +1,1 @@
+ALTER TABLE gold.ventas ALTER COLUMN rut DROP MASK FOR ROLE analistas

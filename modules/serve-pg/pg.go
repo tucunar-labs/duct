@@ -70,6 +70,7 @@ type Server struct {
 	pids     atomic.Int32
 	roles    sync.Map // user -> role, for the audit hook
 	auditor  atomic.Pointer[contract.Auditor]
+	admin    atomic.Pointer[contract.Administrator]
 	failures failureTracker
 	wg       sync.WaitGroup
 }
@@ -200,6 +201,9 @@ func (s *Server) Serve(ctx context.Context, h contract.QueryHandler, auth contra
 	} else {
 		slog.Warn("serve-pg: the query handler does not audit; Postgres statements will not be recorded")
 	}
+	if a, ok := h.(contract.Administrator); ok {
+		s.admin.Store(&a)
+	}
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() { <-sctx.Done(); _ = s.ln.Close() }()
@@ -238,6 +242,9 @@ func (s *Server) auditHook(user, sql string, d time.Duration, rows int64, err er
 	ap := s.auditor.Load()
 	if ap == nil {
 		return
+	}
+	if strings.HasPrefix(sql, adminMarker) {
+		return // result of an administrative statement; intercept() audited the original
 	}
 	role := ""
 	if r, ok := s.roles.Load(user); ok {

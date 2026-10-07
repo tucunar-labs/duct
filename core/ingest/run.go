@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/registry"
+	"github.com/alonsoburon/duct/core/txretry"
 )
 
 // Result is the outcome of one ingestion.
@@ -30,8 +30,12 @@ const stageTable = "duct_stage"
 // replace in full mode, append in incremental mode, new columns added with
 // ALTER TABLE) and, only if that succeeded, stores the new watermark.
 // root is the project directory; relative paths in options resolve against it.
-func Run(ctx context.Context, eng contract.Engine, root string, c Config) (Result, error) {
-	res := Result{Name: c.Name, Table: c.Target}
+//
+// Concurrency (see doc.go): runs of the same source are serialized by a lease
+// in duct state, and the load unit is retried as a whole on a lake commit
+// conflict.
+func Run(ctx context.Context, eng contract.Engine, root string, c Config) (res Result, err error) {
+	res = Result{Name: c.Name, Table: c.Target}
 	if err := c.Validate(); err != nil {
 		return res, err
 	}
@@ -51,6 +55,16 @@ func Run(ctx context.Context, eng contract.Engine, root string, c Config) (Resul
 	}
 	defer func() { _ = mod.Close() }()
 
+	lk, err := Acquire(ctx, eng, c.Name)
+	if err != nil {
+		return res, err
+	}
+	defer func() {
+		if rerr := lk.Release(ctx); rerr != nil && err == nil {
+			err = rerr
+		}
+	}()
+
 	st := contract.IngestState{}
 	if c.Mode == ModeIncremental {
 		w, err := loadWatermark(ctx, eng, c.Name)
@@ -64,8 +78,8 @@ func Run(ctx context.Context, eng contract.Engine, root string, c Config) (Resul
 	}
 
 	var (
-		input   contract.Stream
-		stageFn string // SELECT that fills the stage table
+		recs    []arrow.RecordBatch // batch Source output, replayed on each attempt
+		stageFn string              // SELECT that fills the stage table
 	)
 	switch src := mod.(type) {
 	case contract.SQLSource:
@@ -81,30 +95,49 @@ func Run(ctx context.Context, eng contract.Engine, root string, c Config) (Resul
 		stageFn = plan.Select
 	case contract.Source:
 		var err error
-		if input, err = collect(ctx, src); err != nil {
+		if recs, err = collect(ctx, src); err != nil {
 			return res, fmt.Errorf("source %s: %w", c.Source, err)
 		}
-		if input == nil { // no rows, no schema: nothing to load
+		defer func() {
+			for _, r := range recs {
+				r.Release()
+			}
+		}()
+		if len(recs) == 0 { // no rows, no schema: nothing to load
 			res.Watermark = st.Watermark
 			return res, saveState(ctx, eng, c, st.Watermark, 0)
 		}
-		defer input.Release()
 		stageFn = "SELECT * FROM " + contract.InputView
 	default:
 		return res, fmt.Errorf("source module %q implements neither SQLSource nor Source", c.Source)
 	}
 
-	wm := st.Watermark
-	err := tr.InTx(ctx, input, func(ctx context.Context, tx contract.Tx) error {
-		n, newWM, err := load(ctx, tx, c, stageFn)
-		if err != nil {
-			return err
+	// The whole unit (schema, stage, evolve, write) is one lake transaction;
+	// on a commit conflict it is rolled back and run again on the new snapshot.
+	// Each attempt gets a fresh reader over the same batches.
+	var wm string
+	err = txretry.Do(ctx, txretry.Default, func(ctx context.Context) error {
+		wm, res.Rows = st.Watermark, 0
+		var input contract.Stream
+		if len(recs) > 0 {
+			rr, err := array.NewRecordReader(recs[0].Schema(), recs)
+			if err != nil {
+				return err
+			}
+			defer rr.Release()
+			input = rr
 		}
-		res.Rows = n
-		if newWM != "" {
-			wm = newWM
-		}
-		return nil
+		return tr.InTx(ctx, input, func(ctx context.Context, tx contract.Tx) error {
+			n, newWM, err := load(ctx, tx, c, stageFn)
+			if err != nil {
+				return err
+			}
+			res.Rows = n
+			if newWM != "" {
+				wm = newWM
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return res, fmt.Errorf("load %s: %w", c.Target, err)
@@ -126,15 +159,10 @@ func optionsOrEmpty(m map[string]any) map[string]any {
 	return m
 }
 
-// collect runs a batch Source to completion and returns its batches as one
-// Stream (nil if it produced no rows). The caller releases the Stream.
-func collect(ctx context.Context, src contract.Source) (contract.Stream, error) {
+// collect runs a batch Source to completion and returns its batches (empty if
+// it produced no rows). The caller releases them.
+func collect(ctx context.Context, src contract.Source) ([]arrow.RecordBatch, error) {
 	var recs []arrow.RecordBatch
-	release := func() {
-		for _, r := range recs {
-			r.Release()
-		}
-	}
 	err := src.Read(ctx, func(b contract.Batch) error {
 		if len(recs) > 0 && !recs[0].Schema().Equal(b.Schema()) {
 			return errors.New("source emitted batches with different schemas")
@@ -144,15 +172,12 @@ func collect(ctx context.Context, src contract.Source) (contract.Stream, error) 
 		return nil
 	})
 	if err != nil {
-		release()
+		for _, r := range recs {
+			r.Release()
+		}
 		return nil, err
 	}
-	if len(recs) == 0 {
-		return nil, nil
-	}
-	rr, err := array.NewRecordReader(recs[0].Schema(), recs)
-	release() // the reader holds its own references
-	return rr, err
+	return recs, nil
 }
 
 // load runs inside the transaction. It stages the source rows in a temporary
@@ -314,16 +339,7 @@ func saveState(ctx context.Context, eng contract.Engine, c Config, wm string, ro
 // create the schema at once; the loser fails with "Transaction conflict" and
 // its retry then finds the schema.
 func ensureSchema(ctx context.Context, eng contract.Engine, name string) error {
-	var err error
-	for i := range 5 {
-		if err = eng.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+name); err == nil || !strings.Contains(err.Error(), "Transaction conflict") {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return err
-		case <-time.After(time.Duration(i+1) * 50 * time.Millisecond):
-		}
-	}
-	return err
+	return txretry.Do(ctx, txretry.Default, func(ctx context.Context) error {
+		return eng.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+name)
+	})
 }

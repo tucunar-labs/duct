@@ -7,8 +7,8 @@ cd "$(dirname "$0")"
 duct="${DUCT:-duct}"
 pw="${DEMO_PASSWORD:-demo-pw-123}"
 
-"$duct" role create analistas
-"$duct" grant select on gold.ventas to analistas
-"$duct" policy row-filter gold.ventas --role analistas --where "region = 'CL'"
-"$duct" policy mask gold.ventas.rut --role analistas --expr "'***'"
+"$duct" sql "CREATE ROLE analistas"
+"$duct" sql "GRANT SELECT ON TABLE gold.ventas TO ROLE analistas"
+"$duct" sql "ALTER TABLE gold.ventas SET ROW FILTER region = 'CL' FOR ROLE analistas"
+"$duct" sql "ALTER TABLE gold.ventas ALTER COLUMN rut SET MASK '***' FOR ROLE analistas"
 "$duct" user create ana --role analistas --password "$pw"

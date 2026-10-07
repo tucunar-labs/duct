@@ -78,7 +78,7 @@ Hecho = los cinco pasos corren en `examples/demo/` como test e2e en CI.
       Evidencia: `TestE2EServe` + prueba manual con psql 18.
 - [x] Grants, filtros por fila y máscaras → vistas `role_<rol>` (por CLI: `duct grant|policy`);
       guard con el parser de DuckDB. Evidencia: `TestE2EServe` (24 + 33 sentencias hostiles
-      rechazadas). Falta: sintaxis SQL (`GRANT …` como sentencia).
+      rechazadas). Sintaxis SQL: ver v0.2.
 - [x] Auditoría en `duct.duct_audit` (permitidas y denegadas, ambos protocolos).
 - [x] `serve-http` estilo ClickHouse (JSON, CSV, ArrowStream, Parquet) + `/healthz` y `/metrics`.
 
@@ -103,10 +103,28 @@ Hecho = los cinco pasos corren en `examples/demo/` como test e2e en CI.
 **v0.1 cumplida (2026-10-07):** `just check`, `just e2e` y `just test-integration` en verde.
 
 Pendientes conocidos para v0.2:
-- Reintento de conflictos lógicos (`Transaction conflict`) en `run` e `ingest` cuando dos
-  procesos refrescan la misma tabla.
-- Sintaxis SQL para gobierno (`GRANT …`, `SET ROW FILTER`, `SET MASK` como sentencias).
-- Subir a DuckDB 2.0; `data_path` remoto en serve-pg; publicar el fork de duckgres.
+- [x] Reintento de conflictos (`core/txretry`: conflictos de DuckLake, serialización de
+  Postgres y SQLite ocupado) en `run` e `ingest`; lease por fuente en la ingesta (sin duplicados).
+  Evidencia: `TestConcurrentRunSameTarget`, `TestConcurrentIncrementalIngest`, `TestIngestLock`
+  (10/10 tras reintentar "database is locked").
+- [x] Sintaxis SQL para gobierno (`CREATE ROLE`, `GRANT`, `SHOW GRANTS`, `ALTER TABLE … SET ROW
+  FILTER | ALTER COLUMN … SET MASK … FOR ROLE`): `duct sql` y, por `duct serve`, solo el rol
+  `duct_admin`. Evidencia: golden tests en `core/governance/testdata/sql`, `TestE2EGovernanceSQL`,
+  `TestE2EServeAdmin`. Ver ADR 0007. Parche `QueryAccessPolicy.Intercept` commiteado en el fork (`3e26bf58`).
+- [ ] Subir a DuckDB 2.0 (esperar tag de duckdb-go con extensiones compatibles).
+
+## v0.2 — Almacenamiento S3
+
+- [x] `storage = "s3://bucket/prefix"` de punta a punta con RustFS (SQLite y Postgres como
+      catálogo): init → ingest → run → gc → serve (pg + http) como rol; bloqueo con
+      `allowed_directories` al prefijo (niega otro prefijo del mismo bucket); credenciales solo
+      por env, secretos TEMPORARY. Evidencia: `test/integration/s3_rustfs_test.go`.
+- [x] STS AssumeRole con política de sesión por prefijo (`[s3] role_arn`), renovación antes de
+      vencer (test con STS falso; en RustFS real falta esperar un vencimiento). Evidencia:
+      `TestS3STSScopedCredentials`, `core/s3conn`.
+- [x] Migración `./lake` → `s3://` con `rclone sync` + cambiar `storage`. Evidencia:
+      `TestS3MigrateFromLocal`.
+- [ ] Job de CI con `test-integration` (Podman + RustFS).
 
 ## Después de v0.1 (sin orden aún)
 

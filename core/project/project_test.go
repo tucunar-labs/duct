@@ -159,3 +159,58 @@ func TestLoadRejectsBadPostgresCatalog(t *testing.T) {
 		t.Fatal("a Postgres catalog without database must be rejected")
 	}
 }
+
+func TestScaffoldS3AndEnv(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "p")
+	off := false
+	p, _, err := ScaffoldWith(root, ScaffoldOptions{Storage: "s3://lake/prod", S3: S3Config{Endpoint: "127.0.0.1:9000", UseSSL: &off}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "lake")); err == nil {
+		t.Error("s3 storage must not create lake/")
+	}
+	if !p.StorageIsS3() || p.DataPath() != "s3://lake/prod" {
+		t.Fatalf("storage: %q", p.DataPath())
+	}
+	t.Setenv("DUCT_S3_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AK")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "SK")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("DUCT_S3_SECRET_ACCESS_KEY", "")
+	c, ok, err := p.S3()
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if c.Endpoint != "127.0.0.1:9000" || c.UseSSL || c.URLStyle != "path" || c.KeyID != "AK" || c.Secret != "SK" {
+		t.Errorf("config: %+v", c)
+	}
+	// DUCT_S3_* wins over AWS_* and over duct.toml.
+	t.Setenv("DUCT_S3_ACCESS_KEY_ID", "DK")
+	t.Setenv("DUCT_S3_ENDPOINT", "other:1")
+	t.Setenv("DUCT_S3_USE_SSL", "true")
+	c, _, _ = p.S3()
+	if c.KeyID != "DK" || c.Endpoint != "other:1" || !c.UseSSL {
+		t.Errorf("env override: %+v", c)
+	}
+	toml, _ := os.ReadFile(filepath.Join(root, ConfigFile))
+	for _, secret := range []string{"AK", "SK", "DK"} {
+		if strings.Contains(string(toml), secret) {
+			t.Errorf("duct.toml holds credential %s", secret)
+		}
+	}
+	cfg := p.EngineConfig(true)
+	if _, ok := cfg["s3"]; !ok || cfg["data_path"] != "s3://lake/prod" {
+		t.Errorf("engine config: %v", cfg)
+	}
+	if err := os.WriteFile(filepath.Join(root, ConfigFile), []byte("storage = \"gs://b/p\"\ncatalog = \".duct/catalog.sqlite\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(root); err == nil {
+		t.Error("gs:// storage accepted")
+	}
+	local, _ := Scaffold(filepath.Join(t.TempDir(), "l"))
+	if _, ok := local.EngineConfig(false)["s3"]; ok {
+		t.Error("local project got an s3 config")
+	}
+}

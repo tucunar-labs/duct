@@ -114,7 +114,8 @@ func (s *Store) viewSQL(ctx context.Context, role, schema, table string, cols []
 	base := ident(schema) + "." + ident(table)
 	inner := "SELECT * FROM " + base
 	if len(filters) > 0 {
-		inner += " WHERE (" + filters[0][0] + ")"
+		// The newline closes a trailing -- comment before the parenthesis.
+		inner += " WHERE (" + filters[0][0] + "\n)"
 	}
 	// The mask expressions read the base columns (the row filter's subquery
 	// has no aliases to shadow them).
@@ -123,7 +124,7 @@ func (s *Store) viewSQL(ctx context.Context, role, schema, table string, cols []
 		parts := make([]string, len(cols))
 		for i, c := range cols {
 			if e, ok := maskOf[strings.ToLower(c)]; ok {
-				parts[i] = "(" + e + ") AS " + ident(c)
+				parts[i] = "(" + e + "\n) AS " + ident(c)
 			} else {
 				parts[i] = ident(c)
 			}

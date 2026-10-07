@@ -1,0 +1,7 @@
+{
+  "kind": "set_mask",
+  "role": "analistas",
+  "relation": "gold.ventas",
+  "column": "rut",
+  "expr": "'***' || right(rut, 2)"
+}

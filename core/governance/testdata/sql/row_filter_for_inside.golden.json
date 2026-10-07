@@ -1,0 +1,6 @@
+{
+  "kind": "set_row_filter",
+  "role": "analistas",
+  "relation": "gold.ventas",
+  "expr": "substring(region FROM 1 FOR 2) = 'CL' -- FOR ROLE otro"
+}

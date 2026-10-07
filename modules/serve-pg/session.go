@@ -18,6 +18,7 @@ import (
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/pgconn"
+	"github.com/alonsoburon/duct/core/s3conn"
 )
 
 // duckgresCatalog is the catalog name duckgres' policy and metadata layer
@@ -28,9 +29,20 @@ const duckgresCatalog = "ducklake"
 type lake struct {
 	catalog  string // abs path of the DuckLake SQLite metadata, or a postgres connection string
 	pg       pgconn.Params
-	dataPath string // abs local directory
+	dataPath string // abs local directory, or s3://bucket/prefix
 	busyMS   int
+
+	// s3:// data_path: connection, the allowed_directories entry, and the
+	// provider of (read-only, prefix-scoped when STS is on) credentials.
+	s3       s3conn.Config
+	s3Scope  string
+	provider *s3conn.Provider
 }
+
+func (l lake) remote() bool { return l.provider != nil }
+
+// scrub removes the Postgres password and the S3 credentials from text.
+func (l lake) scrub(text string) string { return l.pg.Redact(l.s3.Redact(text)) }
 
 func parseLake(cfg contract.Config) (lake, error) {
 	l := lake{busyMS: 5000}
@@ -40,7 +52,29 @@ func parseLake(cfg contract.Config) (lake, error) {
 		return l, errors.New("serve-pg: catalog and data_path are required (`duct serve` sets them)")
 	}
 	if strings.Contains(l.dataPath, "://") {
-		return l, errors.New("serve-pg: a remote data_path is not supported yet (locked mode needs httpfs + secrets)")
+		var err error
+		if l.s3Scope, err = s3conn.Scope(l.dataPath); err != nil {
+			return l, fmt.Errorf("serve-pg: %w (only s3:// is supported as remote data_path)", err)
+		}
+		if msg, _ := cfg["s3_error"].(string); msg != "" {
+			return l, errors.New("serve-pg: s3 config: " + msg)
+		}
+		s3, ok := cfg["s3"].(s3conn.Config)
+		if !ok {
+			return l, errors.New("serve-pg: an s3:// data_path needs the s3 key (`duct serve` sets it)")
+		}
+		l.s3 = s3
+		if l.provider, err = s3conn.NewProvider(s3, l.dataPath, true); err != nil {
+			return l, fmt.Errorf("serve-pg: %w", err)
+		}
+		if pgconn.IsDSN(l.catalog) {
+			if l.pg, err = pgconn.Parse(l.catalog); err != nil {
+				return l, fmt.Errorf("serve-pg: catalog: %w", err)
+			}
+		} else if !filepath.IsAbs(l.catalog) {
+			return l, errors.New("serve-pg: catalog must be an absolute path or a postgres connection string")
+		}
+		return l, nil
 	}
 	if pgconn.IsDSN(l.catalog) {
 		var err error
@@ -87,21 +121,32 @@ func openSession(ctx context.Context, l lake, c sessionConfig) (*sql.DB, error) 
 		fmt.Sprintf("SET threads = %d", c.threads),
 		"INSTALL ducklake", "LOAD ducklake", "INSTALL sqlite_scanner", "LOAD sqlite_scanner",
 	}
+	const opts = "OVERRIDE_DATA_PATH true, " // the lake may have moved to s3://
+	if l.remote() {
+		cr, err := l.provider.Credentials(ctx)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		// Temporary secret (persistent ones are disabled); the data path is
+		// remote, so the catalog keeps the URL as is.
+		stmts = append(stmts, "INSTALL httpfs", "LOAD httpfs", l.s3.SecretSQL(cr))
+	}
 	if l.pg != nil {
 		// Temporary secret: the only way to reach Postgres with persistent
 		// secrets disabled. Errors are scrubbed of the password below.
 		stmts = append(stmts, "INSTALL postgres", "LOAD postgres", l.pg.SecretSQL("duct_pg_catalog"),
-			fmt.Sprintf("ATTACH 'ducklake:postgres:' AS %s (DATA_PATH %s, OVERRIDE_DATA_PATH true, READ_ONLY, META_SECRET duct_pg_catalog)",
-				duckgresCatalog, quote(l.dataPath)))
+			fmt.Sprintf("ATTACH 'ducklake:postgres:' AS %s (DATA_PATH %s, %sREAD_ONLY, META_SECRET duct_pg_catalog)",
+				duckgresCatalog, quote(l.dataPath), opts))
 	} else {
-		stmts = append(stmts, fmt.Sprintf("ATTACH %s AS %s (DATA_PATH %s, OVERRIDE_DATA_PATH true, READ_ONLY, BUSY_TIMEOUT %d)",
-			quote("ducklake:sqlite:"+l.catalog), duckgresCatalog, quote(l.dataPath), l.busyMS))
+		stmts = append(stmts, fmt.Sprintf("ATTACH %s AS %s (DATA_PATH %s, %sREAD_ONLY, BUSY_TIMEOUT %d)",
+			quote("ducklake:sqlite:"+l.catalog), duckgresCatalog, quote(l.dataPath), opts, l.busyMS))
 	}
 	stmts = append(stmts, "USE "+duckgresCatalog)
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("%s: %s", strings.Fields(s)[0], l.pg.Redact(err.Error()))
+			return nil, fmt.Errorf("%s: %s", strings.Fields(s)[0], l.scrub(err.Error()))
 		}
 	}
 	return db, nil
@@ -111,8 +156,12 @@ func openSession(ctx context.Context, l lake, c sessionConfig) (*sql.DB, error) 
 // before enable_external_access=false, then secrets, extensions, and the
 // configuration lock last.
 func lockDown(ctx context.Context, db *sql.DB, l lake) error {
+	dir := l.dataPath + "/"
+	if l.remote() {
+		dir = l.s3Scope
+	}
 	for _, s := range []string{
-		"SET allowed_directories = [" + quote(l.dataPath+"/") + "]",
+		"SET allowed_directories = [" + quote(dir) + "]",
 		"SET enable_external_access = false",
 		"SET autoinstall_known_extensions = false",
 		"SET autoload_known_extensions = false",
@@ -123,6 +172,34 @@ func lockDown(ctx context.Context, db *sql.DB, l lake) error {
 		}
 	}
 	return nil
+}
+
+// keepS3Fresh renews the STS credentials of a long session's S3 secret until
+// ctx ends (CREATE SECRET stays allowed after the lock, ADR 0007).
+func keepS3Fresh(ctx context.Context, db *sql.DB, l lake) {
+	if !l.remote() || !l.provider.Temporary() {
+		return
+	}
+	last := ""
+	if cr, err := l.provider.Credentials(ctx); err == nil {
+		last = cr.SessionToken
+	}
+	tk := time.NewTicker(30 * time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+		}
+		cr, err := l.provider.Credentials(ctx)
+		if err != nil || cr.SessionToken == last {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, l.s3.SecretSQL(cr)); err == nil {
+			last = cr.SessionToken
+		}
+	}
 }
 
 var pidSeq = func(s *Server) int32 { return s.pids.Add(1) }
@@ -143,6 +220,9 @@ func (s *Server) session(ctx context.Context, conn net.Conn, r *bufio.Reader, w 
 	}
 	exec := server.NewLocalExecutor(db)
 	defer func() { _ = exec.Close() }()
+	sctx, stopFresh := context.WithCancel(ctx)
+	defer stopFresh()
+	go keepS3Fresh(sctx, db, s.lake)
 
 	schema := contract.RoleSchema(id.Role)
 	err = sessionmeta.InitSessionDatabaseMetadataWithAccess(initCtx, exec, duckgresCatalog,
@@ -160,6 +240,7 @@ func (s *Server) session(ctx context.Context, conn net.Conn, r *bufio.Reader, w 
 		AllowedSchemas: []string{schema},
 		DefaultSchema:  schema,
 		RelationExists: server.NewRelationLookup(exec, duckgresCatalog),
+		Intercept:      s.intercept(ctx, id),
 	}
 
 	pid, key := pidSeq(s), server.GenerateSecretKey()
@@ -180,4 +261,33 @@ func (s *Server) session(ctx context.Context, conn net.Conn, r *bufio.Reader, w 
 		slog.Debug("serve-pg: session ended", "user", id.User, "error", err)
 	}
 	_ = server.CloseConnectionMetrics(cc)
+}
+
+// adminMarker prefixes the constant SELECT that stands for an administrative
+// statement's result, so the audit hook can tell it from a user statement.
+const adminMarker = "/*duct:admin*/ "
+
+// intercept hands governance statements (CREATE ROLE, GRANT, ALTER TABLE ...
+// SET ROW FILTER, ...) to the handler's Administrator before duckgres' policy
+// sees them: the handler runs them for an admin identity, refuses them for
+// anyone else, and answers with a constant SELECT that is returned instead.
+// The successful statement is audited here with its original text.
+func (s *Server) intercept(ctx context.Context, id contract.Identity) func(string) (string, bool, error) {
+	ap := s.admin.Load()
+	if ap == nil {
+		return nil
+	}
+	return func(query string) (string, bool, error) {
+		start := time.Now()
+		repl, handled, err := (*ap).Administer(ctx, id, query)
+		if !handled || err != nil {
+			return "", handled, err // a refusal or failure is audited by duckgres' hook
+		}
+		if au := s.auditor.Load(); au != nil {
+			(*au).Audit(context.Background(), contract.AuditRecord{
+				At: start.UTC(), User: id.User, Role: id.Role, Protocol: name, SQL: query, Duration: time.Since(start),
+			})
+		}
+		return adminMarker + repl, true, nil
+	}
 }

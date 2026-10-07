@@ -1,0 +1,1 @@
+ALTER TABLE gold.ventas DROP ROW FILTER FOR ROLE analistas
