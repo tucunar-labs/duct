@@ -38,7 +38,7 @@ func cmdSQL(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		if err != nil {
 			return err
 		}
-		eng, err := openEngine(ctx, p, *locked)
+		eng, err := openEngineUDF(ctx, p, *locked)
 		if err != nil {
 			return err
 		}

@@ -319,6 +319,7 @@ func (r *Runner) dispatch(ctx context.Context, rule Rule, t Transition, wg *sync
 		ds := r.Channels.Send(dctx, rule.Channels, contract.Alert{
 			Rule: rule.Name, Key: t.Key, State: t.State, Message: t.Message, Labels: labels, At: t.At})
 		sum, ok := Summary(ds)
+		observeTransition(rule, t, ok)
 		e := Entry{Transition: t, Severity: rule.Severity, Channels: sum, Delivered: ok}
 		if !ok {
 			r.Log.Warn("alert not delivered", "rule", rule.Name, "key", t.Key, "state", t.State, "detail", sum)

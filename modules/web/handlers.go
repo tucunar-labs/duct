@@ -22,17 +22,18 @@ const (
 )
 
 type appConfig struct {
-	rowLimit     int
-	queryTimeout time.Duration
-	sessionTTL   time.Duration // absolute session timeout
-	idleTimeout  time.Duration // 0: default (2h, capped to sessionTTL)
-	keys         [][]byte      // session keys, current first; none: ephemeral
-	secure       *bool         // nil: decide per request
-	trustProxy   bool          // honour X-Forwarded-For for the client IP
-	userMax      int           // failed logins per username before lockout (0: 5)
-	ipMax        int           // failed logins per client IP before lockout (0: 20)
-	lockout      time.Duration // base lockout (0: 15m), doubles on repeats
-	minLoginTime time.Duration // floor for failed-login latency
+	rowLimit      int
+	queryTimeout  time.Duration
+	sessionTTL    time.Duration // absolute session timeout
+	idleTimeout   time.Duration // 0: default (2h, capped to sessionTTL)
+	keys          [][]byte      // session keys, current first; none: ephemeral
+	secure        *bool         // nil: decide per request
+	trustProxy    bool          // honour X-Forwarded-For for the client IP
+	userMax       int           // failed logins per username before lockout (0: 5)
+	ipMax         int           // failed logins per client IP before lockout (0: 20)
+	lockout       time.Duration // base lockout (0: 15m), doubles on repeats
+	minLoginTime  time.Duration // floor for failed-login latency
+	dashboardsDir string        // dashboards/*.yaml ("": none)
 }
 
 type app struct {
@@ -42,6 +43,8 @@ type app struct {
 	store  *sessions
 	limit  *loginLimiter
 	assets assets
+	// chartCache holds dashboard query results per (lake snapshot, role, request).
+	chartCache *lru
 }
 
 func newApp(q contract.QueryHandler, auth contract.AuthProvider, cfg appConfig) *app {
@@ -61,7 +64,7 @@ func newApp(q contract.QueryHandler, auth contract.AuthProvider, cfg appConfig) 
 	if err != nil { // keys are validated in Init; this only guards direct callers
 		panic("web: " + err.Error())
 	}
-	return &app{q: q, auth: auth, cfg: cfg, store: store, limit: newLoginLimiter(cfg.userMax, cfg.ipMax, cfg.lockout), assets: newAssets()}
+	return &app{q: q, auth: auth, cfg: cfg, store: store, limit: newLoginLimiter(cfg.userMax, cfg.ipMax, cfg.lockout), assets: newAssets(), chartCache: newLRU(cacheEntries, cacheBytes)}
 }
 
 func (a *app) routes() http.Handler {
@@ -76,6 +79,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /catalog", a.authed(a.catalog))
 	mux.HandleFunc("GET /sql", a.authed(a.sqlEditor))
 	mux.HandleFunc("POST /sql/run", a.authed(a.sqlRun))
+	mux.HandleFunc("GET /dashboards", a.authed(a.dashList))
+	mux.HandleFunc("GET /dashboards/{name}", a.authed(a.dashView))
+	mux.HandleFunc("POST /dashboards/{name}/data", a.authed(a.dashData))
 	return securityHeaders(sameOrigin(mux))
 }
 
@@ -295,7 +301,8 @@ func (a *app) catalog(w http.ResponseWriter, r *http.Request, sess session) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_ = catalogPage(a.page(sess, "Catálogo", "catalog"), schemas, msg).Render(r.Context(), w)
+	links, _ := a.dashboardLinks()
+	_ = catalogPage(a.page(sess, "Catálogo", "catalog"), schemas, msg, links).Render(r.Context(), w)
 }
 
 func (a *app) sqlEditor(w http.ResponseWriter, r *http.Request, sess session) {

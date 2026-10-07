@@ -38,8 +38,10 @@ type kafkaBroker struct {
 
 func startKafka(t *testing.T) *kafkaBroker {
 	t.Helper()
-	if b := os.Getenv("DUCT_TEST_KAFKA_BROKER"); b != "" {
-		return &kafkaBroker{addr: b}
+	for _, name := range []string{"DUCT_TEST_KAFKA_BROKERS", "DUCT_TEST_KAFKA_BROKER"} {
+		if b := os.Getenv(name); b != "" {
+			return waitKafka(t, &kafkaBroker{addr: strings.Split(b, ",")[0]}, 60*time.Second)
+		}
 	}
 	if _, err := exec.LookPath("podman"); err != nil {
 		t.Skip("podman not available")
@@ -66,8 +68,13 @@ func startKafka(t *testing.T) *kafkaBroker {
 		"-e", "KAFKA_AUTO_CREATE_TOPICS_ENABLE=false",
 		image)
 	t.Cleanup(func() { _ = exec.Command("podman", "rm", "-f", id).Run() })
-	b := &kafkaBroker{id: id, addr: fmt.Sprintf("127.0.0.1:%d", port)}
-	deadline := time.Now().Add(90 * time.Second)
+	return waitKafka(t, &kafkaBroker{id: id, addr: fmt.Sprintf("127.0.0.1:%d", port)}, 90*time.Second)
+}
+
+// waitKafka waits until the broker answers a metadata request.
+func waitKafka(t *testing.T, b *kafkaBroker, within time.Duration) *kafkaBroker {
+	t.Helper()
+	deadline := time.Now().Add(within)
 	for {
 		cl, err := kgo.NewClient(kgo.SeedBrokers(b.addr))
 		if err == nil {
@@ -80,7 +87,11 @@ func startKafka(t *testing.T) *kafkaBroker {
 			}
 		}
 		if time.Now().After(deadline) {
-			logs, _ := exec.Command("podman", "logs", "--tail", "30", id).CombinedOutput()
+			logs := ""
+			if b.id != "" {
+				out, _ := exec.Command("podman", "logs", "--tail", "30", b.id).CombinedOutput()
+				logs = string(out)
+			}
 			t.Fatalf("kafka did not start: %v\n%s", err, logs)
 		}
 		time.Sleep(time.Second)
@@ -116,30 +127,74 @@ func (b *kafkaBroker) createTopic(t *testing.T, topic string, partitions int32) 
 	}
 }
 
-// groupLag is the total lag of a consumer group as the broker's own tool
-// reports it (-1 if the group has no committed offsets). Needs the container.
+// groupLag is the total lag of a consumer group (log end offset minus the
+// committed offset, summed over its partitions), asked over the Kafka protocol
+// so it works with a Podman broker and with an external one. -1 if the group
+// has no committed offsets.
 func (b *kafkaBroker) groupLag(t *testing.T, group string) int64 {
 	t.Helper()
-	if b.id == "" {
-		t.Skip("lag check needs the Podman broker")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cl := b.client(t)
+	req := kmsg.NewPtrOffsetFetchRequest()
+	req.Group = group // v0-v7
+	g := kmsg.NewOffsetFetchRequestGroup()
+	g.Group = group // v8+; no topics = every committed topic
+	req.Groups = append(req.Groups, g)
+	resp, err := req.RequestWith(ctx, cl)
+	if err != nil {
+		t.Fatalf("offset fetch: %v", err)
 	}
-	out, _ := exec.Command("podman", "exec", b.id, "/opt/kafka/bin/kafka-consumer-groups.sh",
-		"--bootstrap-server", b.addr, "--describe", "--group", group).CombinedOutput()
-	total, rows := int64(0), 0
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 6 || f[0] != group {
+	type tp struct {
+		topic string
+		part  int32
+	}
+	committed := map[tp]int64{}
+	for _, tt := range resp.Topics {
+		for _, p := range tt.Partitions {
+			committed[tp{tt.Topic, p.Partition}] = p.Offset
+		}
+	}
+	for _, gr := range resp.Groups {
+		for _, tt := range gr.Topics {
+			for _, p := range tt.Partitions {
+				committed[tp{tt.Topic, p.Partition}] = p.Offset
+			}
+		}
+	}
+	lreq := kmsg.NewPtrListOffsetsRequest()
+	lreq.ReplicaID = -1
+	byTopic := map[string]*kmsg.ListOffsetsRequestTopic{}
+	for k, off := range committed {
+		if off < 0 {
 			continue
 		}
-		n, err := strconv.ParseInt(f[5], 10, 64)
-		if err != nil { // "-" : no commit yet
-			return -1
+		rt := byTopic[k.topic]
+		if rt == nil {
+			t := kmsg.NewListOffsetsRequestTopic()
+			t.Topic = k.topic
+			rt = &t
+			byTopic[k.topic] = rt
 		}
-		total += n
-		rows++
+		p := kmsg.NewListOffsetsRequestTopicPartition()
+		p.Partition, p.Timestamp = k.part, -1 // latest
+		rt.Partitions = append(rt.Partitions, p)
 	}
-	if rows == 0 {
+	if len(byTopic) == 0 {
 		return -1
+	}
+	for _, rt := range byTopic {
+		lreq.Topics = append(lreq.Topics, *rt)
+	}
+	lresp, err := lreq.RequestWith(ctx, cl)
+	if err != nil {
+		t.Fatalf("list offsets: %v", err)
+	}
+	var total int64
+	for _, tt := range lresp.Topics {
+		for _, p := range tt.Partitions {
+			total += p.Offset - committed[tp{tt.Topic, p.Partition}]
+		}
 	}
 	return total
 }

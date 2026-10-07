@@ -1,0 +1,405 @@
+openapi: 3.0.3
+info:
+  title: Duct admin API
+  version: "1"
+  description: |
+    Admin API of `duct serve` (ADR 0013), served by the HTTP protocol under
+    `/admin/v1`. Every call authenticates with a Bearer token (`duct token`
+    or POST /tokens) or HTTP Basic, and the identity must have the
+    `duct_admin` role: no credentials is 401, another role is 403. Every call
+    is audited (protocol `admin`, table `duct.duct_audit`). Secrets (tokens,
+    temporary passwords) appear only in the response of the call that created
+    them. Errors are `{"error": "..."}`.
+    Next to it, unauthenticated: `GET /healthz` (liveness), `GET /readyz`
+    (catalog reachable and storage writable; 200 or 503) and `GET /metrics`
+    (Prometheus text).
+servers:
+  - url: http://127.0.0.1:8123
+security:
+  - bearer: []
+  - basic: []
+paths:
+  /admin/v1/status:
+    get:
+      summary: Versions, catalog, storage, migrations, last snapshot, component health
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/v1/users:
+    get:
+      summary: List users
+      responses:
+        "200":
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users: { type: array, items: { $ref: "#/components/schemas/User" } }
+    post:
+      summary: Create a user
+      description: Without `password` the user gets a random one, returned once as `temporary_password`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, role]
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                role: { type: string }
+                password: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  role: { type: string }
+                  temporary_password: { type: string, description: "Only when no password was given." }
+        "404": { description: The role does not exist }
+        "409": { description: The user exists }
+  /admin/v1/users/{name}:
+    parameters: [{ $ref: "#/components/parameters/name" }]
+    get:
+      summary: One user
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { description: Unknown user }
+    delete:
+      summary: Delete a user and its tokens
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Unknown user }
+        "409": { description: An admin cannot delete themselves }
+  /admin/v1/users/{name}/disable:
+    parameters: [{ $ref: "#/components/parameters/name" }]
+    post:
+      summary: Disable a user (its tokens stop working too)
+      responses:
+        "200": { description: Disabled }
+        "409": { description: An admin cannot disable themselves }
+  /admin/v1/users/{name}/enable:
+    parameters: [{ $ref: "#/components/parameters/name" }]
+    post:
+      summary: Enable a user
+      responses:
+        "200": { description: Enabled }
+  /admin/v1/users/{name}/password-reset:
+    parameters: [{ $ref: "#/components/parameters/name" }]
+    post:
+      summary: Set a new random password and return it once
+      description: Open sessions and tokens are not touched; revoke tokens separately after a compromise.
+      responses:
+        "200":
+          description: The one-time password
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  temporary_password: { type: string }
+  /admin/v1/users/{name}/role:
+    parameters: [{ $ref: "#/components/parameters/name" }]
+    put:
+      summary: Move a user to another role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties: { role: { type: string } }
+      responses:
+        "200": { description: Updated }
+  /admin/v1/roles:
+    get:
+      summary: List roles with grants, row filters and masks
+      responses:
+        "200":
+          description: Roles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roles: { type: array, items: { $ref: "#/components/schemas/Role" } }
+    post:
+      summary: Create a role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties: { name: { type: string } }
+      responses:
+        "201": { description: Created }
+        "409": { description: The role exists }
+  /admin/v1/roles/{role}:
+    parameters: [{ $ref: "#/components/parameters/role" }]
+    delete:
+      summary: Delete a role (refused while it has users, and for duct_admin)
+      responses:
+        "204": { description: Deleted }
+        "409": { description: The role still has users }
+  /admin/v1/roles/{role}/grants:
+    parameters: [{ $ref: "#/components/parameters/role" }]
+    get:
+      summary: Grants, row filters and masks of a role
+      responses:
+        "200":
+          description: Role
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Role" }
+        "404": { description: Unknown role }
+  /admin/v1/roles/{role}/grants/{relation}:
+    parameters:
+      - { $ref: "#/components/parameters/role" }
+      - { $ref: "#/components/parameters/relation" }
+    put:
+      summary: GRANT SELECT on a table to the role (idempotent)
+      responses:
+        "200": { description: Granted }
+        "404": { description: Unknown role or table }
+    delete:
+      summary: REVOKE (drops the role's row filter and masks on that table)
+      responses:
+        "204": { description: Revoked }
+  /admin/v1/roles/{role}/grants/{relation}/row-filter:
+    parameters:
+      - { $ref: "#/components/parameters/role" }
+      - { $ref: "#/components/parameters/relation" }
+    put:
+      summary: Set the row filter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [predicate]
+              properties: { predicate: { type: string, example: "region = 'CL'" } }
+      responses:
+        "200": { description: Set }
+        "400": { description: The predicate does not parse or bind }
+    delete:
+      summary: Drop the row filter
+      responses:
+        "204": { description: Dropped }
+  /admin/v1/roles/{role}/grants/{relation}/masks/{column}:
+    parameters:
+      - { $ref: "#/components/parameters/role" }
+      - { $ref: "#/components/parameters/relation" }
+      - { name: column, in: path, required: true, schema: { type: string } }
+    put:
+      summary: Set a column mask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expr]
+              properties: { expr: { type: string, example: "'***'" } }
+      responses:
+        "200": { description: Set }
+    delete:
+      summary: Drop the mask
+      responses:
+        "204": { description: Dropped }
+  /admin/v1/tokens:
+    get:
+      summary: List tokens (never their secrets)
+      parameters:
+        - { name: user, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens: { type: array, items: { $ref: "#/components/schemas/Token" } }
+    post:
+      summary: Create a token; the secret is returned once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { type: string }
+                label: { type: string }
+                ttl_seconds: { type: integer, minimum: 0, description: "0 or absent: no expiry." }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  user: { type: string }
+                  label: { type: string }
+                  token: { type: string, description: "dct_..., shown once." }
+                  expires_in_seconds: { type: integer }
+  /admin/v1/tokens/{id}:
+    delete:
+      summary: Revoke a token
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Revoked }
+        "404": { description: Unknown token }
+  /admin/v1/quotas:
+    get:
+      summary: List quotas
+      responses:
+        "200":
+          description: Quotas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quotas: { type: array, items: { $ref: "#/components/schemas/Quota" } }
+  /admin/v1/quotas/{role}:
+    parameters: [{ $ref: "#/components/parameters/role" }]
+    put:
+      summary: Set the quota of a role (replaces it; null or absent = unlimited)
+      description: |
+        `max_concurrent`: statements of the role running at once in this
+        process (429 beyond it). `max_rows`: rows one statement may return (the
+        statement is cut with 429 before the batch that would cross it). Enforced
+        for HTTP, MCP and web; the Postgres wire protocol runs its own DuckDB
+        session and is not covered. A change applies at once in this server.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                max_concurrent: { type: integer, minimum: 1, nullable: true }
+                max_rows: { type: integer, minimum: 1, nullable: true }
+      responses:
+        "200":
+          description: Set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Quota" }
+        "404": { description: Unknown role }
+    delete:
+      summary: Remove the quota
+      responses:
+        "204": { description: Removed }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+    basic: { type: http, scheme: basic }
+  parameters:
+    name: { name: name, in: path, required: true, schema: { type: string } }
+    role: { name: role, in: path, required: true, schema: { type: string } }
+    relation:
+      name: relation
+      in: path
+      required: true
+      description: schema.table
+      schema: { type: string, example: gold.customers }
+  responses:
+    Unauthenticated:
+      description: No or wrong credentials
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: The identity is not duct_admin
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  schemas:
+    Error:
+      type: object
+      properties: { error: { type: string } }
+    User:
+      type: object
+      properties:
+        name: { type: string }
+        role: { type: string }
+        disabled: { type: boolean }
+    Role:
+      type: object
+      properties:
+        name: { type: string }
+        users: { type: integer }
+        grants: { type: array, items: { type: string } }
+        row_filters: { type: object, additionalProperties: { type: string } }
+        masks: { type: object, additionalProperties: { type: string }, description: "schema.table.column -> expression" }
+    Token:
+      type: object
+      properties:
+        id: { type: string }
+        user: { type: string }
+        label: { type: string }
+        created_at: { type: string }
+        expires_at: { type: string }
+        revoked: { type: boolean }
+    Quota:
+      type: object
+      properties:
+        role: { type: string }
+        max_concurrent: { type: integer, nullable: true }
+        max_rows: { type: integer, nullable: true }
+    Status:
+      type: object
+      properties:
+        version: { type: string }
+        go: { type: string }
+        duckdb: { type: string }
+        uptime_seconds: { type: integer }
+        catalog:
+          type: object
+          properties:
+            type: { type: string, enum: [sqlite, postgres] }
+            ref: { type: string, description: "Path or user@host:port/db, never a password." }
+        storage:
+          type: object
+          properties:
+            kind: { type: string, enum: [local, s3] }
+            path: { type: string }
+        migrations:
+          type: object
+          properties:
+            applied: { type: array, items: { type: integer } }
+            latest: { type: integer }
+            pending: { type: array, items: { type: integer } }
+        snapshot:
+          type: object
+          properties:
+            id: { type: integer }
+            time: { type: string }
+        components:
+          type: object
+          description: "jobs, stream and alerts, each with `configured` and `health` (ok, degraded, firing, idle, disabled)."
+          additionalProperties: true

@@ -51,6 +51,7 @@ type Engine struct {
 	closed bool
 	stop   context.CancelFunc // stops the STS credential refresher
 	done   chan struct{}
+	udfs   []func() error // Close hooks of registered scalar functions (udf.go)
 }
 
 var _ contract.Engine = (*Engine)(nil)
@@ -708,5 +709,9 @@ func (e *Engine) Close() error {
 		e.stop()
 		<-e.done
 	}
-	return e.db.Close()
+	err := e.db.Close()
+	for _, f := range e.udfs {
+		err = errors.Join(err, f())
+	}
+	return err
 }

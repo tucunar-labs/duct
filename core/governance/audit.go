@@ -2,11 +2,14 @@ package governance
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/metrics"
 )
 
 // AuditTable is the Duct-owned table with one row per audited statement.
@@ -35,7 +38,37 @@ func newAuditLog(eng contract.Engine) *auditLog {
 	return a
 }
 
+var (
+	queriesTotal = metrics.Default().Counter("duct_queries_total", "Statements by protocol and outcome (ok, error, denied, quota).", "protocol", "status")
+	queryTime    = metrics.Default().Histogram("duct_query_duration_seconds", "Statement duration by protocol, from authorisation to the last row.", nil, "protocol")
+	rowsReturned = metrics.Default().Counter("duct_rows_returned_total", "Rows returned to clients by protocol.", "protocol")
+)
+
+// observe counts one audited statement.
+func observe(rec contract.AuditRecord) {
+	proto := rec.Protocol
+	if proto == "" {
+		proto = "unknown"
+	}
+	status := "ok"
+	switch {
+	case rec.Err == "":
+	case strings.HasPrefix(rec.Err, "permission denied"):
+		status = "denied"
+	case IsQuotaError(errors.New(rec.Err)):
+		status = "quota"
+	default:
+		status = "error"
+	}
+	queriesTotal.Inc(proto, status)
+	queryTime.Observe(rec.Duration.Seconds(), proto)
+	if rec.Rows > 0 {
+		rowsReturned.Add(float64(rec.Rows), proto)
+	}
+}
+
 func (a *auditLog) add(rec contract.AuditRecord) {
+	observe(rec)
 	if len(rec.SQL) > maxAuditSQL {
 		rec.SQL = rec.SQL[:maxAuditSQL] + "…"
 	}

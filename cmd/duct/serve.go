@@ -14,9 +14,12 @@ import (
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/dashboards"
 	"github.com/alonsoburon/duct/core/governance"
 	"github.com/alonsoburon/duct/core/project"
 	"github.com/alonsoburon/duct/core/registry"
+	"github.com/alonsoburon/duct/core/semantic"
+	"github.com/alonsoburon/duct/core/sharing"
 )
 
 // serveOptions override duct.toml's [serve] table.
@@ -24,6 +27,7 @@ type serveOptions struct {
 	Protocols []string          // empty: [serve].protocols, else every linked protocol
 	Listen    map[string]string // protocol -> address
 	NoJobs    bool              // do not run the jobs/ orchestrator in this process
+	NoStream  bool              // do not run [stream] / [alerts] in this process (embedded server of `duct notebook`)
 	// Ready is called once every protocol is bound, with protocol -> address.
 	Ready func(addrs map[string]string)
 }
@@ -83,6 +87,18 @@ func protocolNames(p *project.Project, opt serveOptions) ([]string, error) {
 			if m.Name == "mcp" && !hasSemanticModel(p) {
 				continue
 			}
+			// notebook runs user code: only when [serve.notebook] exists (or it is named).
+			if m.Name == "notebook" {
+				if _, ok := p.Config.Serve.Modules["notebook"]; !ok {
+					continue
+				}
+			}
+			// sharing only starts when [serve.sharing] exists (or --protocols names it).
+			if m.Name == "sharing" {
+				if _, ok := p.Config.Serve.Modules["sharing"]; !ok {
+					continue
+				}
+			}
 			names = append(names, m.Name)
 		}
 	}
@@ -139,14 +155,22 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 		return err
 	}
 
-	eng, err := openEngine(ctx, p, true)
+	eng, udfNames, err := openEngineUDFNames(ctx, p, true)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = eng.Close() }()
-	handler := governance.NewHandler(eng, governance.HandlerOptions{})
+	handler := governance.NewHandler(eng, governance.HandlerOptions{AdminOnlyFunctions: udfNames})
 	defer func() { _ = handler.Close() }()
 	auth := governance.NewStore(eng)
+	// The semantic model also serves dashboards (web) through the handler.
+	switch m, err := semantic.LoadDir(filepath.Join(p.Root, semanticDirName)); {
+	case err == nil:
+		handler.SetSemanticModel(m)
+	case errors.Is(err, semantic.ErrNoModel):
+	default:
+		return fmt.Errorf("semantic model: %w", err)
+	}
 
 	modCfg := func(name string) contract.Config {
 		cfg := contract.Config{}
@@ -162,6 +186,17 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 				cfg["semantic_dir"] = filepath.Join(p.Root, semanticDirName)
 			}
 		}
+		if name == "web" { // dashboards/*.yaml live in the project
+			if _, ok := cfg["dashboards_dir"]; !ok {
+				cfg["dashboards_dir"] = filepath.Join(p.Root, dashboards.Dir)
+			}
+		}
+		if name == "notebook" { // see notebookConfig (notebook.go)
+			notebookConfig(p, cfg)
+		}
+		if name == "sharing" { // copies live outside the lake; file URLs are signed with a persistent key
+			sharingConfig(p, cfg)
+		}
 		if name == "web" { // persistent web sessions survive restarts
 			if _, ok := cfg["session_key_file"]; !ok {
 				cfg["session_key_file"] = filepath.Join(filepath.Dir(p.StatePath()), "web_session.key")
@@ -169,8 +204,18 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 		}
 		return cfg
 	}
-	for i, proto := range protocols {
-		if err := proto.Init(ctx, modCfg(names[i])); err != nil {
+	for _, i := range initOrder(names) {
+		proto := protocols[i]
+		if eu, ok := proto.(sharing.EngineUser); ok {
+			eu.UseEngine(eng)
+		}
+		cfg := modCfg(names[i])
+		if names[i] == "notebook" { // the notebooks reach the lake through this server's HTTP protocol
+			if _, ok := cfg["duct_url"]; !ok {
+				cfg["duct_url"] = httpURLOf(p, names, protocols)
+			}
+		}
+		if err := proto.Init(ctx, cfg); err != nil {
 			for _, q := range protocols {
 				_ = q.Close()
 			}
@@ -182,6 +227,11 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 			_ = q.Close()
 		}
 	}()
+	byName := map[string]contract.Protocol{}
+	for i, proto := range protocols {
+		byName[names[i]] = proto
+	}
+	mountOperability(p, eng, handler, auth, byName) // /admin/v1, /readyz, DB-backed metrics
 	if opt.Ready != nil {
 		addrs := map[string]string{}
 		for i, proto := range protocols {
@@ -198,7 +248,10 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	if err != nil {
 		return fmt.Errorf("jobs: %w", err)
 	}
-	streamingDone := startStreaming(sctx, cancel, p) // [stream] / [alerts] in duct.toml
+	streamingDone := func() error { return nil }
+	if !opt.NoStream {
+		streamingDone = startStreaming(sctx, cancel, p) // [stream] / [alerts] in duct.toml
+	}
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex

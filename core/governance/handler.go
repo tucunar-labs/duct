@@ -16,6 +16,10 @@ import (
 type HandlerOptions struct {
 	// Timeout caps one statement (default 60 s; negative disables it).
 	Timeout time.Duration
+	// AdminOnlyFunctions are user-defined functions (functions/ of the project,
+	// ADR 0005): they run user code, so only the admin role may call them. Any
+	// other role gets "permission denied", whether or not the name resolves.
+	AdminOnlyFunctions []string
 }
 
 // Handler is the shared contract.QueryHandler of `duct serve`. It executes
@@ -32,6 +36,9 @@ type Handler struct {
 	audit *auditLog
 
 	adminMu sync.Mutex // serialises governance statements
+	quotas  quotaCache // per-role limits (quota.go)
+
+	semModel atomic.Pointer[semanticModel] // see semantic.go; nil: no model
 }
 
 var (
@@ -104,6 +111,10 @@ func (h *Handler) query(ctx context.Context, proto string, id contract.Identity,
 			return fail(err)
 		}
 	}
+	quota, release, err := h.quotas.admit(ctx, NewStore(h.eng), id.Role)
+	if err != nil {
+		return fail(err)
+	}
 	qctx, cancel := ctx, context.CancelFunc(func() {})
 	if h.opt.Timeout > 0 {
 		qctx, cancel = context.WithTimeout(ctx, h.opt.Timeout)
@@ -111,9 +122,13 @@ func (h *Handler) query(ctx context.Context, proto string, id contract.Identity,
 	st, err := h.eng.Query(qctx, rewritten)
 	if err != nil {
 		cancel()
+		release()
 		return fail(err)
 	}
-	s := &auditedStream{Stream: st, cancel: cancel, h: h, rec: rec, start: start}
+	s := &auditedStream{Stream: st, cancel: cancel, release: release, role: id.Role, h: h, rec: rec, start: start}
+	if quota.MaxRows != nil {
+		s.maxRows = *quota.MaxRows
+	}
 	s.refs.Store(1)
 	return s, nil
 }
@@ -139,7 +154,7 @@ func (h *Handler) authorize(ctx context.Context, id contract.Identity, sql strin
 	if err != nil {
 		return "", err
 	}
-	rewritten, err := p.rewrite(id.Role, views)
+	rewritten, err := p.rewrite(id.Role, views, h.deniedFunctionsFor(id))
 	if err != nil {
 		return "", err
 	}
@@ -193,14 +208,34 @@ type auditedStream struct {
 	rows   atomic.Int64
 	refs   atomic.Int64
 	once   sync.Once
+
+	release func() // gives back the role's concurrency slot
+	role    string
+	maxRows int64       // 0: unlimited
+	cut     atomic.Bool // the row quota stopped the stream
 }
 
 func (s *auditedStream) Next() bool {
 	ok := s.Stream.Next()
 	if ok {
-		s.rows.Add(s.Stream.RecordBatch().NumRows())
+		n := s.Stream.RecordBatch().NumRows()
+		if s.maxRows > 0 && s.rows.Load()+n > s.maxRows {
+			// The batch that would cross the limit is never delivered.
+			s.cut.Store(true)
+			quotaRejections.Inc("rows")
+			return false
+		}
+		s.rows.Add(n)
 	}
 	return ok
+}
+
+// Err reports the row quota before any error of the underlying stream.
+func (s *auditedStream) Err() error {
+	if s.cut.Load() {
+		return quotaErr("role %s may receive at most %d rows per statement", s.role, s.maxRows)
+	}
+	return s.Stream.Err()
 }
 
 func (s *auditedStream) Retain() {
@@ -216,6 +251,7 @@ func (s *auditedStream) Release() {
 	}
 	s.once.Do(func() {
 		s.cancel()
+		s.release()
 		s.rec.Rows = s.rows.Load()
 		s.rec.Duration = time.Since(s.start)
 		if err != nil {

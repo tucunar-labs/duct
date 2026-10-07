@@ -8,6 +8,9 @@
     "@codemirror/state": "6.7.6",
     "@codemirror/view": "6.43.13",
     "@lezer/highlight": "1.2.5",
-    "codemirror": "6.0.2"
+    "codemirror": "6.0.2",
+    "echarts": "6.1.0",
+    "tslib": "2.3.0",
+    "zrender": "6.1.0"
   }
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/metrics"
 )
 
 // Store reads and writes the governance tables through an Engine. It also is
@@ -326,14 +327,25 @@ func (s *Store) RevokeToken(ctx context.Context, id string) error {
 // Authenticate implements contract.AuthProvider. Schemes: "password"
 // (User + Secret) and "bearer" (Secret is a token; User is ignored).
 func (s *Store) Authenticate(ctx context.Context, c contract.Credentials) (contract.Identity, error) {
+	var (
+		id  contract.Identity
+		err error
+	)
 	switch c.Scheme {
 	case "password":
-		return s.byPassword(ctx, c.User, c.Secret)
+		id, err = s.byPassword(ctx, c.User, c.Secret)
 	case "bearer":
-		return s.byToken(ctx, c.Secret)
+		id, err = s.byToken(ctx, c.Secret)
+	default:
+		err = fmt.Errorf("%w: unsupported scheme %q", contract.ErrUnauthenticated, c.Scheme)
 	}
-	return contract.Identity{}, fmt.Errorf("%w: unsupported scheme %q", contract.ErrUnauthenticated, c.Scheme)
+	if errors.Is(err, contract.ErrUnauthenticated) {
+		authFailures.Inc(c.Scheme)
+	}
+	return id, err
 }
+
+var authFailures = metrics.Default().Counter("duct_auth_failures_total", "Logins refused (bad or missing credentials, disabled user, revoked or expired token), by scheme.", "scheme")
 
 func (s *Store) byPassword(ctx context.Context, user, password string) (contract.Identity, error) {
 	if !userRe.MatchString(user) {

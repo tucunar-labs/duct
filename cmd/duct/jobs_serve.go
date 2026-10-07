@@ -30,7 +30,7 @@ func startJobs(ctx context.Context, p *project.Project, httpURL string, noJobs b
 		close(done)
 		return done, err
 	}
-	eng, err := openEngine(ctx, p, false) // tasks write the lake: not the locked serving engine
+	eng, err := openEngineUDF(ctx, p, false) // tasks write the lake: not the locked serving engine
 	if err != nil {
 		close(done)
 		return done, err

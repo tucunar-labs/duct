@@ -11,6 +11,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/metrics"
 	"github.com/alonsoburon/duct/core/registry"
 	"github.com/alonsoburon/duct/core/txretry"
 )
@@ -25,6 +26,20 @@ type Result struct {
 
 const stageTable = "duct_stage"
 
+var (
+	ingestRuns = metrics.Default().Counter("duct_ingest_runs_total", "Ingestions run by this process, by outcome.", "status")
+	ingestRows = metrics.Default().Counter("duct_ingest_rows_total", "Rows loaded to Bronze by this process, by source.", "source")
+)
+
+func observeRun(source string, rows int64, err error) {
+	if err != nil {
+		ingestRuns.Inc("error")
+		return
+	}
+	ingestRuns.Inc("ok")
+	ingestRows.Add(float64(rows), source)
+}
+
 // Run executes one ingestion: it instantiates the source module, loads its
 // rows into the target table in a single transaction (create on first run,
 // replace in full mode, append in incremental mode, new columns added with
@@ -36,6 +51,7 @@ const stageTable = "duct_stage"
 // conflict.
 func Run(ctx context.Context, eng contract.Engine, root string, c Config) (res Result, err error) {
 	res = Result{Name: c.Name, Table: c.Target}
+	defer func() { observeRun(c.Name, res.Rows, err) }()
 	if err := c.Validate(); err != nil {
 		return res, err
 	}

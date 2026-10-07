@@ -73,14 +73,17 @@ func parseAST(js string) (*parsedSQL, error) {
 type rewriter struct {
 	schema string          // role_<name>
 	views  map[string]bool // views existing in the role schema
+	udf    map[string]bool // user-defined functions this role may not call (udf.go)
 }
 
 // Rewrite validates p for role and returns the JSON of the statement with all
 // relations qualified as lake.role_<role>.<view>. The caller turns it back
 // into SQL with json_deserialize_sql, so what runs is exactly what was checked
-// (no gap between two parsers).
-func (p *parsedSQL) rewrite(role string, views map[string]bool) (string, error) {
-	rw := &rewriter{schema: contract.RoleSchema(role), views: views}
+// (no gap between two parsers). deniedFuncs is a set of function names (lower
+// case) the role may not call: the user-defined functions, which run user code
+// (ADR 0005).
+func (p *parsedSQL) rewrite(role string, views, deniedFuncs map[string]bool) (string, error) {
+	rw := &rewriter{schema: contract.RoleSchema(role), views: views, udf: deniedFuncs}
 	if err := rw.walk(p.root["statements"], nil); err != nil {
 		return "", err
 	}
@@ -158,6 +161,9 @@ func (rw *rewriter) walkObject(v map[string]any, scope map[string]bool) error {
 func (rw *rewriter) check(v map[string]any, scope map[string]bool) error {
 	if class, ok := v["class"].(string); ok {
 		if class == "FUNCTION" || class == "WINDOW" {
+			if err := rw.checkUDF(v); err != nil {
+				return err
+			}
 			return checkFunction(v)
 		}
 		return nil

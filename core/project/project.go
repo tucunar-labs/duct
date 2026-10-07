@@ -57,6 +57,10 @@ type Config struct {
 	Kafka  KafkaConfig     `toml:"kafka"`
 	Stream *StreamSettings `toml:"stream"`
 	Alerts *AlertsSettings `toml:"alerts"`
+	// Python and MLflow: user code and the optional MLflow server (see pyconfig.go
+	// and mlflowconfig.go; ADR 0005, 0006, 0010). MLflow is nil until `duct enable mlflow`.
+	Python PythonSettings  `toml:"python"`
+	MLflow *MLflowSettings `toml:"mlflow"`
 }
 
 // S3Config is the [s3] table of duct.toml, used when storage is s3://...:
@@ -264,6 +268,14 @@ func (p *Project) S3() (cfg s3conn.Config, ok bool, err error) {
 	if !p.StorageIsS3() {
 		return cfg, false, nil
 	}
+	cfg, err = p.S3Connection()
+	return cfg, true, err
+}
+
+// S3Connection is the object-store connection even when the lake itself is
+// local (a backup of a local lake to s3://...): the [s3] table overridden by
+// DUCT_S3_*, credentials from DUCT_S3_* or AWS_*.
+func (p *Project) S3Connection() (cfg s3conn.Config, err error) {
 	t := p.Config.S3
 	cfg = s3conn.Config{
 		Endpoint:     firstEnv(s3conn.EnvEndpoint),
@@ -297,13 +309,13 @@ func (p *Project) S3() (cfg s3conn.Config, ok bool, err error) {
 		case "0", "false", "no":
 			cfg.UseSSL = false
 		default:
-			return cfg, true, fmt.Errorf("%s must be true or false", s3conn.EnvUseSSL)
+			return cfg, fmt.Errorf("%s must be true or false", s3conn.EnvUseSSL)
 		}
 	}
 	if cfg.Endpoint != "" && cfg.URLStyle == "" {
 		cfg.URLStyle = "path" // custom endpoints (RustFS, Garage) are path style
 	}
-	return cfg, true, cfg.Validate()
+	return cfg, cfg.Validate()
 }
 
 // DataPath is the absolute local lake directory, or the URL for remote storage.
@@ -357,6 +369,7 @@ func (p *Project) ModuleConfig(cfg contract.Config) {
 
 const gitignore = `# Duct local state and secrets
 lake/
+shares/
 .duct/
 .env*
 !.env.example

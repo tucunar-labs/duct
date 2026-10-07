@@ -68,6 +68,18 @@ func runProject(cmd string, args []string, stdout, stderr io.Writer) int {
 		err = cmdPolicy(ctx, args, stdout, stderr)
 	case "semantic":
 		err = cmdSemantic(ctx, args, stdout, stderr)
+	case "functions":
+		err = cmdFunctions(ctx, args, stdout, stderr)
+	case "notebook":
+		err = cmdNotebook(ctx, args, stdout, stderr)
+	case "mlflow":
+		err = cmdMLflow(ctx, args, stdout, stderr)
+	case "enable":
+		err = cmdEnable(ctx, args, stdout, stderr)
+	case "share":
+		err = cmdShare(ctx, args, stdout, stderr)
+	case "recipient":
+		err = cmdRecipient(ctx, args, stdout, stderr)
 	}
 	switch {
 	case err == nil:
@@ -218,7 +230,7 @@ func cmdQuery(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	eng, err := openEngine(ctx, p, *locked)
+	eng, err := openEngineUDF(ctx, p, *locked)
 	if err != nil {
 		return err
 	}

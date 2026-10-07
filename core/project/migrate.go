@@ -195,6 +195,71 @@ var Migrations = []Migration{
 			)`,
 		},
 	},
+	{
+		// Data sharing (ADR 0014): shares, their tables, recipients (each one a
+		// role share_<name> plus a user with the same name), grants of a share
+		// to a recipient, and the materialized copy that serves each
+		// (share, recipient, table). Policies (row filters, masks) live in the
+		// governance tables of the recipient's role, not here.
+		Version: 7,
+		Name:    "sharing",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_shares (
+				name VARCHAR PRIMARY KEY,
+				created_at TIMESTAMP NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_share_tables (
+				share VARCHAR NOT NULL,
+				alias VARCHAR NOT NULL,
+				relation VARCHAR NOT NULL,
+				partition_filter VARCHAR,
+				added_at TIMESTAMP NOT NULL,
+				PRIMARY KEY (share, alias)
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_recipients (
+				name VARCHAR PRIMARY KEY,
+				role VARCHAR NOT NULL,
+				created_at TIMESTAMP NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_share_grants (
+				share VARCHAR NOT NULL,
+				recipient VARCHAR NOT NULL,
+				granted_at TIMESTAMP NOT NULL,
+				PRIMARY KEY (share, recipient)
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_share_copies (
+				share VARCHAR NOT NULL,
+				recipient VARCHAR NOT NULL,
+				alias VARCHAR NOT NULL,
+				version BIGINT NOT NULL,
+				source_snapshot BIGINT NOT NULL,
+				fingerprint VARCHAR NOT NULL,
+				prefix VARCHAR NOT NULL,
+				schema_string VARCHAR NOT NULL,
+				files VARCHAR NOT NULL,
+				num_rows BIGINT NOT NULL,
+				total_bytes BIGINT NOT NULL,
+				table_id VARCHAR NOT NULL,
+				created_at TIMESTAMP NOT NULL,
+				checked_at TIMESTAMP NOT NULL,
+				PRIMARY KEY (share, recipient, alias)
+			)`,
+		},
+	},
+	{
+		// Quotas (ADR 0013, admin API): per role caps enforced by the governance
+		// handler. NULL means no limit.
+		Version: 8,
+		Name:    "quotas",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_quotas (
+				role VARCHAR PRIMARY KEY,
+				max_concurrent INTEGER,
+				max_rows BIGINT,
+				updated_at TIMESTAMP NOT NULL
+			)`,
+		},
+	},
 }
 
 const createMigrations = `CREATE TABLE IF NOT EXISTS duct.duct_migrations (

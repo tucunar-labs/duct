@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://duct.dev/specs/dashboard.schema.json",
+  "title": "Duct dashboard",
+  "description": "dashboards/<name>.yaml: filters and charts over the semantic layer (ADR 0008). Each chart is a query_metrics call run as the viewer; ECharts draws it. Enforced in Go by core/dashboards (Parse rejects unknown keys).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "charts"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "filters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "dimension"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "label": {"type": "string"},
+          "type": {"enum": ["select", "multiselect", "daterange"]},
+          "dimension": {"type": "string", "minLength": 1, "description": "dataset.field, or the bare field name when unambiguous"},
+          "measure": {"type": "string", "description": "metric used to list the values of a select/multiselect (default: first measure of an applicable chart)"},
+          "charts": {"type": "array", "items": {"$ref": "#/$defs/id"}, "description": "charts the filter applies to (default: all)"}
+        }
+      }
+    },
+    "charts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "measures"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "title": {"type": "string"},
+          "type": {"enum": ["line", "bar", "area", "pie", "table", "kpi", "scatter", "heatmap"]},
+          "dims": {"type": "array", "items": {"type": "string"}, "description": "kpi: none; pie: 1; heatmap: 2 (x, y); line/area/bar: 1 (x) or 2 (x, series); scatter: 0 or 1"},
+          "measures": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "metric names; scatter takes 2-3 (x, y, size); 2 dims need exactly 1"},
+          "sort": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["by"],
+              "properties": {"by": {"type": "string"}, "desc": {"type": "boolean"}}
+            }
+          },
+          "limit": {"type": "integer", "minimum": 0, "maximum": 10000},
+          "where": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["field", "op"],
+              "properties": {
+                "field": {"type": "string"},
+                "op": {"enum": ["=", "!=", "<", "<=", ">", ">=", "in", "not_in", "like", "not_like", "between", "is_null", "is_not_null"]},
+                "value": {}
+              }
+            }
+          },
+          "layout": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "x": {"type": "integer", "minimum": 0, "maximum": 11},
+              "y": {"type": "integer", "minimum": 0},
+              "w": {"type": "integer", "minimum": 1, "maximum": 12},
+              "h": {"type": "integer", "minimum": 1, "maximum": 12}
+            }
+          },
+          "options": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "legend": {"type": "boolean"},
+              "stack": {"type": "boolean"},
+              "smooth": {"type": "boolean"},
+              "horizontal": {"type": "boolean"},
+              "donut": {"type": "boolean"},
+              "labels": {"type": "boolean"},
+              "log": {"type": "boolean"},
+              "x_title": {"type": "string", "maxLength": 80},
+              "y_title": {"type": "string", "maxLength": 80},
+              "format": {"enum": ["auto", "integer", "decimal", "percent", "compact"]},
+              "prefix": {"type": "string", "maxLength": 8},
+              "suffix": {"type": "string", "maxLength": 8},
+              "colors": {"type": "array", "maxItems": 12, "items": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}},
+              "y_min": {"type": "number"},
+              "y_max": {"type": "number"}
+            }
+          },
+          "cross_filter": {"type": "boolean", "description": "false: the chart neither emits nor receives cross-filters (default true; kpi, table and scatter never emit)"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$"}
+  }
+}

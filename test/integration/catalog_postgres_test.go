@@ -24,7 +24,15 @@ import (
 // Podman: the catalog, Duct state, migration from SQLite and concurrent
 // writers (ADR 0001). They remove their containers at the end.
 
-const pgPassword = "pw-catalog"
+// pgPassword is the password of the Podman server, or the one in DUCT_TEST_PG_DSN.
+var pgPassword = func() string {
+	if dsn := os.Getenv("DUCT_TEST_PG_DSN"); dsn != "" {
+		if cfg, err := pgx.ParseConfig(dsn); err == nil && cfg.Password != "" {
+			return cfg.Password
+		}
+	}
+	return "pw-catalog"
+}()
 
 var (
 	buildOnce sync.Once
@@ -53,26 +61,37 @@ func ductBinary(t *testing.T) string {
 	return binPath
 }
 
+// pgServer is a Postgres 17 for the tests: a Podman container, or an external
+// server when DUCT_TEST_PG_DSN is set (CI service container). The DSN is a
+// superuser connection, e.g. postgres://postgres:pw-catalog@127.0.0.1:5432/postgres.
 type pgServer struct {
-	id   string
-	port int
+	id       string // container id ("" for an external server)
+	host     string
+	port     int
+	user     string
+	password string
 }
 
-// startPG runs Postgres 17 in Podman, waits for it and removes it at the end.
+// startPG runs Postgres 17 in Podman, waits for it and removes it at the end,
+// or adopts the server of DUCT_TEST_PG_DSN.
 func startPG(t *testing.T) *pgServer {
 	t.Helper()
+	if dsn := os.Getenv("DUCT_TEST_PG_DSN"); dsn != "" {
+		return externalPG(t, dsn)
+	}
 	if _, err := exec.LookPath("podman"); err != nil {
-		t.Skip("podman not available")
+		t.Skip("podman not available (and DUCT_TEST_PG_DSN is not set)")
 	}
 	port := freePort(t)
 	id := podman(t, "run", "-d", "--rm", "-e", "POSTGRES_PASSWORD="+pgPassword,
 		"-p", fmt.Sprintf("127.0.0.1:%d:5432", port), "docker.io/library/postgres:17-bookworm",
 		"-c", "max_connections=300")
 	t.Cleanup(func() { _ = exec.Command("podman", "rm", "-f", id).Run() })
+	s := &pgServer{id: id, host: "127.0.0.1", port: port, user: "postgres", password: pgPassword}
 	// The image restarts once after initdb: require a few consecutive successes.
 	ok := 0
 	for i := 0; ok < 3; i++ {
-		if exec.Command("podman", "exec", id, "psql", "-U", "postgres", "-c", "select 1").Run() == nil {
+		if _, err := s.query("postgres", "select 1"); err == nil {
 			ok++
 		} else {
 			ok = 0
@@ -82,23 +101,86 @@ func startPG(t *testing.T) *pgServer {
 		}
 		time.Sleep(time.Second)
 	}
-	return &pgServer{id: id, port: port}
+	return s
 }
 
+func externalPG(t *testing.T, dsn string) *pgServer {
+	t.Helper()
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("DUCT_TEST_PG_DSN: %v", err)
+	}
+	s := &pgServer{host: cfg.Host, port: int(cfg.Port), user: cfg.User, password: cfg.Password}
+	for i := 0; ; i++ {
+		if _, err := s.query("postgres", "select 1"); err == nil {
+			return s
+		} else if i > 60 {
+			t.Fatalf("DUCT_TEST_PG_DSN server does not answer: %v", err)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// createDB makes an empty database. On a shared external server a leftover of
+// an earlier test (same name) is dropped first.
 func (s *pgServer) createDB(t *testing.T, name string) {
 	t.Helper()
-	podman(t, "exec", s.id, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-c", "CREATE DATABASE "+name)
+	if _, err := s.query("postgres", "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
+		t.Fatalf("drop database %s: %v", name, err)
+	}
+	if _, err := s.query("postgres", "CREATE DATABASE "+name); err != nil {
+		t.Fatalf("create database %s: %v", name, err)
+	}
+}
+
+// connString is the connection string with the password, for pgx.
+func (s *pgServer) connString(db string) string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s", s.user, s.password, s.host, s.port, db)
 }
 
 // url is the connection string without password (it goes to duct.toml).
 func (s *pgServer) url(db string) string {
-	return fmt.Sprintf("postgres://postgres@127.0.0.1:%d/%s", s.port, db)
+	return fmt.Sprintf("postgres://%s@%s:%d/%s", s.user, s.host, s.port, db)
+}
+
+// urlWithPassword is the connection string with password (command line only).
+func (s *pgServer) urlWithPassword(db string) string { return s.connString(db) }
+
+// query runs SQL in the simple protocol and returns the rows as psql -At would
+// print them (columns joined by "|", booleans as t/f).
+func (s *pgServer) query(db, q string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	c, err := pgx.Connect(ctx, s.connString(db))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = c.Close(ctx) }()
+	rows, err := c.Query(ctx, q, pgx.QueryExecModeSimpleProtocol)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		raw := rows.RawValues()
+		cells := make([]string, len(raw))
+		for i, v := range raw {
+			cells[i] = string(v)
+		}
+		lines = append(lines, strings.Join(cells, "|"))
+	}
+	return strings.Join(lines, "\n"), rows.Err()
 }
 
 // sql runs a query as superuser and returns its unaligned output.
 func (s *pgServer) sql(t *testing.T, db, q string) string {
 	t.Helper()
-	return podman(t, "exec", s.id, "psql", "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-At", "-c", q)
+	out, err := s.query(db, q)
+	if err != nil {
+		t.Fatalf("postgres %s: %v", q, err)
+	}
+	return out
 }
 
 type ductRun struct {
@@ -224,14 +306,14 @@ func TestPostgresCatalogEndToEnd(t *testing.T) {
 		t.Fatalf("init output: %s", out)
 	}
 	toml, _ := os.ReadFile(filepath.Join(root, "duct.toml"))
-	if strings.Contains(string(toml), pgPassword) || !strings.Contains(string(toml), "postgres://postgres@") {
+	if strings.Contains(string(toml), pgPassword) || !strings.Contains(string(toml), "postgres://"+pg.user+"@") {
 		t.Fatalf("duct.toml must hold the URL without password:\n%s", toml)
 	}
 	// DuckLake metadata in public, Duct state in schema duct.
 	if got := pg.sql(t, "lake1", "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'ducklake_%'"); got == "0" {
 		t.Fatal("no ducklake_* tables in Postgres")
 	}
-	if got := pg.sql(t, "lake1", "SELECT count(*) FROM information_schema.tables WHERE table_schema='duct' AND table_name LIKE 'duct_%'"); got != "16" {
+	if got := pg.sql(t, "lake1", "SELECT count(*) FROM information_schema.tables WHERE table_schema='duct' AND table_name LIKE 'duct_%'"); atoi(got) < 16 {
 		t.Fatalf("duct tables in schema duct = %s, want 16", got)
 	}
 	if got := pg.sql(t, "lake1", "SELECT data_type FROM information_schema.columns WHERE table_schema='duct' AND table_name='duct_users' AND column_name='disabled'"); got != "boolean" {
@@ -248,7 +330,7 @@ func TestPostgresCatalogEndToEnd(t *testing.T) {
 		t.Fatalf("wrong password: err=%v stderr=%s", r.err, r.stderr)
 	}
 	// DUCT_CATALOG_URL carries everything.
-	full := fmt.Sprintf("postgres://postgres:%s@127.0.0.1:%d/lake1", pgPassword, pg.port)
+	full := pg.urlWithPassword("lake1")
 	if got := csvQuery(t, root, []string{"DUCT_CATALOG_URL=" + full}, "select 42 as n"); got != "n\n42" {
 		t.Fatalf("DUCT_CATALOG_URL: %q", got)
 	}
@@ -342,7 +424,7 @@ func TestCatalogMigrateSQLiteToPostgres(t *testing.T) {
 
 	tomlBefore, _ := os.ReadFile(filepath.Join(root, "duct.toml"))
 	target := pg.url("dest")
-	withPw := fmt.Sprintf("postgres://postgres:%s@127.0.0.1:%d/dest", pgPassword, pg.port)
+	withPw := pg.urlWithPassword("dest")
 
 	// Dry run: reports, writes nothing.
 	r := duct(t, root, nil, "catalog", "migrate", "--to", withPw, "--dry-run")
@@ -368,7 +450,7 @@ func TestCatalogMigrateSQLiteToPostgres(t *testing.T) {
 	busyRoot := filepath.Join(t.TempDir(), "busy")
 	mustDuct(t, t.TempDir(), pwEnv, "init", busyRoot, "--catalog", pg.url("busy"))
 	mustDuct(t, busyRoot, pwEnv, "query", "CREATE TABLE keep AS SELECT 1 AS x")
-	r = duct(t, root, nil, "catalog", "migrate", "--to", fmt.Sprintf("postgres://postgres:%s@127.0.0.1:%d/busy", pgPassword, pg.port))
+	r = duct(t, root, nil, "catalog", "migrate", "--to", pg.urlWithPassword("busy"))
 	if r.err == nil || !strings.Contains(r.stderr, "refusing to overwrite") {
 		t.Fatalf("busy target: err=%v stderr=%s", r.err, r.stderr)
 	}

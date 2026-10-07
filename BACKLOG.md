@@ -124,7 +124,7 @@ Pendientes conocidos para v0.2:
       `TestS3STSScopedCredentials`, `core/s3conn`.
 - [x] Migración `./lake` → `s3://` con `rclone sync` + cambiar `storage`. Evidencia:
       `TestS3MigrateFromLocal`.
-- [ ] Job de CI con `test-integration` (Podman + RustFS).
+- [x] Job de CI con `test-integration`: ver «Pendiente»: job `integration`.
 
 ## Streaming y alertas (2026-10-07)
 
@@ -153,15 +153,47 @@ Pendientes conocidos para v0.2:
       servidor MCP (`list_metrics`, `describe`, `query_metrics`). Evidencia: `TestE2EMCP`.
 - [x] Streaming y alertas (sección anterior).
 
+## Dashboards (2026-10-07)
+
+- [x] `dashboards/*.yaml` (filtros select/multiselect/daterange, gráficos line|bar|area|pie|table|kpi|
+      scatter|heatmap, layout en grilla de 12, opciones acotadas) + `specs/dashboard.schema.json` +
+      `duct dashboard lint|list` (valida contra el modelo Ossie: nombres y joins sin fan-out).
+      Evidencia: `core/dashboards` tests, `TestDashboardLint`.
+- [x] Web: `/dashboards`, `/dashboards/{name}`, `POST .../data` (SSE), consulta por `SemanticQuerier`
+      como la identidad de la sesión, caché LRU por (snapshot DuckLake, rol, request), filtros
+      cruzados por click/brush con Datastar, isla ECharts 6.1.0 (`static/charts.js`, 670 KB) con temas
+      claro/oscuro. Evidencia: `modules/web/dashboards_test.go`, `TestE2EDashboards`, capturas en
+      `/tmp/duct-ui-shots/dashboard-*.png` (Chromium headless, sin errores de consola/CSP).
+- [ ] Dashboards: caché compartida entre procesos (hoy en memoria), exportar a imagen/PDF, dashboards
+      por rol (`grants` sobre el YAML), parámetros en la URL (filtros compartibles), alertas sobre un gráfico.
+
 ## Pendiente (sin orden aún)
 
-- [ ] Dashboards con ECharts sobre la capa semántica (ADR 0008).
-- [ ] marimo integrado: `duct notebook` y montaje ASGI con auth HTTP+WebSocket (ADR 0006).
-- [ ] MLflow opcional (`duct enable mlflow`) (ADR 0010).
-- [ ] UDFs Python (`functions/*.py`, `@duct.function`) y ejecutables stdin/stdout (ADR 0005).
-- [ ] OpenSharing fase 1 (por consulta) y fase 2 (servidor) (ADR 0014).
-- [ ] Contrato de operabilidad: `duct backup|restore`, API admin, `/metrics` ampliado (ADR 0013).
-- [ ] Job de CI con `test-integration` (servicios Postgres, RustFS y Kafka en vez de Podman).
+- [x] marimo integrado: `duct notebook` (servidor privado + token del usuario, entorno con lista blanca)
+      y montaje ASGI con auth HTTP+WebSocket (protocolo `notebook`, `[serve.notebook]`). Evidencia:
+      `TestNotebookScript`, `TestServeNotebookAuth` (WebSocket sin token: 403), `test_asgi.py`, `TestSDKTransports`
+      (`duct.connect` por ArrowStream y psycopg). Falta: modo edición en el montaje, comentarios e historial.
+- [x] MLflow opcional (`duct enable mlflow`, `duct mlflow`, `mlflow.*` por `ATTACH` de solo lectura,
+      `duct.mlflow.score`). Evidencia: `TestMLflowIntegration` (MLflow 3.17.0 real), `TestMLflowOnPostgresCatalog`
+      (`just test-integration`). Falta: copiar métricas a Bronze, serving online.
+- [x] UDFs Python (`functions/*.py`, `@duct.function`, escalares y vectorizadas) y ejecutables stdin/stdout
+      (`functions/*.toml`); solo `duct_admin` en `duct serve`. Evidencia: `TestE2EFunctions`,
+      `TestE2EServeFunctionsAdminOnly`, `core/udf` tests; costo por lote en ADR 0005. Falta: tipos
+      no escalares (DATE, DECIMAL, LIST), funciones de tabla/agregado, recarga en caliente.
+- [x] OpenSharing fase 1 (por consulta) y fase 2 (servidor REST con copias Parquet filtradas y
+      enmascaradas, URLs firmadas ~15 min, local y S3) (ADR 0014, sección Implementado).
+      Evidencia: `TestE2EShare` (cliente oficial `delta-sharing`), `TestShareS3RustFS`,
+      `modules/sharing-server` tests. Falta: CDF, `predicateHints`, Iceberg REST, límite de intentos.
+- [x] Contrato de operabilidad (ADR 0013, 2026-10-07): `duct backup|restore` con manifiesto y
+      verificación (catálogo SQLite o Postgres, lake local o S3, `--catalog-only`, `--keep`), API admin
+      `/admin/v1` (+ `specs/admin.openapi.yaml`), cuotas por rol, `/readyz` y `/metrics` ampliado.
+      Evidencia: `TestE2EBackupRestoreSQLite`, `TestE2EAdminAPI`, `TestQuotaConcurrent`,
+      `TestBackupRestoreS3` (SQLite y Postgres sobre RustFS).
+- [ ] Cuotas en el protocolo Postgres (usa su propia sesión DuckDB: hoy solo HTTP, MCP y web).
+- [ ] Respaldo: cifrado (lakes con `encrypted`), objetos de más de 5 GiB, restauración parcial por tabla.
+- [x] Job de CI `integration` (docker run de Postgres, RustFS y Kafka + `just test-integration` con
+      `DUCT_TEST_*`). Evidencia: las 17 pruebas pasan en local contra servidores externos (192 s);
+      falta verlo verde en Actions.
 - [ ] Semántica: métricas multi-dataset, filtros sobre métricas, preagregados, recarga en caliente.
 - [ ] Jobs: recarga en caliente, retención del historial, recuperar ticks perdidos.
 - [ ] Alertas: histéresis (`FOR`), silencios, recordatorios, activo/activo.

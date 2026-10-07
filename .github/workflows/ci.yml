@@ -25,6 +25,8 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           working_directory: duct
+      - name: Python env for UDF/notebook/SDK tests
+        run: cd python && uv sync
       - run: just check
 
   e2e:
@@ -60,3 +62,69 @@ jobs:
       # psqlODBC for the demo's ODBC step.
       - run: sudo apt-get update && sudo apt-get install -y unixodbc odbc-postgresql
       - run: just e2e
+
+  # `just test-integration` against real servers started with docker (the
+  # runner's Podman could not start Postgres): the helpers in test/integration
+  # use these endpoints when the DUCT_TEST_* variables are set and fall back to
+  # Podman locally. Nothing is skipped for lack of container control: the tests
+  # that kill -9 do it to the duct process, never to a server.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DUCT_TEST_PG_DSN: postgres://postgres:pw-catalog@127.0.0.1:5432/postgres
+      DUCT_TEST_S3_ENDPOINT: 127.0.0.1:9000
+      DUCT_TEST_S3_ACCESS_KEY: ductadmin
+      DUCT_TEST_S3_SECRET_KEY: ductadmin-secret-key
+      DUCT_TEST_KAFKA_BROKERS: 127.0.0.1:9092
+    defaults:
+      run:
+        working-directory: duct
+    steps:
+      # Servers first: they start while the toolchain installs.
+      - name: Start Postgres 17, RustFS and Kafka (KRaft, one node)
+        working-directory: .
+        run: |
+          docker run -d --name pg -p 127.0.0.1:5432:5432 \
+            -e POSTGRES_PASSWORD=pw-catalog \
+            postgres:17 -c max_connections=300
+          docker run -d --name rustfs -p 127.0.0.1:9000:9000 \
+            -e RUSTFS_ACCESS_KEY=ductadmin -e RUSTFS_SECRET_KEY=ductadmin-secret-key \
+            rustfs/rustfs:latest /data
+          docker run -d --name kafka -p 127.0.0.1:9092:9092 \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092 \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+            -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
+            -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false \
+            apache/kafka:latest
+      - uses: actions/checkout@v4
+        with:
+          path: duct
+      - uses: actions/checkout@v4
+        with:
+          repository: alonsoburon/duckgres
+          ref: duct
+          path: duckgres
+          ssh-key: ${{ secrets.DUCKGRES_DEPLOY_KEY }}
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: duct
+      # unixODBC + psqlODBC for TestODBCPostgresIncremental.
+      - run: sudo apt-get update && sudo apt-get install -y unixodbc odbc-postgresql
+      - name: Python env for UDF/notebook/SDK tests
+        run: cd python && uv sync
+      - run: just test-integration
+      - name: Server logs on failure
+        if: failure()
+        working-directory: .
+        run: |
+          for c in pg rustfs kafka; do echo "::group::$c"; docker logs --tail 80 $c || true; echo "::endgroup::"; done

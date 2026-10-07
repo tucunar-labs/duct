@@ -15,10 +15,12 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	ductmetrics "github.com/alonsoburon/duct/core/metrics"
 	"github.com/alonsoburon/duct/core/registry"
 )
 
@@ -46,6 +48,25 @@ type Server struct {
 	tlsCfg  *tls.Config
 	sem     chan struct{}
 	metrics metrics
+
+	mu     sync.Mutex
+	mounts []mount
+}
+
+type mount struct {
+	pattern string
+	h       http.Handler
+}
+
+// Mount adds a handler to the HTTP listener under pattern (http.ServeMux
+// syntax, e.g. "/admin/v1/"). It must be called before Serve; the paths of the
+// query API ("/", "/query", "/healthz", "/metrics") are taken. `duct serve`
+// uses it for the admin API and /readyz, which need the project and not only
+// the query handler.
+func (s *Server) Mount(pattern string, h http.Handler) {
+	s.mu.Lock()
+	s.mounts = append(s.mounts, mount{pattern, h})
+	s.mu.Unlock()
 }
 
 var (
@@ -122,6 +143,11 @@ func (s *Server) Serve(ctx context.Context, h contract.QueryHandler, auth contra
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	mux.HandleFunc("/metrics", s.metrics.serve)
+	s.mu.Lock()
+	for _, m := range s.mounts {
+		mux.Handle(m.pattern, m.h)
+	}
+	s.mu.Unlock()
 	q := &queryAPI{h: h, auth: auth, sem: s.sem, m: &s.metrics}
 	mux.Handle("/query", q)
 	mux.Handle("/", q) // ClickHouse clients post to the root
@@ -221,9 +247,12 @@ func (a *queryAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.m.queryErr.Add(1)
 		code := http.StatusBadRequest
-		if strings.HasPrefix(err.Error(), "permission denied") {
+		switch {
+		case strings.HasPrefix(err.Error(), "permission denied"):
 			a.m.denied.Add(1)
 			code = http.StatusForbidden
+		case strings.HasPrefix(err.Error(), "quota exceeded"):
+			code = http.StatusTooManyRequests
 		}
 		httpError(w, code, err.Error())
 		return
@@ -238,7 +267,11 @@ func (a *queryAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Bytes already left: the only honest signal is to cut the connection.
 			panic(http.ErrAbortHandler)
 		}
-		httpError(w, http.StatusInternalServerError, err.Error())
+		code := http.StatusInternalServerError
+		if strings.HasPrefix(err.Error(), "quota exceeded") {
+			code = http.StatusTooManyRequests
+		}
+		httpError(w, code, err.Error())
 	}
 }
 
@@ -344,4 +377,5 @@ func (m *metrics) serve(w http.ResponseWriter, _ *http.Request) {
 	counter("duct_http_rows_returned_total", "Rows sent to clients.", m.rows.Load())
 	fmt.Fprintf(&b, "# HELP duct_http_inflight_queries Statements running now.\n# TYPE duct_http_inflight_queries gauge\nduct_http_inflight_queries %d\n", m.inflight.Load())
 	_, _ = io.WriteString(w, b.String())
+	ductmetrics.Default().WriteText(w)
 }

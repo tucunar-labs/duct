@@ -40,7 +40,7 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	if err != nil {
 		return err
 	}
-	eng, err := openEngine(ctx, p, false)
+	eng, err := openEngineUDF(ctx, p, false)
 	if err != nil {
 		return err
 	}

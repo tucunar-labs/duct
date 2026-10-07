@@ -24,3 +24,4 @@ marimo = ["marimo>=0.9"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/duct"]
+

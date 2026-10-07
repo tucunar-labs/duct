@@ -1,0 +1,223 @@
+package web
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/alonsoburon/duct/core/dashboards"
+)
+
+// ---- Dashboards ----
+//
+// The page is server-rendered once; charts are filled by POST
+// /dashboards/{name}/data, an SSE stream that patches each <duct-chart> (the
+// ECharts island, static/charts.js) as its query finishes. Filters and
+// cross-filter selections are Datastar signals; the server is stateless.
+
+type dashLink struct {
+	Name        string
+	Title       string
+	Description string
+	Charts      int
+	Err         string // file that does not parse: shown, not served
+}
+
+templ dashboardsPage(p pageData, links []dashLink, errMsg string) {
+	@layout(p) {
+		<div class="mb-4 flex items-baseline justify-between">
+			<h1 class="text-xl font-semibold">Dashboards</h1>
+			<p class="text-sm text-muted">Gráficos sobre la capa semántica, con los permisos de tu rol</p>
+		</div>
+		if errMsg != "" {
+			<p role="alert" class="rounded border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
+		} else if len(links) == 0 {
+			<p class="rounded-lg border border-dashed border-line p-8 text-center text-muted">No hay dashboards. Crea <code class="font-mono">dashboards/&lt;nombre&gt;.yaml</code> en el proyecto.</p>
+		}
+		<ul class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+			for _, l := range links {
+				<li class="rounded-lg border border-line bg-surface p-4">
+					if l.Err != "" {
+						<p class="font-mono text-sm">{ l.Name }</p>
+						<p role="alert" class="mt-1 whitespace-pre-wrap text-xs text-danger">{ l.Err }</p>
+					} else {
+						<a href={ templ.URL("/dashboards/" + l.Name) } class="font-medium text-brand-strong hover:underline">{ l.Title }</a>
+						if l.Description != "" {
+							<p class="mt-1 text-sm text-muted">{ l.Description }</p>
+						}
+						<p class="mt-2 text-xs text-muted">{ strconv.Itoa(l.Charts) } gráficos</p>
+					}
+				</li>
+			}
+		</ul>
+	}
+}
+
+// filterView is a picker with the values the semantic layer returned for it.
+type filterView struct {
+	F       dashboards.Filter
+	Options []string
+	Err     string
+}
+
+type dashSignals map[string]any
+
+templ dashboardPage(p pageData, d *dashboards.Dashboard, filters []filterView, signals dashSignals, dataURL string) {
+	@layout(p) {
+		<div
+			data-signals={ templ.JSONString(signals) }
+			data-on:ductcross={ "$ev = JSON.stringify(evt.detail); " + postExpr(dataURL) }
+			data-init={ postExpr(dataURL) }
+		>
+			<div class="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+				<div>
+					<h1 class="text-xl font-semibold">{ d.Title }</h1>
+					if d.Description != "" {
+						<p class="text-sm text-muted">{ d.Description }</p>
+					}
+				</div>
+				<a href="/dashboards" class="text-sm text-brand-strong hover:underline">Todos los dashboards</a>
+			</div>
+			if len(filters) > 0 {
+				<div class="mb-3 flex flex-wrap items-end gap-3 rounded-lg border border-line bg-surface p-3" data-on:change={ postExpr(dataURL) }>
+					for _, f := range filters {
+						@filterInput(f)
+					}
+					<button type="button" class="rounded border border-line px-3 py-1 text-sm hover:bg-hover" data-on:click={ resetExpr(d, dataURL) }>Limpiar</button>
+				</div>
+			}
+			@dashChips(d, nil)
+			<div class="dash-grid mt-3" aria-label="Gráficos">
+				for _, c := range d.Charts {
+					<section class="dash-cell flex flex-col rounded-lg border border-line bg-surface p-3" style={ templ.SafeCSS(cellStyle(c.Layout)) } aria-label={ chartTitle(c) }>
+						<h2 class="mb-1 truncate text-sm font-semibold">{ chartTitle(c) }</h2>
+						<div class="min-h-0 flex-1">
+							@chartEl(c.ID, "")
+						</div>
+					</section>
+				}
+			</div>
+		</div>
+		<script type="module" src={ p.Assets.URL("charts.js") }></script>
+	}
+}
+
+// chartEl is the patch target of one chart; the island reads data-spec.
+templ chartEl(id, spec string) {
+	<duct-chart
+		id={ "chart-" + id }
+		data-chart={ id }
+		if spec != "" {
+			data-spec={ spec }
+		}
+	></duct-chart>
+}
+
+templ filterInput(f filterView) {
+	<label class="block text-sm">
+		<span class="mb-1 block text-muted">{ filterLabel(f.F) }</span>
+		switch f.F.Type {
+			case dashboards.FilterDateRange:
+				<span class="flex items-center gap-1">
+					<input type="date" data-bind={ "f_" + f.F.ID + "_from" } aria-label={ filterLabel(f.F) + " desde" } class="rounded border border-line bg-bg px-2 py-1"/>
+					<span class="text-muted">–</span>
+					<input type="date" data-bind={ "f_" + f.F.ID + "_to" } aria-label={ filterLabel(f.F) + " hasta" } class="rounded border border-line bg-bg px-2 py-1"/>
+				</span>
+			case dashboards.FilterMultiselect:
+				<select multiple size="4" data-bind={ "f_" + f.F.ID } class="min-w-40 rounded border border-line bg-bg px-2 py-1">
+					for _, o := range f.Options {
+						<option value={ o }>{ o }</option>
+					}
+				</select>
+			default:
+				<select data-bind={ "f_" + f.F.ID } class="min-w-40 rounded border border-line bg-bg px-2 py-1">
+					<option value="">Todos</option>
+					for _, o := range f.Options {
+						<option value={ o }>{ o }</option>
+					}
+				</select>
+		}
+		if f.Err != "" {
+			<span role="alert" class="mt-1 block max-w-xs text-xs text-danger">{ f.Err }</span>
+		}
+	</label>
+}
+
+// dashChips lists the active cross-filters; clicking one clears it. Always
+// rendered with id="dash-chips" so Datastar can morph it in place.
+templ dashChips(d *dashboards.Dashboard, cross map[string][]string) {
+	<div id="dash-chips" class="flex min-h-7 flex-wrap items-center gap-2" aria-live="polite">
+		for _, c := range d.Charts {
+			if vals := cross[c.ID]; len(vals) > 0 {
+				<button
+					type="button"
+					class="flex items-center gap-1 rounded-full border border-brand/60 bg-hover px-3 py-0.5 text-xs"
+					title="Quitar filtro"
+					data-on:click={ "$ev = JSON.stringify({chart: '" + c.ID + "', values: []}); " + postExpr("/dashboards/"+d.Name+"/data") }
+				>
+					<span class="text-muted">{ c.CrossDim() }:</span>
+					<span class="font-medium" title={ strings.Join(vals, ", ") }>{ chipValues(vals) }</span>
+					<span aria-hidden="true">×</span>
+				</button>
+			}
+		}
+	</div>
+}
+
+func postExpr(url string) string {
+	return "@post('" + url + "', {headers: {'X-CSRF-Token': $_csrf}})"
+}
+
+// resetExpr clears every picker and cross-filter. Filter ids are
+// [a-z][a-z0-9_]* (validated on load), so they are safe inside the expression.
+func resetExpr(d *dashboards.Dashboard, url string) string {
+	var b strings.Builder
+	for _, f := range d.Filters {
+		switch f.Type {
+		case dashboards.FilterDateRange:
+			fmt.Fprintf(&b, "$f_%s_from = ''; $f_%s_to = ''; ", f.ID, f.ID)
+		case dashboards.FilterMultiselect:
+			fmt.Fprintf(&b, "$f_%s = []; ", f.ID)
+		default:
+			fmt.Fprintf(&b, "$f_%s = ''; ", f.ID)
+		}
+	}
+	b.WriteString("$cross = '{}'; $ev = ''; ")
+	b.WriteString(postExpr(url))
+	return b.String()
+}
+
+// chipValues abbreviates a long selection (a brush over many days).
+func chipValues(vals []string) string {
+	if len(vals) <= 3 {
+		return strings.Join(vals, ", ")
+	}
+	return vals[0] + " … " + vals[len(vals)-1] + " (" + strconv.Itoa(len(vals)) + ")"
+}
+
+func filterLabel(f dashboards.Filter) string {
+	if f.Label != "" {
+		return f.Label
+	}
+	return f.ID
+}
+
+func chartTitle(c dashboards.Chart) string {
+	if c.Title != "" {
+		return c.Title
+	}
+	return c.ID
+}
+
+// cellStyle places a chart through CSS variables read by .dash-cell in
+// ui/input.css (one column on small screens, the 12-column grid above).
+func cellStyle(l dashboards.Layout) string {
+	x, y := "auto", "auto"
+	if l.X != nil {
+		x = strconv.Itoa(*l.X + 1)
+	}
+	if l.Y != nil {
+		y = strconv.Itoa(*l.Y + 1)
+	}
+	return fmt.Sprintf("--x:%s;--y:%s;--w:%d;--h:%d", x, y, l.W, l.H)
+}

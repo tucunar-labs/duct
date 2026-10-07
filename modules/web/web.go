@@ -46,7 +46,9 @@ func init() {
 // X-Forwarded-For, default false), "login_max_attempts" (per username, default
 // 5), "login_ip_max_attempts" (per IP, default 20), "login_lockout" (default 15m,
 // doubles on repeated lockouts, max 24h), "row_limit" (rows shown per query, default
-// 1000), "query_timeout" (Go duration, default 60s).
+// 1000), "query_timeout" (Go duration, default 60s), "dashboards_dir" (folder with
+// the dashboards/*.yaml files; `duct serve` fills it with <project>/dashboards;
+// unset: no dashboards).
 type Web struct {
 	ln           net.Listener
 	addr         string
@@ -60,6 +62,7 @@ type Web struct {
 	lockout      time.Duration
 	rowLimit     int
 	queryTimeout time.Duration
+	dashDir      string
 }
 
 var (
@@ -80,6 +83,9 @@ func (w *Web) Init(_ context.Context, cfg contract.Config) error {
 		if s, ok := cfg[k].(string); ok && s != "" {
 			w.addr = s
 		}
+	}
+	if s, ok := cfg["dashboards_dir"].(string); ok {
+		w.dashDir = s
 	}
 	if b, ok := cfg["secure_cookies"].(bool); ok {
 		w.secure = &b
@@ -182,7 +188,7 @@ func (w *Web) Handler(h contract.QueryHandler, auth contract.AuthProvider) http.
 	return newApp(h, auth, appConfig{
 		rowLimit: limit, queryTimeout: timeout, sessionTTL: ttl, secure: w.secure,
 		idleTimeout: w.idleTimeout, keys: w.keys, trustProxy: w.trustProxy,
-		userMax: w.userMax, ipMax: w.ipMax, lockout: w.lockout, minLoginTime: 200 * time.Millisecond,
+		userMax: w.userMax, ipMax: w.ipMax, lockout: w.lockout, minLoginTime: 200 * time.Millisecond, dashboardsDir: w.dashDir,
 	}).routes()
 }
 

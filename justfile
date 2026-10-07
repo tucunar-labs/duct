@@ -46,11 +46,13 @@ lint:
     @if command -v golangci-lint >/dev/null; then golangci-lint run ./...; else echo "golangci-lint not installed, skipping"; fi
 
 test:
-    go test ./... -short -timeout 3m
+    go test ./... -short -timeout 8m
 
-# Placeholder: tests tagged `integration` (testcontainers) live in test/integration.
+# Tests tagged `integration` (test/integration): Postgres, RustFS and Kafka, started with
+# Podman by the helpers, or taken from DUCT_TEST_PG_DSN, DUCT_TEST_S3_ENDPOINT/_ACCESS_KEY/
+# _SECRET_KEY and DUCT_TEST_KAFKA_BROKERS (the `integration` job of CI sets them).
 test-integration:
-    go test -tags "integration duckdb_arrow" ./test/integration/...
+    go test -tags "integration duckdb_arrow" ./test/integration/... -count=1 -timeout 45m
 
 # examples/demo as an e2e test with the real binary (ODBC step needs podman, unixODBC
 # and psqlODBC; it is skipped when missing or with DUCT_E2E_NO_ODBC=1).

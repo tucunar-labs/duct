@@ -11,7 +11,7 @@ import (
 
 type pageData struct {
 	Title  string
-	Active string // "catalog" | "sql" | ""
+	Active string // "catalog" | "dashboards" | "sql" | ""
 	User   string
 	Role   string
 	CSRF   string
@@ -56,6 +56,7 @@ templ header(p pageData) {
 			</a>
 			<nav class="flex gap-1 text-sm" aria-label="Principal">
 				@navLink("/catalog", "Catálogo", p.Active == "catalog")
+				@navLink("/dashboards", "Dashboards", p.Active == "dashboards")
 				@navLink("/sql", "Editor SQL", p.Active == "sql")
 			</nav>
 			<div class="ml-auto flex items-center gap-3 text-sm">
@@ -134,12 +135,22 @@ func previewURL(schemaName, tableName string) templ.SafeURL {
 	return templ.URL("/sql?" + url.Values{"q": {q}}.Encode())
 }
 
-templ catalogPage(p pageData, schemas []schema, errMsg string) {
+templ catalogPage(p pageData, schemas []schema, errMsg string, dashes []dashLink) {
 	@layout(p) {
 		<div class="mb-4 flex items-baseline justify-between">
 			<h1 class="text-xl font-semibold">Catálogo</h1>
 			<p class="text-sm text-muted">Lo que tu rol puede ver</p>
 		</div>
+		if len(dashes) > 0 {
+			<p class="mb-4 flex flex-wrap items-center gap-2 text-sm" aria-label="Dashboards">
+				<span class="text-muted">Dashboards:</span>
+				for _, l := range dashes {
+					if l.Err == "" {
+						<a href={ templ.URL("/dashboards/" + l.Name) } class="rounded-full border border-line px-3 py-0.5 text-brand-strong hover:bg-hover">{ l.Title }</a>
+					}
+				}
+			</p>
+		}
 		if errMsg != "" {
 			<p role="alert" class="rounded border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
 		} else if len(schemas) == 0 {

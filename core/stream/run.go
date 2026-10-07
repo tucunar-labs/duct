@@ -11,6 +11,7 @@ import (
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/ingest"
+	"github.com/alonsoburon/duct/core/metrics"
 	"github.com/alonsoburon/duct/core/txretry"
 )
 
@@ -22,6 +23,22 @@ type BatchInfo struct {
 	Skipped  int           // redelivered messages already in the table
 	Elapsed  time.Duration // write time (all attempts)
 	Age      time.Duration // oldest message timestamp -> commit
+}
+
+var (
+	streamRows    = metrics.Default().Counter("duct_stream_rows_total", "Rows landed in Bronze, by stream.", "stream")
+	streamRejects = metrics.Default().Counter("duct_stream_rejects_total", "Messages set aside in <target>_rejects, by stream.", "stream")
+	streamBatches = metrics.Default().Counter("duct_stream_batches_total", "Micro-batches committed, by stream.", "stream")
+	streamLag     = metrics.Default().Gauge("duct_stream_lag_seconds", "Age of the oldest message of the last committed batch (Kafka timestamp to commit), by stream.", "stream")
+	streamLast    = metrics.Default().Gauge("duct_stream_last_commit_timestamp_seconds", "Unix time of the last committed batch, by stream.", "stream")
+)
+
+func observeBatch(i BatchInfo) {
+	streamRows.Add(float64(i.Rows), i.Stream)
+	streamRejects.Add(float64(i.Rejected), i.Stream)
+	streamBatches.Inc(i.Stream)
+	streamLag.Set(i.Age.Seconds(), i.Stream)
+	streamLast.Set(float64(time.Now().Unix()), i.Stream)
 }
 
 // Writer is one stream: consumer -> micro-batch -> DuckLake -> offset commit.
@@ -92,6 +109,7 @@ func (w *Writer) Run(ctx context.Context) error {
 		if err != nil {
 			return err // only context cancellation gets here
 		}
+		observeBatch(info)
 		if w.OnBatch != nil {
 			w.OnBatch(info)
 		}

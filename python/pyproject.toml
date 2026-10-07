@@ -6,7 +6,12 @@ requires-python = ">=3.12"
 dependencies = ["duct-data"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.8", "pyright>=1.1.380"]
+dev = [
+  "pytest>=8", "ruff>=0.8", "pyright>=1.1.380",
+  # optional SDK extras, installed so the tests exercise the real transports
+  "pyarrow>=17", "pandas>=2", "polars>=1", "psycopg[binary]>=3.2",
+  "marimo>=0.25", "uvicorn>=0.30", "websockets>=13",
+]
 
 [tool.uv.sources]
 duct-data = { workspace = true }
@@ -30,3 +35,6 @@ extraPaths = ["duct-data/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["duct-data/tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"duct-data/tests/*" = ["PT018", "SIM117"]
