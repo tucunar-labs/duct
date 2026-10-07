@@ -4,19 +4,47 @@ on:
     branches: [main]
   pull_request:
 
+# go.mod has `replace github.com/posthog/duckgres => ../duckgres` (private fork,
+# branch `duct`), so both repos are checked out side by side.
 jobs:
   check:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: duct
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: duct
+      - uses: actions/checkout@v4
+        with:
+          repository: alonsoburon/duckgres
+          ref: duct
+          path: duckgres
+          ssh-key: ${{ secrets.DUCKGRES_DEPLOY_KEY }}
       - uses: jdx/mise-action@v2
+        with:
+          working_directory: duct
       - run: just check
 
   e2e:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: duct
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: duct
+      - uses: actions/checkout@v4
+        with:
+          repository: alonsoburon/duckgres
+          ref: duct
+          path: duckgres
+          ssh-key: ${{ secrets.DUCKGRES_DEPLOY_KEY }}
       - uses: jdx/mise-action@v2
+        with:
+          working_directory: duct
       # ODBC step of examples/demo: Postgres in Podman (preinstalled) + psqlODBC.
       - run: sudo apt-get update && sudo apt-get install -y unixodbc odbc-postgresql
       - run: just e2e
