@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -158,14 +159,34 @@ func odbcSupport() (driver, why string) {
 	if !found {
 		return "", "unixODBC (libodbc.so.2) not installed"
 	}
+	if os.Getenv("DUCT_E2E_PG_PORT") != "" {
+		return driver, "" // external Postgres (CI service container)
+	}
 	if _, err := exec.LookPath("podman"); err != nil {
 		return "", "podman not available"
 	}
 	return driver, ""
 }
 
+const seedSQL = "CREATE TABLE clientes (id int, nombre text, region text); INSERT INTO clientes VALUES (1,'Ana','CL'),(2,'Beto','AR'),(3,'Cami','CL')"
+
+// startPostgres returns the port of a Postgres with the demo's source table.
+// In CI it uses an external server (DUCT_E2E_PG_PORT, user postgres,
+// password pw); locally it starts one in Podman.
 func startPostgres(t *testing.T) (port int) {
 	t.Helper()
+	if p := os.Getenv("DUCT_E2E_PG_PORT"); p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil {
+			t.Fatalf("DUCT_E2E_PG_PORT: %v", err)
+		}
+		cmd := exec.Command("psql", "-h", "127.0.0.1", "-p", p, "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-c", seedSQL) //nolint:gosec // test
+		cmd.Env = append(os.Environ(), "PGPASSWORD=pw")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("seed external postgres: %v\n%s", err, out)
+		}
+		return port
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -178,12 +199,12 @@ func startPostgres(t *testing.T) (port int) {
 	deadline := time.Now().Add(150 * time.Second)
 	for exec.Command("podman", "exec", id, "psql", "-U", "postgres", "-c", "select 1").Run() != nil {
 		if time.Now().After(deadline) {
-			t.Fatal("postgres did not start")
+			logs, _ := exec.Command("podman", "logs", "--tail", "40", id).CombinedOutput() //nolint:gosec // test
+			t.Fatalf("postgres did not start; container logs:\n%s", logs)
 		}
 		time.Sleep(time.Second)
 	}
-	podman(t, "exec", id, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
-		"CREATE TABLE clientes (id int, nombre text, region text); INSERT INTO clientes VALUES (1,'Ana','CL'),(2,'Beto','AR'),(3,'Cami','CL')")
+	podman(t, "exec", id, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-c", seedSQL)
 	return port
 }
 

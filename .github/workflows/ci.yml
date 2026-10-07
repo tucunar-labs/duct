@@ -29,6 +29,18 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # Source DB for the demo's ODBC step (the test uses Podman only locally).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: pw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 5s --health-retries 30
+    env:
+      DUCT_E2E_PG_PORT: "5432"
     defaults:
       run:
         working-directory: duct
@@ -45,6 +57,6 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           working_directory: duct
-      # ODBC step of examples/demo: Postgres in Podman (preinstalled) + psqlODBC.
+      # psqlODBC for the demo's ODBC step.
       - run: sudo apt-get update && sudo apt-get install -y unixodbc odbc-postgresql
       - run: just e2e
