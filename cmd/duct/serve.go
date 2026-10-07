@@ -23,6 +23,7 @@ import (
 type serveOptions struct {
 	Protocols []string          // empty: [serve].protocols, else every linked protocol
 	Listen    map[string]string // protocol -> address
+	NoJobs    bool              // do not run the jobs/ orchestrator in this process
 	// Ready is called once every protocol is bound, with protocol -> address.
 	Ready func(addrs map[string]string)
 }
@@ -46,6 +47,7 @@ func cmdServe(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	protos := fs.String("protocols", "", "comma-separated protocols to start (default: [serve].protocols or all linked)")
 	listen := listenFlag{}
 	fs.Var(listen, "listen", "listen address override, <protocol>=<host:port> (repeatable)")
+	noJobs := fs.Bool("no-jobs", false, "do not run the scheduler and workers of jobs/*.yaml in this process")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
@@ -53,7 +55,7 @@ func cmdServe(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
-	opt := serveOptions{Listen: listen, Ready: func(addrs map[string]string) {
+	opt := serveOptions{Listen: listen, NoJobs: *noJobs, Ready: func(addrs map[string]string) {
 		names := make([]string, 0, len(addrs))
 		for n := range addrs {
 			names = append(names, n)
@@ -77,6 +79,10 @@ func protocolNames(p *project.Project, opt serveOptions) ([]string, error) {
 	}
 	if len(names) == 0 {
 		for _, m := range registry.List(contract.KindProtocol) {
+			// mcp serves the semantic layer: only on by default when there is a model.
+			if m.Name == "mcp" && !hasSemanticModel(p) {
+				continue
+			}
 			names = append(names, m.Name)
 		}
 	}
@@ -151,6 +157,11 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 		// Reserved keys: where the lake is, for protocols that run their own
 		// read-only DuckDB session (serve-pg).
 		p.ModuleConfig(cfg)
+		if name == "mcp" { // the semantic models live in the project
+			if _, ok := cfg["semantic_dir"]; !ok {
+				cfg["semantic_dir"] = filepath.Join(p.Root, semanticDirName)
+			}
+		}
 		if name == "web" { // persistent web sessions survive restarts
 			if _, ok := cfg["session_key_file"]; !ok {
 				cfg["session_key_file"] = filepath.Join(filepath.Dir(p.StatePath()), "web_session.key")
@@ -183,6 +194,11 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	jobsDone, err := startJobs(sctx, p, httpURLOf(p, names, protocols), opt.NoJobs)
+	if err != nil {
+		return fmt.Errorf("jobs: %w", err)
+	}
+	streamingDone := startStreaming(sctx, cancel, p) // [stream] / [alerts] in duct.toml
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -204,6 +220,11 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 		}()
 	}
 	wg.Wait()
+	cancel()
+	<-jobsDone // running tasks are cancelled and recorded before the engine closes
+	if err := streamingDone(); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	// Flush the audit log before the engine goes away (deferred closes).
 	fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer fcancel()

@@ -15,6 +15,9 @@
   Duct-owned tables, attached as `duct`; **or** a Postgres connection string, then schema
   `state_schema`, default `duct`), `locked` (bool), `busy_timeout_ms` (default 5000, SQLite
   only), `extensions` (extra extensions to INSTALL+LOAD; `catalog migrate` passes `postgres`).
+- **Memory mode:** `Init` with `{"memory": true}` (and nothing else) opens a plain in-memory
+  DuckDB: no lake, no Duct state, no extensions, default catalog `memory`. `duct alerts` keeps
+  the stream windows there (`memory.go`).
 - **Catalogs:** lake = `lake` (default after Init), Duct tables = `duct` (`duct.duct_*`).
 - **Extensions:** `INSTALL` + `LOAD` of `ducklake` and `sqlite_scanner` at Init (network the
   first time; cached in `~/.duckdb/extensions/<version>/`).

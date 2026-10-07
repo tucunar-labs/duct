@@ -125,6 +125,76 @@ var Migrations = []Migration{
 			)`,
 		},
 	},
+	{
+		// Alerts (ADR 0009): the alerts currently firing, so a restart of
+		// `duct alerts` neither re-notifies them nor forgets to resolve them.
+		Version: 5,
+		Name:    "alert_state",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_alert_state (
+				rule VARCHAR NOT NULL,
+				alert_key VARCHAR NOT NULL,
+				severity VARCHAR NOT NULL,
+				message VARCHAR NOT NULL,
+				labels VARCHAR NOT NULL,
+				firing_since TIMESTAMP NOT NULL,
+				PRIMARY KEY (rule, alert_key)
+			)`,
+		},
+	},
+	{
+		// Orchestrator (ADR 0005): runs and task attempts of jobs/*.yaml, the
+		// fire keys that make a cron tick / trigger start exactly one run across
+		// machines, and trigger cursors (last snapshot, files seen). Params and
+		// credentials are never stored: workers read them from their own jobs/.
+		Version: 6,
+		Name:    "jobs",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_jobs_runs (
+				id BIGINT PRIMARY KEY,
+				job VARCHAR NOT NULL,
+				trigger_kind VARCHAR NOT NULL,
+				detail VARCHAR,
+				status VARCHAR NOT NULL,
+				scheduled_for TIMESTAMP,
+				started_at TIMESTAMP NOT NULL,
+				finished_at TIMESTAMP,
+				error VARCHAR,
+				pinned_to VARCHAR,
+				heartbeat_at TIMESTAMP,
+				finalizer VARCHAR
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_task_runs (
+				run_id BIGINT NOT NULL,
+				task_id VARCHAR NOT NULL,
+				job VARCHAR NOT NULL,
+				task_type VARCHAR NOT NULL,
+				depends_on VARCHAR NOT NULL,
+				status VARCHAR NOT NULL,
+				attempts INTEGER NOT NULL,
+				max_attempts INTEGER NOT NULL,
+				not_before TIMESTAMP,
+				owner VARCHAR,
+				heartbeat_at TIMESTAMP,
+				started_at TIMESTAMP,
+				finished_at TIMESTAMP,
+				duration_ms BIGINT,
+				error VARCHAR,
+				output VARCHAR,
+				PRIMARY KEY (run_id, task_id)
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_jobs_fires (
+				fire_key VARCHAR PRIMARY KEY,
+				run_id BIGINT NOT NULL,
+				fired_at TIMESTAMP NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_jobs_state (
+				state_key VARCHAR PRIMARY KEY,
+				state_value VARCHAR NOT NULL,
+				updated_at TIMESTAMP NOT NULL
+			)`,
+		},
+	},
 }
 
 const createMigrations = `CREATE TABLE IF NOT EXISTS duct.duct_migrations (

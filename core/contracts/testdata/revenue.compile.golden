@@ -1,0 +1,25 @@
+contracts/revenue.odcs.yaml -> gold.revenue
+  schema (checked on every refresh; any difference is FAIL UPDATE)
+    customer string NOT NULL
+    total number NOT NULL
+  checks (run on the staged result, before the lake is touched)
+    customer.required [critical] expects = 0 -> FAIL UPDATE
+      SELECT CAST(count(*) FILTER (WHERE "customer" IS NULL) AS DOUBLE) FROM "gold"."revenue"
+    total.required [critical] expects = 0 -> FAIL UPDATE
+      SELECT CAST(count(*) FILTER (WHERE "total" IS NULL) AS DOUBLE) FROM "gold"."revenue"
+    customer.unique [critical] expects = 0 -> FAIL UPDATE
+      SELECT CAST((count("customer") - count(DISTINCT "customer")) AS DOUBLE) FROM "gold"."revenue"
+    rowCount [critical] expects > 0 -> FAIL UPDATE
+      SELECT CAST(count(*) AS DOUBLE) FROM "gold"."revenue"
+    no_negative_totals [critical] expects = 0 -> FAIL UPDATE
+      SELECT CAST((SELECT count(*) FROM "gold"."revenue" WHERE total < 0) AS DOUBLE)
+    nullValues(total) [warning] expects <= 5 -> warn (recorded in duct_pipeline_runs)
+      SELECT CAST(coalesce(100.0 * count(*) FILTER (WHERE "total" IS NULL) / nullif(count(*), 0), 0) AS DOUBLE) FROM "gold"."revenue"
+  row expectations (merged into the pipeline)
+    CONSTRAINT contract:customer_lowercase EXPECT (NOT (("customer" IS NOT NULL AND NOT (regexp_matches(CAST("customer" AS VARCHAR), '^[a-z]+$'))))) ON VIOLATION DROP ROW
+  not evaluated: Totals are net of VAT.: text rule (informational)
+  roles (applied by `duct contract compile --apply` and after every `duct run` of the table)
+    GRANT SELECT ON gold.revenue TO analistas
+    ALTER TABLE gold.revenue SET ROW FILTER analistas (customer <> 'secret')
+    ALTER TABLE gold.revenue SET MASK analistas.customer AS left(customer, 1) || '***'
+  freshness: stale after 24h0m0s (latency); see `duct contract freshness`

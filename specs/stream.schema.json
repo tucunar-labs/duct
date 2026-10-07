@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://duct.dev/specs/stream.schema.json",
+  "title": "Duct stream (streams/<name>.yaml)",
+  "description": "One Kafka topic landed in a Bronze table by `duct stream` (and followed by `duct alerts` when it has a window). Brokers come from [kafka] in duct.toml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "topic"],
+  "properties": {
+    "name": {"description": "Unique stream name; also the default table name and the name of the alerts window table.", "type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "topic": {"description": "Kafka topic carrying one JSON object per message.", "type": "string", "minLength": 1},
+    "target": {"description": "Destination table, always in bronze. Default: bronze.<name>.", "type": "string", "pattern": "^bronze\\.[a-z][a-z0-9_]*$"},
+    "format": {"enum": ["json"], "default": "json"},
+    "batch": {
+      "description": "A micro-batch is written when max_rows messages are buffered or max_interval has passed since the first one.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_rows": {"type": "integer", "minimum": 1, "default": 5000},
+        "max_interval": {"description": "Go duration, e.g. 200ms, 1s.", "type": "string", "default": "1s"}
+      }
+    },
+    "group": {"description": "Kafka consumer group. Default: duct-stream-<name>.", "type": "string"},
+    "start": {"description": "Where a group with no committed offset begins.", "enum": ["earliest", "latest"], "default": "earliest"},
+    "inline_rows": {"description": "DuckLake data_inlining_row_limit for the bronze schema: micro-batches up to this many rows go to the catalog instead of a Parquet file each (`duct gc` flushes them).", "type": "integer", "minimum": 0},
+    "window": {"description": "How much history `duct alerts` keeps in memory for this stream (Go duration, e.g. 10m). Omitted: alerts ignore the stream.", "type": "string"}
+  }
+}

@@ -13,3 +13,10 @@ scoped to the prefix, and the `./lake` -> `s3://` move. For the CI job: Podman i
 also downloads the `httpfs` extension); with an S3 service container set `DUCT_TEST_S3_ENDPOINT`,
 `DUCT_TEST_S3_ACCESS_KEY`, `DUCT_TEST_S3_SECRET_KEY` (the STS test needs a server with AssumeRole,
 i.e. RustFS) and `DUCT_TEST_RUSTFS_IMAGE` pins the image.
+`stream_kafka_test.go` runs Kafka (`docker.io/apache/kafka`, KRaft, one node, bound to 127.0.0.1,
+removed at the end; `DUCT_TEST_KAFKA_IMAGE` pins the image, `DUCT_TEST_KAFKA_BROKER` uses an
+existing broker) and drives the binary: `duct stream` (produce -> Bronze latency, `kill -9`
+without loss or duplicates, rejects, lag 0), `duct alerts` (threshold and silent-sensor rules,
+resolution, ntfy/webhook/PagerDuty/WhatsApp against `httptest`, Bronze record) and `duct serve`
+with `[stream]` + `[alerts]`. `DUCT_TEST_KEEP_FAILED=<dir>` copies the project of a failed test there.
+

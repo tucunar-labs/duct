@@ -25,11 +25,16 @@ commands:
   catalog              catalog tools: info, migrate --to postgres://... (SQLite -> Postgres)
   gc                   checkpoint the catalog WAL and run DuckLake maintenance
   ingest [name...]     load ingest/*.yaml sources into bronze tables
+  stream [name...]     land Kafka topics (streams/*.yaml) in bronze tables, committing offsets after each batch
+  alerts [check]       evaluate alerts/*.sql over the last minutes of the streams and notify (ntfy, webhook, WhatsApp, PagerDuty)
   run [target...]      refresh pipelines/ tables in dependency order (--only)
-  serve                serve the lake over every protocol (pg, http) as governed users
+  jobs <cmd>           jobs/*.yaml orchestration: list, run <job>, history (scheduler runs in serve)
+  serve                serve the lake over every protocol (pg, http, mcp) as governed users
   role|user|token      manage roles, users and API tokens (duct role create analistas)
+  contract <cmd>       data contracts (ODCS): lint, diff, test, compile, freshness
   grant|revoke         duct grant select on gold.revenue to analistas
   policy               row-filter / mask / sync of the per-role views
+  semantic <cmd>       semantic layer (Ossie): validate, list, build, query
 `
 
 func main() {
@@ -59,10 +64,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		for _, m := range registry.List("") {
 			_, _ = fmt.Fprintf(stdout, "%s\t%s\n", m.Kind, m.Name)
 		}
-	case "init", "query", "sql", "migrate", "catalog", "gc", "run", "serve", "role", "user", "token", "grant", "revoke", "policy":
+	case "init", "query", "sql", "migrate", "catalog", "gc", "run", "serve", "role", "user", "token", "grant", "revoke", "policy", "semantic":
 		return runProject(fs.Arg(0), fs.Args()[1:], stdout, stderr)
+	case "contract":
+		return runContract(fs.Args()[1:], stdout, stderr)
 	case "ingest":
 		return runIngest(fs.Args()[1:], stdout, stderr)
+	case "stream":
+		return runStream(fs.Args()[1:], stdout, stderr)
+	case "alerts":
+		return runAlertsCmd(fs.Args()[1:], stdout, stderr)
+	case "jobs":
+		return runJobs(fs.Args()[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "duct: unknown command %q\n", fs.Arg(0))
 		fs.Usage()

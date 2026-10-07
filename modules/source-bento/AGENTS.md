@@ -14,7 +14,8 @@
   Env vars in Bento YAML (`${TOKEN}`) are resolved by Bento.
 - **Rows:** each message is JSON. Object -> one row; array -> one row per element; scalar ->
   column `value`. All messages are collected until the input ends (finite inputs only; a
-  streaming input never ends, Kafka path comes later), then emitted as Arrow batches of
+  streaming input never ends: for streaming, run Bento with a Kafka output and let `duct stream`
+  land the topic, ADR 0003), then emitted as Arrow batches of
   10 000 rows with one schema inferred over all rows: int64, float64, bool, string
   (nested values and mixed types as JSON text). Whole result is held in memory.
 - **Trap:** a bare `http_client` input polls the URL forever (Bento semantics) and never

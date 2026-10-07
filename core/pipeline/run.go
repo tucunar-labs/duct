@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +63,7 @@ func (r *Report) Failed() bool {
 type Options struct {
 	Targets []string // schema.name or bare name (schema main); empty = all
 	Only    bool     // do not run the upstream of the targets
+	Gate    Gate     // optional: data contracts (see gate.go)
 }
 
 // NormalizeTarget turns "Silver.Orders" or "orders" into a Table.ID form.
@@ -138,7 +140,7 @@ func Run(ctx context.Context, eng contract.Engine, tables []Table, opt Options) 
 			res.Status = StatusSkipped
 			res.Err = fmt.Errorf("upstream %s did not refresh", failedUp)
 		} else {
-			res = refresh(ctx, eng, t)
+			res = refresh(ctx, eng, t, opt.Gate)
 		}
 		res.Duration = time.Since(start)
 		if res.Status != StatusSuccess {
@@ -176,8 +178,12 @@ const expCol = "__duct_exp_"
 // same pass; NULL counts as violation), counts come from the staging table,
 // and only if no FAIL UPDATE is violated does a single lake transaction replace
 // the target from the staging table. A failure never touches the old version.
-func refresh(ctx context.Context, eng contract.Engine, t Table) (res Result) {
+func refresh(ctx context.Context, eng contract.Engine, t Table, gate Gate) (res Result) {
 	res = Result{ID: t.ID(), Status: StatusFailed}
+	governed := gate != nil && gate.Governs(t.ID())
+	if governed {
+		t.Expectations = append(slices.Clone(t.Expectations), gate.Expectations(t.ID())...)
+	}
 	if err := eng.Exec(ctx, "ATTACH IF NOT EXISTS ':memory:' AS "+StageCatalog); err != nil {
 		res.Err = fmt.Errorf("stage: %w", err)
 		return res
@@ -240,13 +246,24 @@ func refresh(ctx context.Context, eng contract.Engine, t Table) (res Result) {
 	if len(drops) > 0 {
 		res.Dropped = vals[len(vals)-1]
 	}
-	if len(failing) > 0 {
-		res.Err = fmt.Errorf("expectation FAIL UPDATE violated: %s; previous version kept", strings.Join(failing, ", "))
-		return res
-	}
 	var exclude []string
 	for i := range t.Expectations {
 		exclude = append(exclude, quoteIdent(expCol+strconv.Itoa(i)))
+	}
+	var failures []string
+	if len(failing) > 0 {
+		failures = append(failures, "expectation FAIL UPDATE violated: "+strings.Join(failing, ", "))
+	}
+	if governed {
+		viol, gerr := runGate(ctx, eng, gate, t.ID(), stage, exclude, keep)
+		res.Violations = append(res.Violations, viol...)
+		if gerr != nil {
+			failures = append(failures, gerr.Error())
+		}
+	}
+	if len(failures) > 0 {
+		res.Err = fmt.Errorf("%s; previous version kept", strings.Join(failures, "; "))
+		return res
 	}
 	proj := "*"
 	if len(exclude) > 0 {
@@ -268,6 +285,25 @@ func refresh(ctx context.Context, eng contract.Engine, t Table) (res Result) {
 	res.Status = StatusSuccess
 	res.Rows = total - res.Dropped
 	return res
+}
+
+// runGate exposes the staged rows that would be written as a view and lets the
+// gate (data contract) judge them. The view lives in the in-memory stage catalog.
+func runGate(ctx context.Context, eng contract.Engine, gate Gate, id, stage string, exclude []string, keep string) ([]Violation, error) {
+	view := StageCatalog + ".main." + quoteIdent(id+"__gate")
+	proj := "*"
+	if len(exclude) > 0 {
+		proj = "* EXCLUDE (" + strings.Join(exclude, ", ") + ")"
+	}
+	if err := eng.Exec(ctx, "CREATE OR REPLACE VIEW "+view+" AS SELECT "+proj+" FROM "+stage+" WHERE "+keep); err != nil {
+		return nil, fmt.Errorf("contract view: %w", err)
+	}
+	defer func() {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = eng.Exec(dctx, "DROP VIEW IF EXISTS "+view)
+	}()
+	return gate.Check(ctx, eng, id, view)
 }
 
 func record(ctx context.Context, eng contract.Engine, runID int64, start time.Time, r Result) error {

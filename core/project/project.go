@@ -52,6 +52,11 @@ type Config struct {
 	S3 S3Config `toml:"s3"`
 	// Serve configures `duct serve` (the [serve] table).
 	Serve ServeConfig `toml:"serve"`
+	// Kafka, Stream and Alerts configure streaming and alerts (ADR 0003, 0009);
+	// see streamconfig.go. Stream and Alerts are nil when the table is absent.
+	Kafka  KafkaConfig     `toml:"kafka"`
+	Stream *StreamSettings `toml:"stream"`
+	Alerts *AlertsSettings `toml:"alerts"`
 }
 
 // S3Config is the [s3] table of duct.toml, used when storage is s3://...:

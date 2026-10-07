@@ -1,0 +1,62 @@
+apiVersion: v3.2.0
+kind: DataContract
+id: 6f1c2a3e-0000-4000-8000-000000000001
+name: gold_revenue
+version: 1.0.0
+status: active
+domain: finance
+servers:
+  - server: lake
+    type: custom
+    customProperties:
+      - property: ducklake_table
+        value: gold.revenue
+schema:
+  - name: revenue
+    physicalType: table
+    description: Revenue per customer
+    properties:
+      - name: customer
+        logicalType: string
+        primaryKey: true
+        quality:
+          - metric: invalidValues
+            name: customer_lowercase
+            arguments:
+              pattern: "^[a-z]+$"
+            mustBe: 0
+            severity: warning
+            customProperties:
+              - property: duct.on_violation
+                value: drop_row
+      - name: total
+        logicalType: number
+        required: true
+        quality:
+          - metric: nullValues
+            mustBeLessOrEqualTo: 5
+            unit: percent
+            severity: warning
+    quality:
+      - metric: rowCount
+        mustBeGreaterThan: 0
+        severity: critical
+      - type: sql
+        name: no_negative_totals
+        query: SELECT count(*) FROM {table} WHERE total < 0
+        mustBe: 0
+        severity: critical
+      - type: text
+        description: Totals are net of VAT.
+roles:
+  - role: analistas
+    access: read
+    customProperties:
+      - property: duct.row_filter
+        value: customer <> 'secret'
+      - property: duct.mask.customer
+        value: "left(customer, 1) || '***'"
+slaProperties:
+  - property: latency
+    value: 1
+    unit: d

@@ -231,8 +231,8 @@ func TestPostgresCatalogEndToEnd(t *testing.T) {
 	if got := pg.sql(t, "lake1", "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'ducklake_%'"); got == "0" {
 		t.Fatal("no ducklake_* tables in Postgres")
 	}
-	if got := pg.sql(t, "lake1", "SELECT count(*) FROM information_schema.tables WHERE table_schema='duct' AND table_name LIKE 'duct_%'"); got != "11" {
-		t.Fatalf("duct tables in schema duct = %s, want 11", got)
+	if got := pg.sql(t, "lake1", "SELECT count(*) FROM information_schema.tables WHERE table_schema='duct' AND table_name LIKE 'duct_%'"); got != "16" {
+		t.Fatalf("duct tables in schema duct = %s, want 16", got)
 	}
 	if got := pg.sql(t, "lake1", "SELECT data_type FROM information_schema.columns WHERE table_schema='duct' AND table_name='duct_users' AND column_name='disabled'"); got != "boolean" {
 		t.Fatalf("duct_users.disabled type = %q", got)

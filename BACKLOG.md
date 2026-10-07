@@ -126,8 +126,43 @@ Pendientes conocidos para v0.2:
       `TestS3MigrateFromLocal`.
 - [ ] Job de CI con `test-integration` (Podman + RustFS).
 
-## Después de v0.1 (sin orden aún)
+## Streaming y alertas (2026-10-07)
 
-Orquestador y triggers · `duct alerts` + canales · contratos ODCS (`odcs-go`) · capa
-semántica Ossie + MCP · ECharts · marimo · MLflow opcional · OpenSharing · streaming con
-Kafka · Postgres como catálogo multi-máquina · contrato de operabilidad para Duct Cloud.
+- [x] `duct stream`: Kafka → Bronze (franz-go), commit de offsets tras el commit de DuckLake,
+      sin duplicados por reentrega, rejects, evolución de esquema, dentro de `duct serve` con
+      `[stream]`. Evidencia: `TestStreamWriter` (consumidor falso), `TestStreamKafkaToBronze`
+      (Kafka real en Podman: mediana 205 ms, `kill -9` sin pérdida ni duplicados, lag 0).
+- [x] `duct alerts`: reglas `alerts/*.sql`, ventana en DuckDB en memoria, estado firing/resolved
+      con dedup, registro en `bronze.duct_alerts`; canales ntfy, webhook, PagerDuty, WhatsApp.
+      Evidencia: `core/alerts` tests, `TestAlertsRunner`, `TestAlertsKafka` (umbral ~115 ms,
+      resolución ~195 ms, sensor mudo a 2,0 s), `TestServeRunsStreamAndAlerts`.
+- [ ] WhatsApp contra la API real de Meta (hoy solo `httptest`: falta cuenta, número y plantilla
+      *utility* aprobada).
+- [ ] Alertas: histéresis (`FOR`), recordatorios y silencios; activo/activo con varias instancias.
+- [ ] Streaming: Avro/Protobuf con registry, métricas, DLQ por tipo incompatible.
+
+## v0.3 — Orquestación, contratos, semántica (2026-10-07)
+
+- [x] Orquestador: `jobs/*.yaml` (cron con zona horaria, `on_snapshot`, `on_file`, DAG con
+      reintentos/timeout), tareas pipeline/ingest/shell/python/notebook, alertas por canal;
+      una corrida por tick entre varias máquinas. Evidencia: `TestE2EJobs*`,
+      `TestJobsTwoServersFireOnce`.
+- [x] Contratos ODCS (`duct contract lint|diff|test|compile|freshness`), aplicados en `duct run`
+      y en jobs vía `contracts.RunPipeline`. Evidencia: `TestE2EContracts`, demo con contrato.
+- [x] Capa semántica Ossie 0.2.0-dev (compilador propio sobre vistas por rol, sin fan-out) +
+      servidor MCP (`list_metrics`, `describe`, `query_metrics`). Evidencia: `TestE2EMCP`.
+- [x] Streaming y alertas (sección anterior).
+
+## Pendiente (sin orden aún)
+
+- [ ] Dashboards con ECharts sobre la capa semántica (ADR 0008).
+- [ ] marimo integrado: `duct notebook` y montaje ASGI con auth HTTP+WebSocket (ADR 0006).
+- [ ] MLflow opcional (`duct enable mlflow`) (ADR 0010).
+- [ ] UDFs Python (`functions/*.py`, `@duct.function`) y ejecutables stdin/stdout (ADR 0005).
+- [ ] OpenSharing fase 1 (por consulta) y fase 2 (servidor) (ADR 0014).
+- [ ] Contrato de operabilidad: `duct backup|restore`, API admin, `/metrics` ampliado (ADR 0013).
+- [ ] Job de CI con `test-integration` (servicios Postgres, RustFS y Kafka en vez de Podman).
+- [ ] Semántica: métricas multi-dataset, filtros sobre métricas, preagregados, recarga en caliente.
+- [ ] Jobs: recarga en caliente, retención del historial, recuperar ticks perdidos.
+- [ ] Alertas: histéresis (`FOR`), silencios, recordatorios, activo/activo.
+- [ ] Subir a DuckDB 2.0 (despriorizado por el usuario).

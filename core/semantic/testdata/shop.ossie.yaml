@@ -1,0 +1,78 @@
+version: 0.2.0.dev0
+name: shop
+description: Tienda de ejemplo
+ai_context:
+  instructions: Montos en pesos chilenos.
+datasets:
+  - name: customers
+    source: gold.customers
+    primary_key: [id]
+    description: Clientes
+    fields:
+      - name: id
+        expression: {dialects: [{dialect: ANSI_SQL, expression: id}]}
+      - name: region
+        expression: {dialects: [{dialect: ANSI_SQL, expression: region}]}
+        description: Región del cliente
+        ai_context: {synonyms: [zona]}
+      - name: name
+        expression: {dialects: [{dialect: ANSI_SQL, expression: name}]}
+  - name: orders
+    source: gold.orders
+    primary_key: [id]
+    fields:
+      - name: id
+        expression: {dialects: [{dialect: ANSI_SQL, expression: id}]}
+      - name: status
+        expression: {dialects: [{dialect: ANSI_SQL, expression: status}]}
+      - name: amount
+        expression: {dialects: [{dialect: ANSI_SQL, expression: amount}]}
+      - name: created
+        datatype: Date
+        expression: {dialects: [{dialect: ANSI_SQL, expression: created}]}
+      - name: month
+        expression: {dialects: [{dialect: ANSI_SQL, expression: "strftime(created, '%Y-%m')"}]}
+        dimension: {is_time: true}
+      - name: secret_note
+        expression: {dialects: [{dialect: ANSI_SQL, expression: note}]}
+        custom_extensions:
+          - {vendor_name: DUCT, data: '{"hidden": true}'}
+  - name: order_items
+    source: gold.order_items
+    fields:
+      - name: id
+        expression: {dialects: [{dialect: ANSI_SQL, expression: id}]}
+      - name: sku
+        expression: {dialects: [{dialect: ANSI_SQL, expression: sku}]}
+      - name: qty
+        expression: {dialects: [{dialect: ANSI_SQL, expression: qty}]}
+      - name: line_total
+        expression: {dialects: [{dialect: ANSI_SQL, expression: qty * price}]}
+relationships:
+  - name: orders_customer
+    from: orders
+    to: customers
+    from_columns: [customer_id]
+    to_columns: [id]
+  - name: items_order
+    from: order_items
+    to: orders
+    from_columns: [order_id]
+    to_columns: [id]
+metrics:
+  - name: revenue
+    description: Ventas netas
+    datatype: Decimal
+    expression: {dialects: [{dialect: ANSI_SQL, expression: SUM(orders.amount)}]}
+    ai_context: {synonyms: [ventas, facturación]}
+  - name: order_count
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "COUNT(DISTINCT orders.id)"}]}
+  - name: avg_order
+    expression: {dialects: [{dialect: ANSI_SQL, expression: revenue / order_count}]}
+  - name: units
+    expression: {dialects: [{dialect: ANSI_SQL, expression: SUM(order_items.qty)}]}
+  - name: item_revenue
+    expression: {dialects: [{dialect: ANSI_SQL, expression: SUM(order_items.line_total)}]}
+custom_extensions:
+  - vendor_name: DUCT
+    data: '{"default_limit": 500, "max_limit": 5000}'

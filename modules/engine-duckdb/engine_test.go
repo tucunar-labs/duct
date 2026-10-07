@@ -226,3 +226,32 @@ func TestParseConfigS3(t *testing.T) {
 		t.Error("gs:// accepted")
 	}
 }
+
+// "memory": true is a plain in-memory DuckDB with no lake: tables resolve in
+// the memory catalog and InTx works.
+func TestMemoryMode(t *testing.T) {
+	e := &Engine{}
+	if err := e.Init(context.Background(), contract.Config{"memory": true}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	ctx := context.Background()
+	if err := e.Exec(ctx, "CREATE TABLE w (k VARCHAR, v INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	err := e.InTx(ctx, nil, func(ctx context.Context, tx contract.Tx) error {
+		return tx.Exec(ctx, "INSERT INTO w VALUES ('a', 1), ('b', 2)")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, e, "SELECT sum(v) FROM w"); got != "3" {
+		t.Fatalf("sum = %q", got)
+	}
+	if got := scalar(t, e, "SELECT current_database()"); got != "memory" {
+		t.Fatalf("catalog = %q", got)
+	}
+	if err := e.Exec(ctx, "SELECT * FROM lake.t"); err == nil {
+		t.Fatal("the lake must not exist in memory mode")
+	}
+}

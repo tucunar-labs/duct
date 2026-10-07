@@ -1,0 +1,37 @@
+# Contrato de Gold (ADR 0004): esquema, reglas de calidad y frescura de
+# gold.ventas_por_region. `duct run` lo hace cumplir antes de escribir.
+apiVersion: v3.2.0
+kind: DataContract
+id: 0d6c1c0e-5b0e-4b9b-9a53-6a1d3f6f0a01
+name: ventas_por_region
+version: 1.0.0
+status: active
+servers:
+  - server: lake
+    type: custom
+    customProperties:
+      - property: ducklake_table
+        value: gold.ventas_por_region
+schema:
+  - name: ventas_por_region
+    physicalType: table
+    properties:
+      - name: region
+        logicalType: string
+        primaryKey: true
+      - name: total
+        logicalType: number
+        required: true
+    quality:
+      - metric: rowCount
+        mustBeGreaterThan: 0
+        severity: critical
+      - type: sql
+        name: totales_positivos
+        query: SELECT count(*) FROM {table} WHERE total <= 0
+        mustBe: 0
+        severity: critical
+slaProperties:
+  - property: latency
+    value: 1
+    unit: d

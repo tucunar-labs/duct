@@ -286,6 +286,17 @@ func TestDemo(t *testing.T) {
 			t.Errorf("silver.clientes rows")
 		}
 
+		// The contract of gold.ventas_por_region held on that refresh.
+		if out := c.must("contract", "lint"); !strings.Contains(out, "1 contracts checked") || strings.Contains(out, "error") {
+			t.Errorf("contract lint: %s", out)
+		}
+		if out := c.must("contract", "test"); !strings.Contains(out, "PASS  [critical] totales_positivos") || strings.Contains(out, "FAIL") {
+			t.Errorf("contract test: %s", out)
+		}
+		if out := c.must("contract", "freshness"); !strings.HasPrefix(out, "FRESH ") {
+			t.Errorf("contract freshness: %s", out)
+		}
+
 		// A big sale breaks the FAIL UPDATE of gold.ventas_por_region only.
 		f, err := os.OpenFile(filepath.Join(demo, "data", "ventas.csv"), os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {

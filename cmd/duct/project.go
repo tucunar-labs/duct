@@ -66,6 +66,8 @@ func runProject(cmd string, args []string, stdout, stderr io.Writer) int {
 		err = cmdGrant(ctx, cmd, args, stdout, stderr)
 	case "policy":
 		err = cmdPolicy(ctx, args, stdout, stderr)
+	case "semantic":
+		err = cmdSemantic(ctx, args, stdout, stderr)
 	}
 	switch {
 	case err == nil:

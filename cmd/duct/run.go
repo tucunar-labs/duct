@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/alonsoburon/duct/core/governance"
+	"github.com/alonsoburon/duct/core/contracts"
 	"github.com/alonsoburon/duct/core/pipeline"
 	"github.com/alonsoburon/duct/core/project"
 )
@@ -48,13 +48,16 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	if _, err := project.Migrate(ctx, eng); err != nil {
 		return err
 	}
-	rep, err := pipeline.Run(ctx, eng, tables, pipeline.Options{Targets: targets, Only: *only})
+	ref, err := contracts.RunPipeline(ctx, eng, p.Root, tables, pipeline.Options{Targets: targets, Only: *only})
+	rep := ref.Report
 	if rep != nil {
 		printReport(stdout, rep)
 	}
-	// Refreshed tables may have new columns: rebuild the per-role views.
-	if gerr := regen(ctx, governance.NewStore(eng), stdout); gerr != nil {
-		_, _ = fmt.Fprintf(stderr, "warning: %v\n", gerr)
+	for _, l := range ref.Log {
+		_, _ = fmt.Fprintln(stdout, l)
+	}
+	for _, w := range ref.Warnings {
+		_, _ = fmt.Fprintf(stderr, "warning: %s\n", w)
 	}
 	if err != nil {
 		return err

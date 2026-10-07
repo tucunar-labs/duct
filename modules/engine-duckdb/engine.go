@@ -210,6 +210,9 @@ func strKey(cfg contract.Config, key string, required bool) (string, error) {
 // only path that works with allow_persistent_secrets=false, and errors are
 // scrubbed of the password.
 func (e *Engine) Init(ctx context.Context, cfg contract.Config) error {
+	if mem, _ := cfg["memory"].(bool); mem { // see memory.go
+		return e.initMemory(ctx)
+	}
 	c, err := parseConfig(cfg)
 	if err != nil {
 		return err

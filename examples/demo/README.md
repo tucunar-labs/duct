@@ -18,7 +18,7 @@ psql "host=127.0.0.1 port=<puerto pg> user=ana dbname=duct" -c "SELECT * FROM ve
 2. **ingest**: `ingest/ventas.yaml` (CSV) y `ingest/clientes.yaml` (Postgres por
    ODBC; necesita unixODBC, psqlODBC y las variables `PG_ODBC_DRIVER`, `PGPORT`,
    `PGPW`). Sin Postgres, borra `ingest/clientes.yaml` y `pipelines/clientes.sql`.
-3. **run**: `silver.ventas` descarta 2 filas (`monto > 0`, `DROP ROW`). Para ver
+3. **run**: `contracts/ventas_por_region.odcs.yaml` gobierna `gold.ventas_por_region` (`duct contract lint|test|freshness`). `silver.ventas` descarta 2 filas (`monto > 0`, `DROP ROW`). Para ver
    `FAIL UPDATE`, agrega una venta grande a `data/ventas.csv`
    (`7,2026-01-11,AR,22.222.222-2,5000`), vuelve a `duct ingest` y `duct run`:
    `gold.ventas_por_region` falla (total >= 1000) y conserva su versión anterior;
