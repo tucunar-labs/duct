@@ -34,7 +34,8 @@ Hecho = los cinco pasos corren en `examples/demo/` como test e2e en CI.
   - [x] `duckdb-go` + DuckLake con catálogo SQLite. Evidencia: e2e en `cmd/duct`.
     Base: **DuckDB 1.5.6**; la línea 2.0 de duckdb-go aún no carga `ducklake` (ADR 0002).
   - [x] Ídem con catálogo Postgres. Evidencia: `test/integration/catalog_postgres_test.go`.
-  - [ ] Subir a DuckDB 2.0 cuando duckdb-go publique un tag con extensiones compatibles.
+  - [ ] Acelerar la suite de `cmd/duct` (~5 min local, ~8 min en CI de 2 núcleos): `t.Parallel()` en los e2e independientes, un binario compartido por paquete y mover los más pesados a `test/e2e`.
+- [ ] Subir a DuckDB 2.0 cuando duckdb-go publique un tag con extensiones compatibles.
   - [x] DuckLake sobre RustFS con DuckDB bloqueado + STS por prefijo. Evidencia: ADR 0007
     (huecos: extensión sqlite y `CREATE SECRET` → filtro de sentencias obligatorio).
   - [x] duckgres sirve DuckLake; psql/psycopg/JDBC funcionan con fallos acotados. Evidencia:

@@ -46,7 +46,7 @@ lint:
     @if command -v golangci-lint >/dev/null; then golangci-lint run ./...; else echo "golangci-lint not installed, skipping"; fi
 
 test:
-    go test ./... -short -timeout 8m
+    go test ./... -short -timeout 20m
 
 # Tests tagged `integration` (test/integration): Postgres, RustFS and Kafka, started with
 # Podman by the helpers, or taken from DUCT_TEST_PG_DSN, DUCT_TEST_S3_ENDPOINT/_ACCESS_KEY/
