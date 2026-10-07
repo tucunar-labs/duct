@@ -109,12 +109,26 @@ def make_runner(spec: registry.FunctionSpec) -> Callable[[Any], Any]:
     return run_scalar
 
 
+def _warm_up() -> None:
+    """Exercise the IPC round trip once before reporting ready.
+
+    pyarrow initializes parts of IPC and its memory pool lazily; on a slow
+    machine that first use costs hundreds of milliseconds and would be charged
+    to the first real batch (and its per-batch timeout). User functions are
+    never called here.
+    """
+    sample = pa.table({"i": pa.array([1], type=pa.int64()), "s": pa.array(["x"])})
+    ipc.open_stream(pa.py_buffer(_ipc_bytes(sample))).read_all()
+    _ipc_bytes(pa.table({"result": pa.array([None], type=pa.int64())}))
+
+
 def serve(stdin: BinaryIO, proto_out: BinaryIO, load: list[Path]) -> int:
     for p in load:
         load_path(p)
     runners: dict[str, Callable[[Any], Any]] = {}
     for spec in registry.functions():
         runners[spec.name] = make_runner(spec)
+    _warm_up()
     write_frame(proto_out, b"\x00" + json.dumps(registry.to_dict()).encode())
     while True:
         frame = read_frame(stdin)

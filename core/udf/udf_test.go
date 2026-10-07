@@ -245,14 +245,14 @@ func TestPythonTimeoutKillsWorkerAndRecovers(t *testing.T) {
 	py := pythonCmd(t)
 	root := t.TempDir()
 	write(t, filepath.Join(root, "functions", "f.py"), "import time, duct\n\n@duct.function\ndef nap(x: int) -> int:\n    time.sleep(x)\n    return x\n")
-	eng, _ := attach(t, root, Options{Python: py, Workers: 1, Timeout: 700 * time.Millisecond})
+	eng, _ := attach(t, root, Options{Python: py, Workers: 1, Timeout: 3 * time.Second})
 	f := eng.funcs["nap"]
 	defer func() { _ = f.Close() }()
 	start := time.Now()
-	if _, err := f.Call(context.Background(), []arrow.Array{ints(30)}); err == nil {
+	if _, err := f.Call(context.Background(), []arrow.Array{ints(60)}); err == nil {
 		t.Fatal("want a timeout")
 	}
-	if time.Since(start) > 10*time.Second {
+	if time.Since(start) > 20*time.Second {
 		t.Fatalf("timeout took %v", time.Since(start))
 	}
 	res, err := f.Call(context.Background(), []arrow.Array{ints(0)})
@@ -267,8 +267,8 @@ func TestPythonSlowStartDoesNotCountAgainstBatchTimeout(t *testing.T) {
 	py := pythonCmd(t)
 	root := t.TempDir()
 	write(t, filepath.Join(root, "functions", "f.py"), "import duct\n\n@duct.function\ndef one(x: int) -> int:\n    return x\n")
-	slow := append([]string{"sh", "-c", `case "$*" in *duct.udf.worker*) sleep 1.5;; esac; exec "$@"`, "sh"}, py...)
-	eng, _ := attach(t, root, Options{Python: slow, Workers: 1, Timeout: 500 * time.Millisecond})
+	slow := append([]string{"sh", "-c", `case "$*" in *duct.udf.worker*) sleep 4;; esac; exec "$@"`, "sh"}, py...)
+	eng, _ := attach(t, root, Options{Python: slow, Workers: 1, Timeout: 2 * time.Second})
 	f := eng.funcs["one"]
 	defer func() { _ = f.Close() }()
 	res, err := f.Call(context.Background(), []arrow.Array{ints(7)})
