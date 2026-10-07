@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,7 +24,10 @@ import (
 
 // ---- fakes ----
 
-type fakeAuth struct{ fail bool }
+type fakeAuth struct {
+	fail bool
+	role string // "" = "analyst"
+}
 
 func (*fakeAuth) Name() string                                { return "fake" }
 func (*fakeAuth) Init(context.Context, contract.Config) error { return nil }
@@ -33,7 +37,11 @@ func (f *fakeAuth) Authenticate(_ context.Context, c contract.Credentials) (cont
 		return contract.Identity{}, errors.New("backend down")
 	}
 	if c.Scheme == "password" && c.User == "ana" && c.Secret == "pw" {
-		return contract.Identity{User: "ana", Role: "analyst"}, nil
+		role := f.role
+		if role == "" {
+			role = "analyst"
+		}
+		return contract.Identity{User: "ana", Role: role}, nil
 	}
 	return contract.Identity{}, fmt.Errorf("bad login: %w", contract.ErrUnauthenticated)
 }
@@ -74,13 +82,17 @@ func (q *fakeQ) Query(_ context.Context, id contract.Identity, sql string) (cont
 	var names []string
 	var cols []arrow.Array
 	if strings.Contains(sql, "information_schema.columns") {
-		names = []string{"table_schema", "table_name", "column_name", "data_type"}
+		names = []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"}
 		cols = []arrow.Array{
 			str("gold", "gold", "gold", "silver"),
 			str("sales", "sales", "sales", "orders"),
 			str("id", "<b>name</b>", "amount", "id"),
 			str("BIGINT", "VARCHAR", "DOUBLE", "BIGINT"),
+			str("NO", "YES", "YES", "NO"),
 		}
+	} else if strings.Contains(sql, "count(*)") {
+		names = []string{"count_star()"}
+		cols = []arrow.Array{str("42")}
 	} else {
 		n := q.rows
 		if n == 0 {
@@ -345,7 +357,7 @@ func TestSQLPageIsPrefilled(t *testing.T) {
 	if strings.Contains(body, "<script>x</script>") {
 		t.Error("query parameter injected unescaped")
 	}
-	for _, want := range []string{"data-sql-editor", "data-bind:sql", "/sql/run", "editor.js", "datastar.js", "wordmark"} {
+	for _, want := range []string{"data-sql-editor", "data-bind:sql", "/sql/run", "editor.js", "grid.js", "datastar.js", "wordmark"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("editor page missing %q", want)
 		}
@@ -361,7 +373,14 @@ func TestRunQuery(t *testing.T) {
 	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("status %d type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
-	for _, want := range []string{"datastar-patch-elements", `id="results"`, "2 filas", "NULL", "&lt;script&gt;alert(1)&lt;/script&gt;", "label"} {
+	for _, want := range []string{
+		"datastar-patch-elements", "mode replace", `id="results"`, // replaced, not morphed
+		"2 filas", `data-rows="2"`, // meta line for the history recorder
+		"<duct-grid data-spec='", // virtualized island fed with compact JSON
+		`"rows":[`,               // raw JSON in a single-quoted attribute
+		`"name":"label"`,
+		`\u003cscript\u003ealert(1)\u003c/script\u003e`, // < > & are \u-escaped by encoding/json
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("result missing %q in %s", want, body)
 		}
@@ -534,5 +553,279 @@ func TestCatalogErrorIsShown(t *testing.T) {
 	resp, body := e.get("/catalog")
 	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(body, "No se pudo leer el catálogo") {
 		t.Errorf("catalog error: %d", resp.StatusCode)
+	}
+}
+
+// ---- redesigned UI: shell, table detail, SQL selection, admin nav ----
+
+func TestAppShellMarkers(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	_, body := e.get("/catalog")
+	for _, want := range []string{
+		"shell.js", "data-theme-toggle", "data-sidebar-toggle", "data-menu-toggle",
+		"Migas de pan", "data-menu-panel", "Salir", "Catálogo", "Editor SQL", "Dashboards",
+		"Trabajos",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell missing %q", want)
+		}
+	}
+	// The classic shell script must not be inline (CSP).
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<script >") {
+		t.Error("inline script in the page")
+	}
+}
+
+func TestAdminNavOnlyForAdmin(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	if _, body := e.get("/catalog"); strings.Contains(body, ">Admin<") {
+		t.Error("Admin placeholder shown to a non-admin role")
+	}
+	e2 := newEnv(t, appConfig{}, &fakeAuth{role: "duct_admin"})
+	e2.login()
+	_, body := e2.get("/catalog")
+	if !strings.Contains(body, ">Admin<") || !strings.Contains(body, "duct_admin") {
+		t.Errorf("Admin placeholder missing for duct_admin: %s", body)
+	}
+}
+
+func TestCatalogTableDetail(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	resp, body := e.get("/catalog/gold/sales")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	for _, want := range []string{
+		"Vista previa", "Detalles", "Abrir en editor SQL", // tabs + action
+		"&lt;b&gt;name&lt;/b&gt;", // columns tab, escaped
+		">No<", ">Sí<",            // nullable badges
+		"42",            // row count through QueryHandler
+		"2 filas",       // preview
+		"<duct-grid",    // preview rendered by the virtualized island
+		"grid.js",       // island loaded on this page
+		"/sql?q=SELECT", // open in editor
+		"data-copy-text",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("table detail missing %q", want)
+		}
+	}
+	// The preview and the count run as the session identity.
+	for _, c := range e.q.calls {
+		if c.who.User != "ana" {
+			t.Errorf("detail query ran as %+v", c)
+		}
+	}
+	if !strings.Contains(body, `href="/catalog"`) {
+		t.Error("no breadcrumb to /catalog")
+	}
+}
+
+func TestCatalogTableNotFound(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	resp, body := e.get("/catalog/gold/nope")
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(body, "No existe la tabla") {
+		t.Errorf("unknown table: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestSQLRunSelection(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	tok := e.csrfToken()
+	body := fmt.Sprintf(`{"sql":"SELECT 1","sel":"SELECT 2","_csrf":"%s"}`, tok)
+	req, _ := http.NewRequest("POST", e.srv.URL+"/sql/run", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("X-CSRF-Token", tok)
+	resp, out := e.do(req)
+	if resp.StatusCode != 200 || !strings.Contains(out, "id=\"results\"") {
+		t.Fatalf("run selection: %d %s", resp.StatusCode, out)
+	}
+	last := e.q.calls[len(e.q.calls)-1]
+	if last.sql != "SELECT 2" {
+		t.Errorf("ran %q, want the selection", last.sql)
+	}
+}
+
+func TestSQLEditorHasSchemaBrowser(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	_, body := e.get("/sql")
+	for _, want := range []string{
+		"data-sql-editor", "data-bind:sql", "data-bind:sel", "/sql/run",
+		"data-worksheets", "data-history", "data-splitter", "data-splitter-v",
+		"data-obj", "data-tree", "draggable", "sql-schema-pane", "data-schema-collapse",
+		"editor.js", "grid.js", "wordmark", "gold",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("editor page missing %q", want)
+		}
+	}
+}
+
+func TestErrPos(t *testing.T) {
+	for _, tc := range []struct {
+		msg       string
+		line, col int
+	}{
+		{`Parser Error: syntax error at or near "SELCT"`, 0, 0},
+		{"LINE 3: SELCT 1", 3, 0},
+		{"Binder Error: at line 2, column 9", 2, 9},
+	} {
+		l, c := errPos(tc.msg)
+		if l != tc.line || c != tc.col {
+			t.Errorf("errPos(%q) = %d,%d want %d,%d", tc.msg, l, c, tc.line, tc.col)
+		}
+	}
+}
+
+// TestGridSpecEscaping pins the single-quoted data-spec contract: raw JSON
+// (encoding/json escapes <, > and &), apostrophes entity-encoded, and the
+// payload parses back to the original cells.
+func TestGridSpecEscaping(t *testing.T) {
+	r := &queryResult{
+		Columns: []resultColumn{{Name: "c", Type: "TEXT"}},
+		Rows:    [][]cell{{{Text: `it's </script> "q" & <b>`}}, {{Null: true}}},
+	}
+	var sb strings.Builder
+	if err := (gridSpecElem{spec: resultsSpec(r)}).Render(context.Background(), &sb); err != nil {
+		t.Fatal(err)
+	}
+	out := sb.String()
+	if n := strings.Count(out, "'"); n != 2 {
+		t.Errorf("raw apostrophe outside the delimiters: %q", out)
+	}
+	if strings.Contains(out, "<b>") || strings.Contains(out, "</script>") {
+		t.Errorf("HTML not neutralised: %q", out)
+	}
+	spec := out[strings.IndexByte(out, '\'')+1 : strings.LastIndex(out, "'")]
+	var parsed struct {
+		Rows [][]any `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(spec, "&#39;", "'")), &parsed); err != nil {
+		t.Fatalf("payload does not parse back: %v (%q)", err, spec)
+	}
+	if len(parsed.Rows) != 2 || parsed.Rows[0][0] != `it's </script> "q" & <b>` || parsed.Rows[1][0] != nil {
+		t.Errorf("round trip lost data: %#v", parsed.Rows)
+	}
+}
+
+// roleCatalogQ answers the catalog list with different objects per role:
+// the analyst sees gold.sales/orders, any other role only hidden.secret. The
+// JSON endpoint feeds the editor island, so it must never mix identities.
+type roleCatalogQ struct{ *fakeQ }
+
+func (r roleCatalogQ) Catalog(_ context.Context, id contract.Identity) (contract.Stream, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, call{id, "(catalog)"})
+	r.mu.Unlock()
+	mem := memory.NewGoAllocator()
+	str := func(vs ...string) arrow.Array {
+		b := array.NewStringBuilder(mem)
+		for _, v := range vs {
+			b.Append(v)
+		}
+		return b.NewArray()
+	}
+	names := []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"}
+	var cols []arrow.Array
+	if id.Role == "analyst" {
+		cols = []arrow.Array{
+			str("gold", "gold", "gold", "gold", "silver"),
+			str("sales", "sales", "sales", "orders", "orders"),
+			str("id", "name", "amount", "id", "total"),
+			str("BIGINT", "VARCHAR", "DOUBLE", "BIGINT", "DOUBLE"),
+			str("NO", "YES", "YES", "NO", "YES"),
+		}
+	} else {
+		cols = []arrow.Array{
+			str("hidden"), str("secret"), str("id"), str("BIGINT"), str("NO"),
+		}
+	}
+	fields := make([]arrow.Field, len(names))
+	for i, n := range names {
+		fields[i] = arrow.Field{Name: n, Type: cols[i].DataType(), Nullable: true}
+	}
+	sc := arrow.NewSchema(fields, nil)
+	rec := array.NewRecordBatch(sc, cols, int64(cols[0].Len()))
+	rdr, err := array.NewRecordReader(sc, []arrow.RecordBatch{rec})
+	return rdr, err
+}
+
+// TestCatalogJSON pins the contract of the endpoint the editor island uses
+// for drag & drop and autocompletion: JSON shaped catalog, session required
+// and only role-visible objects.
+func TestCatalogJSON(t *testing.T) {
+	newRoleEnv := func(role string) *env {
+		q := &fakeQ{}
+		srv := httptest.NewServer(newApp(roleCatalogQ{q}, &fakeAuth{role: role}, appConfig{rowLimit: 10, queryTimeout: time.Second, sessionTTL: time.Hour}).routes())
+		t.Cleanup(srv.Close)
+		jar, _ := cookiejar.New(nil)
+		return &env{t: t, srv: srv, q: q, c: &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	}
+	type col struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	type tbl struct {
+		Name    string `json:"name"`
+		Columns []col  `json:"columns"`
+	}
+	type sch struct {
+		Name   string `json:"name"`
+		Tables []tbl  `json:"tables"`
+	}
+	parse := func(body string) []sch {
+		var doc struct {
+			Schemas []sch `json:"schemas"`
+		}
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("invalid JSON %s: %v", body, err)
+		}
+		return doc.Schemas
+	}
+
+	// Anonymous: redirected to the login page, no data.
+	e := newRoleEnv("analyst")
+	resp, _ := e.get("/catalog.json")
+	if resp.StatusCode != http.StatusSeeOther || !strings.Contains(resp.Header.Get("Location"), "/login") {
+		t.Fatalf("anonymous: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	e.login()
+	resp, body := e.get("/catalog.json")
+	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("status %d type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	schemas := parse(body)
+	if len(schemas) != 2 || schemas[0].Name != "gold" || len(schemas[0].Tables) != 2 || schemas[1].Name != "silver" {
+		t.Fatalf("analyst catalog: %+v", schemas)
+	}
+	sales := schemas[0].Tables[0]
+	if sales.Name != "sales" || len(sales.Columns) != 3 || sales.Columns[1].Name != "name" || sales.Columns[1].Type != "VARCHAR" {
+		t.Errorf("shape: %+v", sales)
+	}
+
+	// Another role only gets its own objects, never the analyst's.
+	e2 := newRoleEnv("outsider")
+	e2.login()
+	_, body2 := e2.get("/catalog.json")
+	other := parse(body2)
+	if len(other) != 1 || other[0].Name != "hidden" || other[0].Tables[0].Name != "secret" {
+		t.Fatalf("outsider catalog: %+v", other)
+	}
+	if strings.Contains(body2, "sales") || strings.Contains(body2, "gold") || strings.Contains(body2, "orders") || strings.Contains(body2, "amount") {
+		t.Errorf("role leakage in %s", body2)
+	}
+	// Both requests ran through the session identity and the lister.
+	for _, c := range append(e.q.calls, e2.q.calls...) {
+		if c.sql != "(catalog)" || c.who.User != "ana" {
+			t.Errorf("call %+v not the session's catalog list", c)
+		}
 	}
 }

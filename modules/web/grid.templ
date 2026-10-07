@@ -1,0 +1,193 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ---- results grid (SQL editor + catalog preview) ----
+
+// typeKind classifies a column type for its badge.
+func typeKind(t string) string {
+	u := strings.ToUpper(t)
+	switch {
+	case strings.Contains(u, "INT"), strings.Contains(u, "DEC"), strings.Contains(u, "NUM"),
+		strings.Contains(u, "FLOAT"), strings.Contains(u, "DOUBLE"), strings.Contains(u, "REAL"),
+		strings.Contains(u, "MONEY"):
+		return "num"
+	case strings.Contains(u, "CHAR"), strings.Contains(u, "TEXT"), strings.Contains(u, "STRING"),
+		strings.Contains(u, "BLOB"), strings.Contains(u, "UUID"), strings.Contains(u, "JSON"),
+		strings.Contains(u, "ENUM"), strings.Contains(u, "LIST"), strings.Contains(u, "STRUCT"),
+		strings.Contains(u, "MAP"), strings.Contains(u, "UNION"):
+		return "str"
+	case strings.Contains(u, "BOOL"):
+		return "bool"
+	case strings.Contains(u, "DATE"), strings.Contains(u, "TIME"), strings.Contains(u, "INTERVAL"),
+		strings.Contains(u, "YEAR"):
+		return "time"
+	default:
+		return "other"
+	}
+}
+
+var (
+	errLineRe = regexp.MustCompile(`(?i)\bline\s+(\d+)\b`)
+	errColRe  = regexp.MustCompile(`(?i)\bcolumn\s+(\d+)\b`)
+)
+
+// errPos finds a LINE/COLUMN hint in an engine error message (best effort:
+// DuckDB reports positions in some parser errors only).
+func errPos(msg string) (int, int) {
+	line, col := 0, 0
+	if m := errLineRe.FindStringSubmatch(msg); m != nil {
+		line, _ = strconv.Atoi(m[1])
+	}
+	if m := errColRe.FindStringSubmatch(msg); m != nil {
+		col, _ = strconv.Atoi(m[1])
+	}
+	return line, col
+}
+
+func msString(d time.Duration) string {
+	ms := float64(d) / float64(time.Millisecond)
+	if ms < 1 {
+		return "<1 ms"
+	}
+	if ms < 1000 {
+		return strconv.Itoa(int(ms+0.5)) + " ms"
+	}
+	return strconv.FormatFloat(ms/1000, 'f', 2, 64) + " s"
+}
+
+// resultsGrid is the patch target content: a small wrapper whose meta line is
+// server-rendered and whose body is a <duct-grid> island fed with compact
+// JSON (columns + rows arrays). Rendering is left to the island (row
+// virtualization), so a 1,000-row result never becomes 15,000 DOM nodes and
+// the SSE payload stays small. The wrapper carries data-nonce/data-rows/…
+// for the local history recorder in shell.js.
+templ resultsView(r *queryResult) {
+	// The live region sits on the stable host (sql.templ): this container is
+	// replaced, not morphed, so a change inside it would not be announced.
+	<div id="results">
+		if r == nil {
+			@emptyState("sparkle", "Sin resultados todavía", "Escribe una consulta y pulsa Ejecutar.")
+		} else {
+			@resultsGrid(r, true)
+		}
+	</div>
+}
+
+// gridColumnSpec / resultsSpec build the JSON payload of the island. Cells
+// are plain strings or null (no HTML): the browser escapes them by using
+// textContent.
+type gridColumnSpec struct {
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
+}
+
+func resultsSpec(r *queryResult) string {
+	spec := struct {
+		Columns []gridColumnSpec `json:"columns"`
+		Rows    [][]any          `json:"rows"`
+	}{Columns: make([]gridColumnSpec, 0, len(r.Columns)), Rows: make([][]any, 0, len(r.Rows))}
+	for _, c := range r.Columns {
+		spec.Columns = append(spec.Columns, gridColumnSpec{Name: c.Name, Type: c.Type})
+	}
+	for _, row := range r.Rows {
+		jr := make([]any, len(row))
+		for i, cell := range row {
+			if cell.Null {
+				jr[i] = nil
+			} else {
+				jr[i] = cell.Text
+			}
+		}
+		spec.Rows = append(spec.Rows, jr)
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return `{"columns":[],"rows":[]}`
+	}
+	return string(b)
+}
+
+// gridSpecElem writes the <duct-grid> island with its JSON payload in a
+// single-quoted attribute. json.Marshal escapes <, > and & as \uXXXX and
+// never emits a raw newline, so the only character that could close the
+// attribute is an apostrophe, which is entity-encoded here. The raw quotes
+// of the JSON keep the SSE payload small: HTML-escaping every string quote
+// (&#34;) used to add ~80 KB to a 1,000-row result.
+type gridSpecElem struct{ spec string }
+
+func (g gridSpecElem) Render(_ context.Context, w io.Writer) error {
+	_, err := io.WriteString(w, "<duct-grid data-spec='"+strings.ReplaceAll(g.spec, "'", "&#39;")+"'></duct-grid>")
+	return err
+}
+
+func gridSpecElemOf(r *queryResult) templ.Component {
+	return gridSpecElem{spec: resultsSpec(r)}
+}
+
+templ resultsGrid(r *queryResult, meta bool) {
+	if r != nil {
+		<div
+			data-results
+			data-rows={ strconv.Itoa(len(r.Rows)) }
+			data-ms={ strconv.FormatFloat(float64(r.Elapsed)/float64(time.Millisecond), 'f', 1, 64) }
+			data-error={ r.Err }
+			data-nonce={ strconv.FormatInt(r.Nonce, 10) }
+		>
+			if r.Err != "" {
+				@errorPanel(r.Err)
+			} else {
+				if meta {
+					@resultMeta(r)
+				}
+				if len(r.Columns) == 0 {
+					<p class="text-sm text-muted">La consulta no devolvió columnas.</p>
+				} else {
+					@gridSpecElemOf(r)
+				}			}
+		</div>
+	}
+}
+
+templ resultMeta(r *queryResult) {
+	<div class="mb-2 flex flex-wrap items-center gap-2 text-sm text-muted">
+		<span class="badge badge-muted">{ strconv.Itoa(len(r.Rows)) } filas</span>
+		if r.Truncated {
+			<span class="badge badge-warn">truncado al límite de { strconv.Itoa(r.Limit) }</span>
+		}
+		<span class="badge badge-muted" title="Duración de la consulta">{ msString(r.Elapsed) }</span>
+		<button type="button" data-export-csv="#results" class="btn btn-ghost btn-sm ml-auto">
+			@icon("download", "h-3.5 w-3.5")
+			Exportar CSV
+		</button>
+	</div>
+}
+
+templ errorPanel(msg string) {
+	<div role="alert" class="rounded-lg border border-danger/40 bg-danger-bg p-3">
+		<div class="flex items-start gap-2">
+			@icon("alert", "mt-0.5 h-4 w-4 flex-none text-danger")
+			<div class="min-w-0 flex-1">
+				<p class="mb-1 text-xs font-semibold uppercase tracking-wide text-danger">Error en la consulta</p>
+				<pre class="whitespace-pre-wrap font-mono text-xs text-danger">{ msg }</pre>
+				if line, col := errPos(msg); line > 0 {
+					<p class="mt-2">
+						if col > 0 {
+							<span class="badge badge-danger">L{ strconv.Itoa(line) }:C{ strconv.Itoa(col) }</span>
+						} else {
+							<span class="badge badge-danger">L{ strconv.Itoa(line) }</span>
+						}
+					</p>
+				}
+			</div>
+		</div>
+	</div>
+}

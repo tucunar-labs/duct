@@ -16,6 +16,7 @@ import {
   ToolboxComponent,
 } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
+import { mountGrid } from './gridtable.js';
 
 echarts.use([
   BarChart, LineChart, PieChart, ScatterChart, HeatmapChart,
@@ -68,14 +69,24 @@ const STYLE = `
 .kpi { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .25rem; }
 .kpi b { font: 600 2.4rem/1.1 ui-sans-serif, system-ui, sans-serif; color: var(--duct-text, #2b3440); }
 .kpi span { font: 13px ui-sans-serif, system-ui, sans-serif; color: var(--duct-muted, #647080); }
-.tbl { position: absolute; inset: 0; overflow: auto; }
-table { border-collapse: collapse; width: 100%; font: 13px ui-sans-serif, system-ui, sans-serif; color: var(--duct-text, #2b3440); }
-th { position: sticky; top: 0; background: var(--duct-surface-2, #eceff3); text-align: left; padding: .35rem .6rem; white-space: nowrap; font-weight: 600; }
-td { padding: .3rem .6rem; border-top: 1px solid var(--duct-border, #d5dbe2); white-space: nowrap; }
-td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 `;
 
-const dark = matchMedia('(prefers-color-scheme: dark)');
+// Theme follows the page (html[data-theme] from the shell toggle, else the OS).
+const media = matchMedia('(prefers-color-scheme: dark)');
+const dark = {
+  get matches() {
+    const t = document.documentElement.getAttribute('data-theme');
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    return media.matches;
+  },
+  listeners: new Set(),
+  addEventListener(type, fn) { if (type === 'change') this.listeners.add(fn); },
+  removeEventListener(type, fn) { this.listeners.delete(fn); },
+};
+const syncDark = () => dark.listeners.forEach((fn) => fn());
+media.addEventListener('change', syncDark);
+new MutationObserver(syncDark).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 function numFmt(o) {
   const loc = 'es-CL';
@@ -97,7 +108,7 @@ class DuctChart extends HTMLElement {
   constructor() {
     super();
     this.root = this.attachShadow({ mode: 'open' });
-    this.root.innerHTML = `<style>${STYLE}</style><div class="wrap"><div class="msg">Cargando…</div></div>`;
+    this.root.innerHTML = `<style>${STYLE}</style><div class="wrap"></div>`;
     this.wrap = this.root.querySelector('.wrap');
     this.chart = null;
     this.onTheme = () => this.render();
@@ -144,6 +155,9 @@ class DuctChart extends HTMLElement {
     if (!raw) return;
     let spec;
     try { spec = JSON.parse(raw); } catch { return this.message('Respuesta inválida', true); }
+    // Datastar morphs this element from the server markup, which would drop an
+    // attribute set here; flag the (unpatched) panel instead to hide its skeleton.
+    if (this.parentElement) this.parentElement.dataset.chartLoaded = '1';
     if (spec.error) return this.message(spec.error, true);
     if (!spec.rows || spec.rows.length === 0) return this.message('Sin datos', false);
     const o = spec.options || {};
@@ -198,30 +212,13 @@ class DuctChart extends HTMLElement {
   renderTable(spec, o) {
     this.dispose();
     const f = numFmt(o);
-    const box = document.createElement('div');
-    box.className = 'tbl';
-    const t = document.createElement('table');
-    const head = t.createTHead().insertRow();
-    spec.columns.forEach((c) => {
-      const th = document.createElement('th');
-      th.scope = 'col';
-      th.textContent = c.name;
-      if (c.kind === 'measure') th.className = 'n';
-      head.append(th);
+    // Same virtualized grid as the SQL results: only the rows in view exist
+    // in the DOM (shadow-safe: gridtable injects its own styles here).
+    mountGrid(this.wrap, spec, {
+      bare: true,
+      label: this.getAttribute('aria-label') || 'Tabla',
+      format: (v, i, col) => (col.kind === 'measure' ? f(v) : v == null ? '' : String(v)),
     });
-    const body = t.createTBody();
-    for (const r of spec.rows) {
-      const tr = body.insertRow();
-      r.forEach((v, i) => {
-        const td = tr.insertCell();
-        const m = spec.columns[i].kind === 'measure';
-        td.textContent = m ? f(v) : v == null ? '' : String(v);
-        if (m) td.className = 'n';
-      });
-    }
-    box.append(t);
-    this.wrap.innerHTML = '';
-    this.wrap.append(box);
   }
 }
 

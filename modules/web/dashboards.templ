@@ -15,41 +15,61 @@ import (
 // ECharts island, static/charts.js) as its query finishes. Filters and
 // cross-filter selections are Datastar signals; the server is stateless.
 
-type dashLink struct {
-	Name        string
-	Title       string
-	Description string
-	Charts      int
-	Err         string // file that does not parse: shown, not served
-}
-
 templ dashboardsPage(p pageData, links []dashLink, errMsg string) {
 	@layout(p) {
-		<div class="mb-4 flex items-baseline justify-between">
-			<h1 class="text-xl font-semibold">Dashboards</h1>
-			<p class="text-sm text-muted">Gráficos sobre la capa semántica, con los permisos de tu rol</p>
-		</div>
-		if errMsg != "" {
-			<p role="alert" class="rounded border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
-		} else if len(links) == 0 {
-			<p class="rounded-lg border border-dashed border-line p-8 text-center text-muted">No hay dashboards. Crea <code class="font-mono">dashboards/&lt;nombre&gt;.yaml</code> en el proyecto.</p>
-		}
-		<ul class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-			for _, l := range links {
-				<li class="rounded-lg border border-line bg-surface p-4">
-					if l.Err != "" {
-						<p class="font-mono text-sm">{ l.Name }</p>
-						<p role="alert" class="mt-1 whitespace-pre-wrap text-xs text-danger">{ l.Err }</p>
-					} else {
-						<a href={ templ.URL("/dashboards/" + l.Name) } class="font-medium text-brand-strong hover:underline">{ l.Title }</a>
-						if l.Description != "" {
-							<p class="mt-1 text-sm text-muted">{ l.Description }</p>
-						}
-						<p class="mt-2 text-xs text-muted">{ strconv.Itoa(l.Charts) } gráficos</p>
-					}
-				</li>
+		<div class="mx-auto max-w-5xl space-y-5">
+			<div class="flex flex-wrap items-baseline justify-between gap-2">
+				<div>
+					<h1 class="text-xl font-semibold">Dashboards</h1>
+					<p class="text-sm text-muted">Gráficos sobre la capa semántica, con los permisos de tu rol</p>
+				</div>
+				<span class="badge badge-muted">{ strconv.Itoa(len(links)) } disponibles</span>
+			</div>
+			if errMsg != "" {
+				<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
+			} else if len(links) == 0 {
+				@emptyState("dashboards", "No hay dashboards", "Crea dashboards/<nombre>.yaml en el proyecto y vuelve a cargar la página.")
 			}
-		</ul>
+			<ul class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+				for _, l := range links {
+					if l.Err != "" {
+						<li class="card p-4">
+							<div class="flex items-center gap-2">
+								<span class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-danger-bg text-danger">
+									@icon("alert", "h-4.5 w-4.5")
+								</span>
+								<p class="min-w-0 flex-1 truncate font-mono text-sm">{ l.Name }</p>
+								<span class="badge badge-danger">archivo inválido</span>
+							</div>
+							<p role="alert" class="mt-2 whitespace-pre-wrap text-xs text-danger">{ l.Err }</p>
+						</li>
+					} else {
+						<li>
+							<a href={ templ.URL("/dashboards/" + l.Name) } class="card block p-4 transition-colors hover:border-brand/50 hover:bg-hover">
+								<div class="flex items-center gap-2">
+									<span class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-surface2 text-muted">
+										@icon("dashboards", "h-4.5 w-4.5")
+									</span>
+									<div class="min-w-0">
+										<p class="truncate font-medium text-brand-strong">{ l.Title }</p>
+										if l.Description != "" {
+											<p class="mt-0.5 line-clamp-2 text-sm text-muted">{ l.Description }</p>
+										}
+									</div>
+								</div>
+								<div class="mt-3 flex items-center gap-2 text-xs text-muted">
+									<span class="badge badge-muted">{ strconv.Itoa(l.Charts) } gráficos</span>
+									<span class="ml-auto flex items-center gap-1">
+										Abrir
+										@icon("chevron-right", "h-3.5 w-3.5")
+									</span>
+								</div>
+							</a>
+						</li>
+					}
+				}
+			</ul>
+		</div>
 	}
 }
 
@@ -70,29 +90,36 @@ templ dashboardPage(p pageData, d *dashboards.Dashboard, filters []filterView, s
 			data-init={ postExpr(dataURL) }
 		>
 			<div class="mb-4 flex flex-wrap items-baseline justify-between gap-2">
-				<div>
-					<h1 class="text-xl font-semibold">{ d.Title }</h1>
+				<div class="min-w-0">
+					<h1 class="truncate text-xl font-semibold">{ d.Title }</h1>
 					if d.Description != "" {
 						<p class="text-sm text-muted">{ d.Description }</p>
 					}
 				</div>
-				<a href="/dashboards" class="text-sm text-brand-strong hover:underline">Todos los dashboards</a>
+				<a href="/dashboards" class="btn btn-secondary btn-sm">
+					@icon("chevron-right", "h-3.5 w-3.5 rotate-180")
+					Todos los dashboards
+				</a>
 			</div>
 			if len(filters) > 0 {
-				<div class="mb-3 flex flex-wrap items-end gap-3 rounded-lg border border-line bg-surface p-3" data-on:change={ postExpr(dataURL) }>
+				<div class="card mb-3 flex flex-wrap items-end gap-3 p-3" data-on:change={ postExpr(dataURL) }>
 					for _, f := range filters {
 						@filterInput(f)
 					}
-					<button type="button" class="rounded border border-line px-3 py-1 text-sm hover:bg-hover" data-on:click={ resetExpr(d, dataURL) }>Limpiar</button>
+					<button type="button" class="btn btn-ghost btn-sm" data-on:click={ resetExpr(d, dataURL) }>Limpiar filtros</button>
 				</div>
 			}
 			@dashChips(d, nil)
 			<div class="dash-grid mt-3" aria-label="Gráficos">
 				for _, c := range d.Charts {
-					<section class="dash-cell flex flex-col rounded-lg border border-line bg-surface p-3" style={ templ.SafeCSS(cellStyle(c.Layout)) } aria-label={ chartTitle(c) }>
+					<section class="dash-cell card relative flex flex-col overflow-hidden p-3" style={ templ.SafeCSS(cellStyle(c.Layout)) } aria-label={ chartTitle(c) }>
 						<h2 class="mb-1 truncate text-sm font-semibold">{ chartTitle(c) }</h2>
-						<div class="min-h-0 flex-1">
+						<div class="chart-frame min-h-0 flex-1">
 							@chartEl(c.ID, "")
+							<div class="chart-skeleton" aria-hidden="true">
+								<div class="skeleton h-3 w-1/3"></div>
+								<div class="skeleton min-h-0 flex-1"></div>
+							</div>
 						</div>
 					</section>
 				}
@@ -115,22 +142,22 @@ templ chartEl(id, spec string) {
 
 templ filterInput(f filterView) {
 	<label class="block text-sm">
-		<span class="mb-1 block text-muted">{ filterLabel(f.F) }</span>
+		<span class="label">{ filterLabel(f.F) }</span>
 		switch f.F.Type {
 			case dashboards.FilterDateRange:
 				<span class="flex items-center gap-1">
-					<input type="date" data-bind={ "f_" + f.F.ID + "_from" } aria-label={ filterLabel(f.F) + " desde" } class="rounded border border-line bg-bg px-2 py-1"/>
+					<input type="date" data-bind={ "f_" + f.F.ID + "_from" } aria-label={ filterLabel(f.F) + " desde" } class="input w-auto"/>
 					<span class="text-muted">–</span>
-					<input type="date" data-bind={ "f_" + f.F.ID + "_to" } aria-label={ filterLabel(f.F) + " hasta" } class="rounded border border-line bg-bg px-2 py-1"/>
+					<input type="date" data-bind={ "f_" + f.F.ID + "_to" } aria-label={ filterLabel(f.F) + " hasta" } class="input w-auto"/>
 				</span>
 			case dashboards.FilterMultiselect:
-				<select multiple size="4" data-bind={ "f_" + f.F.ID } class="min-w-40 rounded border border-line bg-bg px-2 py-1">
+				<select multiple size="4" data-bind={ "f_" + f.F.ID } class="select min-w-40">
 					for _, o := range f.Options {
 						<option value={ o }>{ o }</option>
 					}
 				</select>
 			default:
-				<select data-bind={ "f_" + f.F.ID } class="min-w-40 rounded border border-line bg-bg px-2 py-1">
+				<select data-bind={ "f_" + f.F.ID } class="select min-w-40">
 					<option value="">Todos</option>
 					for _, o := range f.Options {
 						<option value={ o }>{ o }</option>
@@ -151,11 +178,11 @@ templ dashChips(d *dashboards.Dashboard, cross map[string][]string) {
 			if vals := cross[c.ID]; len(vals) > 0 {
 				<button
 					type="button"
-					class="flex items-center gap-1 rounded-full border border-brand/60 bg-hover px-3 py-0.5 text-xs"
+					class="badge badge-brand gap-1 px-3"
 					title="Quitar filtro"
 					data-on:click={ "$ev = JSON.stringify({chart: '" + c.ID + "', values: []}); " + postExpr("/dashboards/"+d.Name+"/data") }
 				>
-					<span class="text-muted">{ c.CrossDim() }:</span>
+					<span class="opacity-70">{ c.CrossDim() }:</span>
 					<span class="font-medium" title={ strings.Join(vals, ", ") }>{ chipValues(vals) }</span>
 					<span aria-hidden="true">×</span>
 				</button>

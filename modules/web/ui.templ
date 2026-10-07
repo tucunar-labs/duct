@@ -1,21 +1,24 @@
 package web
 
-import (
-	"net/url"
-	"strconv"
-)
-
 // Pages are plain templ components: templUI would add generated component
 // code and its own JS for a handful of buttons and tables, against ADR 0012's
 // "minimal surface"; the tokens in ui/input.css keep the look consistent.
 
+type crumb struct {
+	Label string
+	Href  string // "" = current page (rendered as plain text)
+}
+
 type pageData struct {
-	Title  string
-	Active string // "catalog" | "dashboards" | "sql" | ""
-	User   string
-	Role   string
-	CSRF   string
-	Assets assets
+	Title   string
+	Active  string // "catalog" | "dashboards" | "sql" | "admin" | ""
+	User    string
+	Role    string
+	CSRF    string
+	Assets  assets
+	Crumbs  []crumb
+	Pinned  bool // full-height layout: the page manages its own scrolling
+	IsAdmin bool // role duct_admin: shows the Admin placeholder
 }
 
 templ layout(p pageData) {
@@ -28,17 +31,40 @@ templ layout(p pageData) {
 			<title>{ p.Title } · Duct</title>
 			<link rel="icon" type="image/png" href={ p.Assets.URL("brand/icon.png") }/>
 			<link rel="stylesheet" href={ p.Assets.URL("app.css") }/>
+			<script src={ p.Assets.URL("shell.js") }></script>
 			<script type="module" src={ p.Assets.URL("datastar.js") }></script>
 		</head>
 		<body class="min-h-screen bg-bg text-ink font-sans antialiased">
 			if p.User != "" {
-				@header(p)
+				@shell(p) {
+					{ children... }
+				}
+			} else {
+				<main class="mx-auto max-w-7xl px-4 py-6">
+					{ children... }
+				</main>
 			}
-			<main class="mx-auto max-w-7xl px-4 py-6">
-				{ children... }
-			</main>
 		</body>
 	</html>
+}
+
+// shell is the app frame: collapsible sidebar + top bar + main.
+templ shell(p pageData) {
+	<div class="shell">
+		@sidebar(p)
+		<div class="flex min-h-0 min-w-0 flex-1 flex-col">
+			@topbar(p)
+			if p.Pinned {
+				<main class="flex min-h-0 flex-1 flex-col overflow-hidden p-3 lg:p-4">
+					{ children... }
+				</main>
+			} else {
+				<main class="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 lg:p-6">
+					{ children... }
+				</main>
+			}
+		</div>
+	</div>
 }
 
 templ wordmark(a assets, class string) {
@@ -48,227 +74,364 @@ templ wordmark(a assets, class string) {
 	</picture>
 }
 
-templ header(p pageData) {
-	<header class="border-b border-line bg-surface">
-		<div class="mx-auto flex max-w-7xl items-center gap-6 px-4 py-2">
-			<a href="/" aria-label="Duct">
-				@wordmark(p.Assets, "h-8 w-auto")
+templ logo(a assets, class string) {
+	<picture>
+		<source media="(prefers-color-scheme: dark)" srcset={ a.URL("brand/logo-dark.svg") }/>
+		<img src={ a.URL("brand/logo.svg") } alt="" class={ class }/>
+	</picture>
+}
+
+templ sidebar(p pageData) {
+	<aside class="sidebar" aria-label="Navegación principal">
+		<div class="flex items-center gap-2 px-3 py-3">
+			<a href="/catalog" class="flex items-center gap-2" aria-label="Duct, inicio">
+				<span class="sidebar-brand-mark">
+					@logo(p.Assets, "h-7 w-7 flex-none")
+				</span>
+				<span class="sidebar-brand-text">
+					@wordmark(p.Assets, "h-6 w-auto")
+				</span>
 			</a>
-			<nav class="flex gap-1 text-sm" aria-label="Principal">
-				@navLink("/catalog", "Catálogo", p.Active == "catalog")
-				@navLink("/dashboards", "Dashboards", p.Active == "dashboards")
-				@navLink("/sql", "Editor SQL", p.Active == "sql")
-			</nav>
-			<div class="ml-auto flex items-center gap-3 text-sm">
-				<span class="text-muted">{ p.User }</span>
-				<span class="rounded bg-surface2 px-2 py-0.5 font-mono text-xs" title="Rol">{ p.Role }</span>
-				<form method="post" action="/logout">
-					<input type="hidden" name="csrf" value={ p.CSRF }/>
-					<button type="submit" class="rounded border border-line px-3 py-1 hover:bg-hover">Salir</button>
-				</form>
+			<button
+				type="button"
+				data-sidebar-toggle
+				class="btn btn-ghost btn-icon ml-auto flex-none"
+				aria-label="Contraer barra lateral"
+				title="Contraer/expandir barra lateral"
+			>
+				@icon("chevrons-left", "h-4 w-4")
+			</button>
+		</div>
+		<nav class="sidebar-nav flex-1 space-y-0.5 overflow-y-auto pb-3" aria-label="Secciones">
+			@navItem("/catalog", "catalog", "Catálogo", p.Active == "catalog")
+			@navItem("/sql", "sql", "Editor SQL", p.Active == "sql")
+			@navItem("/dashboards", "dashboards", "Dashboards", p.Active == "dashboards")
+			@navPlaceholder("jobs", "Trabajos")
+			if p.IsAdmin {
+				@navPlaceholder("admin", "Admin")
+			}
+		</nav>
+		<div class="border-t border-line px-4 py-2 text-xs text-muted">
+			<span class="sidebar-label">Duct · local-first</span>
+		</div>
+	</aside>
+}
+
+templ navItem(href, iconName, label string, active bool) {
+	<a
+		href={ templ.SafeURL(href) }
+		class="sidebar-link"
+		if active {
+			aria-current="page"
+		}
+	>
+		@icon(iconName, "h-4.5 w-4.5 flex-none")
+		<span class="sidebar-label truncate">{ label }</span>
+	</a>
+}
+
+templ navPlaceholder(iconName, label string) {
+	<span
+		class="sidebar-link cursor-not-allowed opacity-60"
+		aria-disabled="true"
+		title="Próximamente"
+	>
+		@icon(iconName, "h-4.5 w-4.5 flex-none")
+		<span class="sidebar-label truncate">{ label }</span>
+		<span class="sidebar-label badge badge-muted ml-auto">pronto</span>
+	</span>
+}
+
+templ topbar(p pageData) {
+	<header class="topbar">
+		<nav aria-label="Migas de pan" class="flex min-w-0 items-center gap-1.5 text-sm">
+			for i, c := range p.Crumbs {
+				if i > 0 {
+					@icon("chevron-right", "h-3.5 w-3.5 flex-none text-muted")
+				}
+				if c.Href != "" {
+					<a href={ templ.SafeURL(c.Href) } class="truncate rounded px-1 text-muted hover:text-ink hover:underline">{ c.Label }</a>
+				} else {
+					<span class="truncate rounded px-1 font-medium text-ink" aria-current="page">{ c.Label }</span>
+				}
+			}
+		</nav>
+		<div class="ml-auto flex flex-none items-center gap-1.5">
+			<button
+				type="button"
+				data-theme-toggle
+				class="btn btn-ghost btn-icon"
+				aria-label="Cambiar tema (claro/oscuro/sistema)"
+				title="Cambiar tema"
+			>
+				<span data-theme-icon="system">@icon("monitor", "h-4 w-4")</span>
+				<span data-theme-icon="light">@icon("sun", "h-4 w-4")</span>
+				<span data-theme-icon="dark">@icon("moon", "h-4 w-4")</span>
+			</button>
+			<div class="relative" data-menu>
+				<button
+					type="button"
+					data-menu-toggle
+					class="btn btn-ghost"
+					aria-haspopup="true"
+					aria-expanded="false"
+				>
+					<span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand text-xs font-semibold text-[#161b22]" aria-hidden="true">{ userInitial(p.User) }</span>
+					<span class="max-w-32 truncate text-sm">{ p.User }</span>
+					@icon("chevron-down", "h-3.5 w-3.5")
+				</button>
+				<div data-menu-panel class="menu" hidden>
+					<div class="px-2 py-1.5">
+						<p class="truncate text-sm font-medium">{ p.User }</p>
+						<p class="text-xs text-muted">Rol <span class="badge badge-muted font-mono">{ p.Role }</span></p>
+					</div>
+					<hr class="my-1 border-t border-line"/>
+					<form method="post" action="/logout">
+						<input type="hidden" name="csrf" value={ p.CSRF }/>
+						<button type="submit" class="menu-item">
+							@icon("logout", "h-4 w-4")
+							Salir
+						</button>
+					</form>
+				</div>
 			</div>
 		</div>
 	</header>
 }
 
-templ navLink(href, label string, active bool) {
-	if active {
-		<a href={ templ.SafeURL(href) } aria-current="page" class="rounded px-3 py-1.5 font-medium text-brand-strong bg-hover">{ label }</a>
-	} else {
-		<a href={ templ.SafeURL(href) } class="rounded px-3 py-1.5 text-muted hover:bg-hover hover:text-ink">{ label }</a>
+func userInitial(u string) string {
+	if u == "" {
+		return "?"
+	}
+	return string([]rune(u)[0:1])
+}
+
+// ---- primitives ----
+
+templ emptyState(iconName, title, body string) {
+	<div class="empty">
+		@icon(iconName, "h-8 w-8 text-muted")
+		<p class="empty-title">{ title }</p>
+		<p class="max-w-md text-sm">{ body }</p>
+	</div>
+}
+
+templ kbd(keys ...string) {
+	<span class="inline-flex items-center gap-0.5">
+		for i, k := range keys {
+			if i > 0 {
+				<span class="text-xs text-muted">+</span>
+			}
+			<kbd class="kbd">{ k }</kbd>
+		}
+	</span>
+}
+
+templ typeBadge(t string) {
+	<span class={ "badge", typeBadgeClass(t) } title={ t }>{ shortType(t) }</span>
+}
+
+func typeBadgeClass(t string) string {
+	switch typeKind(t) {
+	case "num":
+		return "badge-num"
+	case "str":
+		return "badge-str"
+	case "bool":
+		return "badge-bool"
+	case "time":
+		return "badge-time"
+	default:
+		return "badge-muted"
 	}
 }
+
+func shortType(t string) string {
+	if len(t) > 18 {
+		return t[:18] + "…"
+	}
+	return t
+}
+
+// icon is the inline SVG set (stroke, 24×24): no icon font, no external file.
+templ icon(name string, class string) {
+	switch name {
+		case "catalog":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"></ellipse>
+				<path d="M4.5 5.5v13c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8v-13"></path>
+				<path d="M4.5 12c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8"></path>
+			</svg>
+		case "sql":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<rect x="3" y="4" width="18" height="16" rx="2"></rect>
+				<path d="M7 9.5l3 2.5-3 2.5M13 15h4"></path>
+			</svg>
+		case "dashboards":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M4 20V11M10 20V5M16 20v-6M3 20h18"></path>
+			</svg>
+		case "jobs":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<circle cx="12" cy="12" r="8"></circle>
+				<path d="M12 8v4l3 2"></path>
+			</svg>
+		case "admin":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"></path>
+				<path d="M9 12l2 2 4-4"></path>
+			</svg>
+		case "chevrons-left":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M11 6l-6 6 6 6M19 6l-6 6 6 6"></path>
+			</svg>
+		case "chevron-right":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M9 6l6 6-6 6"></path>
+			</svg>
+		case "chevron-down":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M6 9l6 6 6-6"></path>
+			</svg>
+		case "sun":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<circle cx="12" cy="12" r="4"></circle>
+				<path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4L6 18M18 6l1.4-1.4"></path>
+			</svg>
+		case "moon":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4 7 7 0 0 0 20 14.5z"></path>
+			</svg>
+		case "monitor":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<rect x="3" y="4" width="18" height="12" rx="2"></rect>
+				<path d="M8 20h8M12 16v4"></path>
+			</svg>
+		case "search":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<circle cx="11" cy="11" r="7"></circle>
+				<path d="M20 20l-3.6-3.6"></path>
+			</svg>
+		case "logout":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3M16 8l4 4-4 4M20 12H10"></path>
+			</svg>
+		case "table":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<rect x="3" y="4" width="18" height="16" rx="2"></rect>
+				<path d="M3 9.5h18M9 9.5V20"></path>
+			</svg>
+		case "columns":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<rect x="3" y="4" width="18" height="16" rx="2"></rect>
+				<path d="M9 4v16M15 4v16"></path>
+			</svg>
+		case "schema":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+			</svg>
+		case "copy":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<rect x="9" y="9" width="11" height="11" rx="2"></rect>
+				<path d="M5 15V6a2 2 0 0 1 2-2h9"></path>
+			</svg>
+		case "download":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M12 3v12M7 11l5 5 5-5M4 20h16"></path>
+			</svg>
+		case "play":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+				<path d="M8 5.5v13l11-6.5z"></path>
+			</svg>
+		case "plus":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M12 5v14M5 12h14"></path>
+			</svg>
+		case "x":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M6 6l12 12M18 6L6 18"></path>
+			</svg>
+		case "alert":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<circle cx="12" cy="12" r="9"></circle>
+				<path d="M12 8v5M12 16v.01"></path>
+			</svg>
+		case "history":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"></path>
+				<path d="M3.5 4.5v4h4M12 8.5v4l2.8 1.8"></path>
+			</svg>
+		case "open":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"></path>
+			</svg>
+		case "sparkle":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18 15l.9 2.6L21.5 18.5l-2.6.9L18 22l-.9-2.6-2.6-.9 2.6-.9z"></path>
+			</svg>
+		default:
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<circle cx="12" cy="12" r="9"></circle>
+			</svg>
+	}
+}
+
+// ---- login ----
 
 templ loginPage(a assets, csrf, next, errMsg string) {
 	@layout(pageData{Title: "Ingresar", Assets: a}) {
-		<div class="mx-auto mt-16 w-full max-w-sm">
-			<div class="mb-6 flex justify-center">
-				@wordmark(a, "h-14 w-auto")
+		<div class="mx-auto mt-20 w-full max-w-sm">
+			<div class="mb-8 flex flex-col items-center gap-3">
+				@logo(a, "h-12 w-12")
+				@wordmark(a, "h-9 w-auto")
+				<p class="text-sm text-muted">Tu workspace de datos, local-first</p>
 			</div>
-			<form method="post" action="/login" class="space-y-4 rounded-lg border border-line bg-surface p-6 shadow-sm">
+			<form method="post" action="/login" class="card space-y-4 p-6">
 				<h1 class="text-lg font-semibold">Ingresar</h1>
 				if errMsg != "" {
-					<p role="alert" class="rounded border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
+					<p role="alert" class="flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">
+						@icon("alert", "mt-0.5 h-4 w-4 flex-none")
+						{ errMsg }
+					</p>
 				}
 				<input type="hidden" name="csrf" value={ csrf }/>
 				<input type="hidden" name="next" value={ next }/>
-				<label class="block text-sm">
-					<span class="mb-1 block text-muted">Usuario</span>
-					<input name="user" type="text" required autofocus autocomplete="username" class="w-full rounded border border-line bg-bg px-3 py-2"/>
+				<label class="block">
+					<span class="label">Usuario</span>
+					<input name="user" type="text" required autofocus autocomplete="username" class="input"/>
 				</label>
-				<label class="block text-sm">
-					<span class="mb-1 block text-muted">Contraseña</span>
-					<input name="password" type="password" required autocomplete="current-password" class="w-full rounded border border-line bg-bg px-3 py-2"/>
+				<label class="block">
+					<span class="label">Contraseña</span>
+					<input name="password" type="password" required autocomplete="current-password" class="input"/>
 				</label>
-				<button type="submit" class="w-full rounded bg-brand px-3 py-2 font-medium text-[#161b22] hover:brightness-95">Entrar</button>
+				<button type="submit" class="btn btn-primary w-full">Entrar</button>
 			</form>
-		</div>
-	}
-}
-
-// ---- Catálogo ----
-
-type column struct {
-	Name string
-	Type string
-}
-
-type table struct {
-	Name    string
-	Columns []column
-}
-
-type schema struct {
-	Name   string
-	Tables []table
-}
-
-func colCount(n int) string {
-	if n == 1 {
-		return "1 columna"
-	}
-	return strconv.Itoa(n) + " columnas"
-}
-
-func previewURL(schemaName, tableName string) templ.SafeURL {
-	q := "SELECT * FROM " + quoteIdent(schemaName) + "." + quoteIdent(tableName) + " LIMIT 100"
-	return templ.URL("/sql?" + url.Values{"q": {q}}.Encode())
-}
-
-templ catalogPage(p pageData, schemas []schema, errMsg string, dashes []dashLink) {
-	@layout(p) {
-		<div class="mb-4 flex items-baseline justify-between">
-			<h1 class="text-xl font-semibold">Catálogo</h1>
-			<p class="text-sm text-muted">Lo que tu rol puede ver</p>
-		</div>
-		if len(dashes) > 0 {
-			<p class="mb-4 flex flex-wrap items-center gap-2 text-sm" aria-label="Dashboards">
-				<span class="text-muted">Dashboards:</span>
-				for _, l := range dashes {
-					if l.Err == "" {
-						<a href={ templ.URL("/dashboards/" + l.Name) } class="rounded-full border border-line px-3 py-0.5 text-brand-strong hover:bg-hover">{ l.Title }</a>
-					}
-				}
+			<p class="mt-4 text-center text-xs text-muted">
+				Tema claro/oscuro según tu sistema · usa el botón de la barra superior tras ingresar
 			</p>
-		}
-		if errMsg != "" {
-			<p role="alert" class="rounded border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
-		} else if len(schemas) == 0 {
-			<p class="rounded-lg border border-dashed border-line p-8 text-center text-muted">No hay tablas visibles para este rol.</p>
-		}
-		<div class="space-y-6">
-			for _, s := range schemas {
-				<section aria-labelledby={ "schema-" + s.Name }>
-					<h2 id={ "schema-" + s.Name } class="mb-2 font-mono text-sm font-semibold text-brand-strong">{ s.Name }</h2>
-					<div class="divide-y divide-line rounded-lg border border-line bg-surface">
-						for _, t := range s.Tables {
-							<details class="group">
-								<summary class="flex cursor-pointer items-center gap-3 px-4 py-2 hover:bg-hover">
-									<span class="font-mono text-sm">{ t.Name }</span>
-									<span class="text-xs text-muted">{ colCount(len(t.Columns)) }</span>
-									<a href={ previewURL(s.Name, t.Name) } class="ml-auto text-xs text-brand-strong hover:underline">Consultar</a>
-								</summary>
-								<table class="w-full border-t border-line text-sm">
-									<tbody>
-										for _, c := range t.Columns {
-											<tr class="border-b border-line/60 last:border-0">
-												<td class="px-4 py-1 pl-8 font-mono">{ c.Name }</td>
-												<td class="px-4 py-1 font-mono text-xs text-muted">{ c.Type }</td>
-											</tr>
-										}
-									</tbody>
-								</table>
-							</details>
-						}
-					</div>
-				</section>
-			}
 		</div>
 	}
 }
 
-// ---- Editor SQL ----
-
-type editorSignals struct {
-	SQL  string `json:"sql"`
-	CSRF string `json:"_csrf"`
+// pageStat is a small stat card for the catalog overview.
+type pageStat struct {
+	Label string
+	Value string
+	Icon  string
 }
 
-templ sqlPage(p pageData, initial string) {
-	@layout(p) {
-		<div class="mb-4 flex items-baseline justify-between">
-			<h1 class="text-xl font-semibold">Editor SQL</h1>
-			<p class="text-sm text-muted"><kbd class="rounded border border-line px-1 font-mono text-xs">Ctrl</kbd>+<kbd class="rounded border border-line px-1 font-mono text-xs">Enter</kbd> para ejecutar</p>
-		</div>
-		<div data-signals={ templ.JSONString(editorSignals{SQL: initial, CSRF: p.CSRF}) }>
-			<div class="relative">
-				<div data-sql-editor data-run="#run-btn"></div>
-				<textarea data-bind:sql name="sql" rows="8" aria-label="Consulta SQL" class="w-full rounded border border-line bg-surface p-3 font-mono text-sm">{ initial }</textarea>
+templ statCards(stats []pageStat) {
+	<div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+		for _, s := range stats {
+			<div class="card-flat flex items-center gap-3 p-3">
+				<span class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-surface2 text-muted">
+					@icon(s.Icon, "h-4.5 w-4.5")
+				</span>
+				<div class="min-w-0">
+					<p class="truncate text-lg font-semibold leading-tight">{ s.Value }</p>
+					<p class="truncate text-xs text-muted">{ s.Label }</p>
+				</div>
 			</div>
-			<div class="mt-3 flex items-center gap-3">
-				<button
-					id="run-btn"
-					type="button"
-					data-indicator:running
-					data-attr:disabled="$running"
-					data-on:click="@post('/sql/run', {headers: {'X-CSRF-Token': $_csrf}})"
-					class="rounded bg-brand px-4 py-2 text-sm font-medium text-[#161b22] hover:brightness-95 disabled:opacity-60"
-				>Ejecutar</button>
-				<span data-show="$running" class="text-sm text-muted" style="display:none">Ejecutando…</span>
-			</div>
-		</div>
-		<div class="mt-6">
-			@resultsView(nil)
-		</div>
-		<script type="module" src={ p.Assets.URL("editor.js") }></script>
-	}
-}
-
-// resultsView is the patch target of the editor: always rendered with
-// id="results" so Datastar can morph it in place.
-templ resultsView(r *queryResult) {
-	<div id="results" aria-live="polite">
-		if r != nil {
-			if r.Err != "" {
-				<p role="alert" class="whitespace-pre-wrap rounded border border-danger/40 bg-danger-bg px-3 py-2 font-mono text-sm text-danger">{ r.Err }</p>
-			} else {
-				<p class="mb-2 text-sm text-muted">
-					{ strconv.Itoa(len(r.Rows)) } filas
-					if r.Truncated {
-						(truncado al límite de { strconv.Itoa(r.Limit) })
-					}
-					· { r.Elapsed.Round(1000000).String() }
-				</p>
-				if len(r.Columns) > 0 {
-					<div class="max-h-[32rem] overflow-auto rounded-lg border border-line bg-surface">
-						<table class="min-w-full text-sm">
-							<thead class="sticky top-0 bg-surface2">
-								<tr>
-									for _, c := range r.Columns {
-										<th scope="col" class="whitespace-nowrap px-3 py-2 text-left font-mono text-xs font-semibold">
-											{ c.Name }
-											<span class="ml-1 font-normal text-muted">{ c.Type }</span>
-										</th>
-									}
-								</tr>
-							</thead>
-							<tbody>
-								for _, row := range r.Rows {
-									<tr class="border-t border-line/60 hover:bg-hover">
-										for _, cell := range row {
-											if cell.Null {
-												<td class="whitespace-nowrap px-3 py-1 font-mono text-xs italic text-muted">NULL</td>
-											} else {
-												<td class="whitespace-nowrap px-3 py-1 font-mono text-xs">{ cell.Text }</td>
-											}
-										}
-									</tr>
-								}
-							</tbody>
-						</table>
-					</div>
-				}
-			}
 		}
 	</div>
 }

@@ -317,8 +317,10 @@ func (a *app) dashView(w http.ResponseWriter, r *http.Request, sess session) {
 			sig["f_"+f.ID] = ""
 		}
 	}
+	p := a.page(sess, d.Title, "dashboards")
+	p.Crumbs = []crumb{{Label: "Dashboards", Href: "/dashboards"}, {Label: d.Title}}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = dashboardPage(a.page(sess, d.Title, "dashboards"), d, filters, sig, "/dashboards/"+d.Name+"/data").Render(r.Context(), w)
+	_ = dashboardPage(p, d, filters, sig, "/dashboards/"+d.Name+"/data").Render(r.Context(), w)
 }
 
 // filterViews lists the values of every picker (cached, in parallel).

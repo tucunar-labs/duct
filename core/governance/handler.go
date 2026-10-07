@@ -262,14 +262,16 @@ func (s *auditedStream) Release() {
 }
 
 // Catalog lists the columns of every view in the identity's role schema
-// (table_schema, table_name, column_name, data_type). It runs a fixed query
-// with the engine's privileges, filtered to the role schema, so UIs can show a
-// catalog without information_schema being open to user statements.
+// (table_schema, table_name, column_name, data_type, is_nullable). It runs a
+// fixed query with the engine's privileges, filtered to the role schema, so
+// UIs can show a catalog without information_schema being open to user
+// statements. is_nullable is "YES"/"NO" (information_schema); older callers
+// ignore the extra column.
 func (h *Handler) Catalog(ctx context.Context, id contract.Identity) (contract.Stream, error) {
 	if id.Role == "" || !roleRe.MatchString(id.Role) {
 		return nil, errEmptyIdentity
 	}
-	return h.eng.Query(ctx, `SELECT table_schema, table_name, column_name, data_type FROM information_schema.columns
+	return h.eng.Query(ctx, `SELECT table_schema, table_name, column_name, data_type, is_nullable FROM information_schema.columns
 		WHERE table_catalog = 'lake' AND table_schema = `+lit(contract.RoleSchema(id.Role))+` ORDER BY table_name, ordinal_position`)
 }
 

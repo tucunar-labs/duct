@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
@@ -77,6 +78,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.authed(a.logout))
 	mux.HandleFunc("GET /catalog", a.authed(a.catalog))
+	mux.HandleFunc("GET /catalog.json", a.authed(a.catalogJSON))
+	mux.HandleFunc("GET /catalog/{schema}/{table}", a.authed(a.catalogTable))
 	mux.HandleFunc("GET /sql", a.authed(a.sqlEditor))
 	mux.HandleFunc("POST /sql/run", a.authed(a.sqlRun))
 	mux.HandleFunc("GET /dashboards", a.authed(a.dashList))
@@ -180,7 +183,11 @@ func (a *app) csrfOK(r *http.Request, sess session) bool {
 }
 
 func (a *app) page(sess session, title, active string) pageData {
-	return pageData{Title: title, Active: active, User: sess.who.User, Role: sess.who.Role, CSRF: a.store.csrf(sess), Assets: a.assets}
+	p := pageData{Title: title, Active: active, User: sess.who.User, Role: sess.who.Role, CSRF: a.store.csrf(sess), Assets: a.assets, IsAdmin: sess.who.Role == "duct_admin"}
+	if title != "" {
+		p.Crumbs = []crumb{{Label: title}}
+	}
+	return p
 }
 
 func (a *app) isSecure(r *http.Request) bool {
@@ -302,7 +309,74 @@ func (a *app) catalog(w http.ResponseWriter, r *http.Request, sess session) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	links, _ := a.dashboardLinks()
-	_ = catalogPage(a.page(sess, "Catálogo", "catalog"), schemas, msg, links).Render(r.Context(), w)
+	p := a.page(sess, "Catálogo", "catalog")
+	p.Pinned = true
+	_ = catalogPage(p, schemas, msg, links).Render(r.Context(), w)
+}
+
+// catalogJSON is the catalog for the SQL editor island (drag & drop and
+// autocompletion): the same loadCatalog the trees use, so it only ever
+// contains what the session identity may see (ADR 0007). Read-only, no
+// data leaves the browser.
+func (a *app) catalogJSON(w http.ResponseWriter, r *http.Request, sess session) {
+	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.queryTimeout)
+	defer cancel()
+	schemas, err := loadCatalog(ctx, a.q, sess.who)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		slog.Warn("web: catalog query failed", "user", sess.who.User, "err", err)
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no se pudo leer el catálogo"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(struct {
+		Schemas []schema `json:"schemas"`
+	}{Schemas: schemas})
+}
+
+// catalogTable is the table detail: columns, a 100-row preview and metadata
+// (row count through the QueryHandler, last lake snapshot through the optional
+// SemanticQuerier) — never outside the governance path.
+func (a *app) catalogTable(w http.ResponseWriter, r *http.Request, sess session) {
+	sn, tn := r.PathValue("schema"), r.PathValue("table")
+	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.queryTimeout)
+	defer cancel()
+	schemas, err := loadCatalog(ctx, a.q, sess.who)
+	if err != nil {
+		slog.Warn("web: catalog query failed", "user", sess.who.User, "err", err)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway)
+		p := a.page(sess, "Catálogo", "catalog")
+		p.Pinned = true
+		_ = catalogPage(p, nil, "No se pudo leer el catálogo: "+err.Error(), nil).Render(r.Context(), w)
+		return
+	}
+	t := findTable(schemas, sn, tn)
+	if t == nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		p := a.page(sess, "Tabla no encontrada", "catalog")
+		p.Pinned = true
+		p.Crumbs = []crumb{{Label: "Catálogo", Href: "/catalog"}, {Label: sn + "." + tn}}
+		_ = catalogPage(p, schemas, "No existe la tabla "+sn+"."+tn+" (o tu rol no puede verla).", nil).Render(r.Context(), w)
+		return
+	}
+	d := tableDetail{Schema: sn, Name: tn, Columns: t.Columns}
+	preview := tablePreview(ctx, a.q, sess.who, sn, tn, 100)
+	if n, err := tableRowCount(ctx, a.q, sess.who, sn, tn); err == nil {
+		d.RowCount = n
+	} else {
+		d.CountErr = err.Error()
+		slog.Warn("web: row count failed", "user", sess.who.User, "table", sn+"."+tn, "err", err)
+	}
+	if snap, err := snapshotID(ctx, a.q); err == nil {
+		d.Snapshot = snap
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	p := a.page(sess, sn+"."+tn, "catalog")
+	p.Pinned = true
+	p.Crumbs = []crumb{{Label: "Catálogo", Href: "/catalog"}, {Label: sn}, {Label: tn}}
+	_ = tablePage(p, schemas, d, preview).Render(r.Context(), w)
 }
 
 func (a *app) sqlEditor(w http.ResponseWriter, r *http.Request, sess session) {
@@ -310,31 +384,45 @@ func (a *app) sqlEditor(w http.ResponseWriter, r *http.Request, sess session) {
 	if len(q) > 100000 {
 		q = q[:100000]
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.queryTimeout)
+	defer cancel()
+	schemas, _ := loadCatalog(ctx, a.q, sess.who) // the tree is a convenience: empty on error
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = sqlPage(a.page(sess, "Editor SQL", "sql"), q).Render(r.Context(), w)
+	p := a.page(sess, "Editor SQL", "sql")
+	p.Pinned = true
+	_ = sqlPage(p, q, schemas).Render(r.Context(), w)
 }
 
 func (a *app) sqlRun(w http.ResponseWriter, r *http.Request, sess session) {
 	var sig struct {
 		SQL string `json:"sql"`
+		Sel string `json:"sel"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := datastar.ReadSignals(r, &sig); err != nil {
 		http.Error(w, "bad signals", http.StatusBadRequest)
 		return
 	}
+	// A non-empty selection replaces the document: run the selection.
+	sql := sig.SQL
+	if s := strings.TrimSpace(sig.Sel); s != "" {
+		sql = sig.Sel
+	}
 	sse := datastar.NewSSE(w, r)
 	var res *queryResult
-	if strings.TrimSpace(sig.SQL) == "" {
-		res = &queryResult{Err: "Escribe una consulta."}
+	if strings.TrimSpace(sql) == "" {
+		res = &queryResult{Err: "Escribe una consulta.", Nonce: time.Now().UnixNano()}
 	} else {
 		ctx, cancel := context.WithTimeout(r.Context(), a.cfg.queryTimeout)
 		defer cancel()
 		var err error
-		res, err = runQuery(ctx, a.q, sess.who, sig.SQL, a.cfg.rowLimit)
+		res, err = runQuery(ctx, a.q, sess.who, sql, a.cfg.rowLimit)
 		if err != nil {
-			res = &queryResult{Err: err.Error()}
+			res = &queryResult{Err: err.Error(), Nonce: time.Now().UnixNano()}
 		}
 	}
-	_ = sse.PatchElementTempl(resultsView(res))
+	// The results body is a <duct-grid> island fed with compact JSON: replace
+	// the container instead of morphing the old subtree (which used to cost
+	// ~1 MB of HTML and 15k DOM nodes for 1,000 rows).
+	_ = sse.PatchElementTempl(resultsView(res), datastar.WithMode(datastar.ElementPatchModeReplace))
 }
