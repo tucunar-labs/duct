@@ -7,20 +7,22 @@ import (
 
 // ---- Catálogo ----
 
+// column/table/schema are the catalog nodes rendered as trees and served as
+// JSON to the SQL editor island (/catalog.json: drag & drop + completion).
 type column struct {
-	Name     string
-	Type     string
-	Nullable string // "YES" | "NO" | "" (unknown)
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Nullable string `json:"nullable,omitempty"` // "YES" | "NO" | "" (unknown)
 }
 
 type table struct {
-	Name    string
-	Columns []column
+	Name    string   `json:"name"`
+	Columns []column `json:"columns"`
 }
 
 type schema struct {
-	Name   string
-	Tables []table
+	Name   string  `json:"name"`
+	Tables []table `json:"tables"`
 }
 
 func colCount(n int) string {
@@ -58,94 +60,119 @@ func treeSearchText(s schema, t *table, c *column) string {
 	return out
 }
 
-// catalogTree is the schema → table → columns tree. forEditor turns rows into
-// insert-into-SQL buttons; otherwise tables link to their detail page.
+// catalogTree is the schema → table → columns tree. forEditor renders the
+// DBeaver-style browser of the SQL editor: rows carry the object identity
+// (data-obj/data-schema/…) for drag & drop into CodeMirror, the table label
+// inserts its qualified name, columns show type badges, and every row is a
+// focusable tree item (arrows move, Enter activates — shell.js).
 templ catalogTree(schemas []schema, activeSchema, activeTable, treeID string, forEditor bool) {
-	<div class="tree" id={ treeID }>
-		if len(schemas) == 0 {
-			<p data-tree-empty class="px-2 py-4 text-sm text-muted">No hay tablas visibles para este rol.</p>
-		}
-		for _, s := range schemas {
-			<details data-tree-node data-search={ treeSearchText(s, nil, nil) } data-open open>
-				<summary class="tree-row" title={ s.Name }>
-					@icon("schema", "h-3.5 w-3.5 flex-none text-muted")
-					<span class="truncate font-mono text-xs font-semibold">{ s.Name }</span>
-					<span class="tree-type">{ tableCount(len(s.Tables)) }</span>
-				</summary>
-				<div class="ml-3 border-l border-line pl-1">
-					for _, t := range s.Tables {
-						<details
-							data-tree-node
-							data-search={ treeSearchText(s, &t, nil) }
-							if s.Name == activeSchema && t.Name == activeTable {
-								data-active-node="true"
-							}
-						>
-						<summary
-							class="tree-row"
-							if s.Name == activeSchema && t.Name == activeTable {
-								data-active="true"
-							}
-						>
-							if forEditor {
-								<button
-									type="button"
-									data-insert={ quoteIdent(s.Name) + "." + quoteIdent(t.Name) }
-									class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-									title="Insertar en el editor"
-								>
-									@icon("table", "h-3.5 w-3.5 flex-none text-muted")
-									<span class="truncate font-mono text-xs">{ t.Name }</span>
-								</button>
-							} else {
-								<a href={ tableURL(s.Name, t.Name) } class="flex min-w-0 flex-1 items-center gap-1.5" title={ "Ver " + s.Name + "." + t.Name }>
-									@icon("table", "h-3.5 w-3.5 flex-none text-muted")
-									<span class="truncate font-mono text-xs">{ t.Name }</span>
-								</a>
-							}
-							<span class="tree-type">{ colCount(len(t.Columns)) }</span>
-							if !forEditor {
-								<a
-									href={ previewURL(s.Name, t.Name) }
-									class="btn btn-ghost btn-icon h-5 w-5 flex-none"
-									title="Consultar 100 filas en el editor SQL"
-									aria-label={ "Consultar " + s.Name + "." + t.Name }
-								>
-									@icon("play", "h-3 w-3")
-								</a>
-							}
-						</summary>
-							<div class="ml-4 border-l border-line pl-2">
-								for _, c := range t.Columns {
-									<div class="tree-row cursor-default" data-tree-node data-search={ treeSearchText(s, &t, &c) }>
-										if forEditor {
-											<button
-												type="button"
-												data-insert={ quoteIdent(c.Name) }
-												class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-												title="Insertar columna"
-											>
-												<span class="truncate font-mono text-xs">{ c.Name }</span>
-												<span class="tree-type">{ c.Type }</span>
-											</button>
-										} else {
-											<span class="truncate font-mono text-xs">{ c.Name }</span>
-											<span class="tree-type">{ c.Type }</span>
-										}
-									</div>
-								}
-							</div>
-						</details>
-					}
-				</div>
-			</details>
-		}
+	<div class="tree" id={ treeID } data-tree if forEditor { role="tree" aria-label="Esquema de datos" }>
+		@catalogTreeNodes(schemas, activeSchema, activeTable, forEditor)
 	</div>
 }
 
+templ catalogTreeNodes(schemas []schema, activeSchema, activeTable string, forEditor bool) {
+	if len(schemas) == 0 {
+		<p data-tree-empty class="px-2 py-4 text-sm text-muted">No hay tablas visibles para este rol.</p>
+	}
+	for _, s := range schemas {
+		<details data-tree-node data-search={ treeSearchText(s, nil, nil) } data-open open>
+			<summary class="tree-row" data-tree-row tabindex="-1" title={ s.Name }>
+				<span class="tree-chev" data-chev aria-hidden="true">@icon("chevron-right", "h-3 w-3")</span>
+				@icon("schema", "h-3.5 w-3.5 flex-none text-muted")
+				<span class="truncate font-mono text-xs font-semibold">{ s.Name }</span>
+				<span class="tree-type">{ tableCount(len(s.Tables)) }</span>
+			</summary>
+			<div class="ml-3 border-l border-line pl-1" if forEditor { role="group" }>
+				for _, t := range s.Tables {
+					<details
+						data-tree-node
+						data-search={ treeSearchText(s, &t, nil) }
+						if s.Name == activeSchema && t.Name == activeTable {
+							data-active-node="true"
+						}
+					>
+					<summary
+						class="tree-row"
+						data-tree-row
+						tabindex="-1"
+						if forEditor {
+							data-obj="table"
+							data-schema={ s.Name }
+							data-table={ t.Name }
+							draggable="true"
+						}
+						if s.Name == activeSchema && t.Name == activeTable {
+							data-active="true"
+						}
+					>
+						<span class="tree-chev" data-chev aria-hidden="true">@icon("chevron-right", "h-3 w-3")</span>
+						if forEditor {
+							@icon("table", "h-3.5 w-3.5 flex-none text-muted")
+							<span class="truncate font-mono text-xs" title={ s.Name + "." + t.Name }>{ t.Name }</span>
+							<span class="tree-type">{ colCount(len(t.Columns)) }</span>
+						} else {
+							<a href={ tableURL(s.Name, t.Name) } class="flex min-w-0 flex-1 items-center gap-1.5" title={ "Ver " + s.Name + "." + t.Name }>
+								@icon("table", "h-3.5 w-3.5 flex-none text-muted")
+								<span class="truncate font-mono text-xs">{ t.Name }</span>
+							</a>
+							<span class="tree-type">{ colCount(len(t.Columns)) }</span>
+							<a
+								href={ previewURL(s.Name, t.Name) }
+								class="btn btn-ghost btn-icon h-5 w-5 flex-none"
+								title="Consultar 100 filas en el editor SQL"
+								aria-label={ "Consultar " + s.Name + "." + t.Name }
+							>
+								@icon("play", "h-3 w-3")
+							</a>
+						}
+					</summary>
+						<div class="ml-4 border-l border-line pl-2" if forEditor { role="group" }>
+							for _, c := range t.Columns {
+								<div
+									class="tree-row"
+									data-tree-node
+									data-tree-row
+									tabindex="-1"
+									data-search={ treeSearchText(s, &t, &c) }
+									if forEditor {
+										data-obj="column"
+										data-schema={ s.Name }
+										data-table={ t.Name }
+										data-col={ c.Name }
+										data-type={ c.Type }
+										draggable="true"
+									}
+								>
+									if forEditor {
+										<span class="tree-chev" aria-hidden="true"><span class="tree-col-dot"></span></span>
+										<span class="truncate font-mono text-xs">{ c.Name }</span>
+										<span class="ml-auto pl-1">@typeBadge(c.Type)</span>
+									} else {
+										<span class="truncate font-mono text-xs">{ c.Name }</span>
+										<span class="tree-type">{ c.Type }</span>
+									}
+								</div>
+							}
+						</div>
+					</details>
+				}
+			</div>
+		</details>
+	}
+}
+
 // treePane wraps the tree with its search box (shared by catalog and SQL).
+// forEditor gives the pane an id and a split default so the SQL page can
+// resize (splitter + --schema-w) and collapse it.
 templ treePane(schemas []schema, activeSchema, activeTable, treeID, title string, forEditor bool) {
-	<div class="card-flat flex h-full min-h-0 w-full flex-col lg:w-72 lg:flex-none">
+	<div
+		class="card-flat flex h-full min-h-0 w-full flex-col lg:w-72 lg:flex-none"
+		if forEditor {
+			id="sql-schema-pane"
+			data-split-default="288"
+		}
+	>
 		<div class="border-b border-line p-2">
 			<p class="mb-1.5 px-1 text-xs font-semibold uppercase tracking-wide text-muted">{ title }</p>
 			<label class="relative block">

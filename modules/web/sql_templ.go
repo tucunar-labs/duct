@@ -65,7 +65,15 @@ func sqlPage(p pageData, initial string, schemas []schema) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, " ejecuta la selección o toda la consulta</span> <span class=\"ml-auto flex items-center gap-2\"><button type=\"button\" class=\"btn btn-secondary btn-sm\" data-export-csv=\"#results\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, " ejecuta la selección o toda la consulta</span> <span class=\"ml-auto flex items-center gap-2\"><button type=\"button\" class=\"btn btn-ghost btn-icon\" data-schema-collapse aria-controls=\"sql-schema-pane\" aria-expanded=\"true\" title=\"Mostrar/ocultar el panel de esquema\" aria-label=\"Mostrar/ocultar el panel de esquema\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = icon("chevrons-left", "h-4 w-4").Render(ctx, templ_7745c5c3_Buffer)
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</button> <button type=\"button\" class=\"btn btn-secondary btn-sm\" data-export-csv=\"#results\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -73,7 +81,7 @@ func sqlPage(p pageData, initial string, schemas []schema) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, " Exportar CSV</button></span></div></div><div class=\"flex min-h-0 flex-1 flex-col gap-3 lg:flex-row\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, " Exportar CSV</button></span></div></div><div class=\"flex min-h-0 flex-1 flex-col gap-3 lg:flex-row\" data-schema-pane>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -81,33 +89,33 @@ func sqlPage(p pageData, initial string, schemas []schema) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<div class=\"flex min-h-0 flex-1 flex-col\" data-signals=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div class=\"splitter splitter-v\" data-splitter-v data-split=\"#sql-schema-pane\" role=\"separator\" aria-orientation=\"vertical\" aria-label=\"Redimensionar el panel de esquema\" tabindex=\"0\"></div><div class=\"flex min-h-0 flex-1 flex-col\" data-signals=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var3 string
 			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(templ.JSONString(editorSignals{SQL: initial, CSRF: p.CSRF}))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 43, Col: 120}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 63, Col: 120}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\"><div id=\"sql-editor-pane\" class=\"card-flat relative flex min-h-[10rem] flex-1 flex-col overflow-hidden\" data-split-default=\"260\"><div class=\"flex min-h-0 flex-1 flex-col\"><div data-sql-editor data-run=\"#run-btn\" class=\"min-h-0 flex-1\"></div><textarea data-bind:sql name=\"sql\" rows=\"8\" aria-label=\"Consulta SQL\" class=\"w-full rounded border border-line bg-surface p-3 font-mono text-sm\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "\"><div id=\"sql-editor-pane\" class=\"card-flat relative flex min-h-[10rem] flex-1 flex-col overflow-hidden\" data-split-default=\"260\"><div class=\"flex min-h-0 flex-1 flex-col\"><div data-sql-editor data-run=\"#run-btn\" class=\"min-h-0 flex-1\"></div><textarea data-bind:sql name=\"sql\" rows=\"8\" aria-label=\"Consulta SQL\" class=\"w-full rounded border border-line bg-surface p-3 font-mono text-sm\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var4 string
 			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(initial)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 51, Col: 161}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 71, Col: 161}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</textarea></div></div><div class=\"splitter\" data-splitter data-split=\"#sql-editor-pane\" role=\"separator\" aria-orientation=\"horizontal\" aria-label=\"Redimensionar editor y resultados\" tabindex=\"0\"></div><div class=\"flex min-h-0 flex-1 flex-col\" data-results-host aria-live=\"polite\"><div class=\"tabs flex-none\" data-tabs role=\"tablist\" aria-label=\"Salida\"><button type=\"button\" role=\"tab\" id=\"tab-result\" aria-controls=\"panel-result\" aria-selected=\"true\" class=\"tab\">Resultado</button> <button type=\"button\" role=\"tab\" id=\"tab-history\" aria-controls=\"panel-history\" aria-selected=\"false\" tabindex=\"-1\" class=\"tab\"><span class=\"flex items-center gap-1.5\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</textarea></div></div><div class=\"splitter\" data-splitter data-split=\"#sql-editor-pane\" role=\"separator\" aria-orientation=\"horizontal\" aria-label=\"Redimensionar editor y resultados\" tabindex=\"0\"></div><div class=\"flex min-h-0 flex-1 flex-col\" data-results-host aria-live=\"polite\"><div class=\"tabs flex-none\" data-tabs role=\"tablist\" aria-label=\"Salida\"><button type=\"button\" role=\"tab\" id=\"tab-result\" aria-controls=\"panel-result\" aria-selected=\"true\" class=\"tab\">Resultado</button> <button type=\"button\" role=\"tab\" id=\"tab-history\" aria-controls=\"panel-history\" aria-selected=\"false\" tabindex=\"-1\" class=\"tab\"><span class=\"flex items-center gap-1.5\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -115,7 +123,7 @@ func sqlPage(p pageData, initial string, schemas []schema) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, " Historial</span></button> <span class=\"ml-auto flex items-center gap-1 pr-1\"><button type=\"button\" class=\"btn btn-ghost btn-sm\" data-history-clear title=\"Borrar el historial local\">Limpiar</button></span></div><section id=\"panel-result\" role=\"tabpanel\" aria-labelledby=\"tab-result\" tabindex=\"0\" class=\"min-h-0 flex-1 overflow-y-auto rounded-b-lg border border-t-0 border-line bg-bg p-2\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, " Historial</span></button> <span class=\"ml-auto flex items-center gap-1 pr-1\"><button type=\"button\" class=\"btn btn-ghost btn-sm\" data-history-clear title=\"Borrar el historial local\">Limpiar</button></span></div><section id=\"panel-result\" role=\"tabpanel\" aria-labelledby=\"tab-result\" tabindex=\"0\" class=\"min-h-0 flex-1 overflow-y-auto rounded-b-lg border border-t-0 border-line bg-bg p-2\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -123,33 +131,33 @@ func sqlPage(p pageData, initial string, schemas []schema) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</section><section id=\"panel-history\" role=\"tabpanel\" aria-labelledby=\"tab-history\" tabindex=\"0\" hidden class=\"min-h-0 flex-1 overflow-y-auto rounded-b-lg border border-t-0 border-line bg-bg p-2\"><div data-history class=\"space-y-2\"></div></section></div><input type=\"hidden\" data-bind:sel value=\"\"></div></div></div><script type=\"module\" src=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</section><section id=\"panel-history\" role=\"tabpanel\" aria-labelledby=\"tab-history\" tabindex=\"0\" hidden class=\"min-h-0 flex-1 overflow-y-auto rounded-b-lg border border-t-0 border-line bg-bg p-2\"><div data-history class=\"space-y-2\"></div></section></div><input type=\"hidden\" data-bind:sel value=\"\"></div></div></div><script type=\"module\" src=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var5 string
 			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(p.Assets.URL("editor.js"))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 87, Col: 55}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 107, Col: 55}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "\"></script> <script type=\"module\" src=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "\"></script> <script type=\"module\" src=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var6 string
 			templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.ResolveAttributeValue(p.Assets.URL("grid.js"))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 88, Col: 53}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `sql.templ`, Line: 108, Col: 53}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var6)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "\"></script>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "\"></script>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

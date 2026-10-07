@@ -31,6 +31,17 @@ templ sqlPage(p pageData, initial string, schemas []schema) {
 						ejecuta la selección o toda la consulta
 					</span>
 					<span class="ml-auto flex items-center gap-2">
+						<button
+							type="button"
+							class="btn btn-ghost btn-icon"
+							data-schema-collapse
+							aria-controls="sql-schema-pane"
+							aria-expanded="true"
+							title="Mostrar/ocultar el panel de esquema"
+							aria-label="Mostrar/ocultar el panel de esquema"
+						>
+							@icon("chevrons-left", "h-4 w-4")
+						</button>
 						<button type="button" class="btn btn-secondary btn-sm" data-export-csv="#results">
 							@icon("download", "h-3.5 w-3.5")
 							Exportar CSV
@@ -38,8 +49,17 @@ templ sqlPage(p pageData, initial string, schemas []schema) {
 					</span>
 				</div>
 			</div>
-			<div class="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+			<div class="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row" data-schema-pane>
 				@treePane(schemas, "", "", "sql-tree", "Esquema", true)
+				<div
+					class="splitter splitter-v"
+					data-splitter-v
+					data-split="#sql-schema-pane"
+					role="separator"
+					aria-orientation="vertical"
+					aria-label="Redimensionar el panel de esquema"
+					tabindex="0"
+				></div>
 				<div class="flex min-h-0 flex-1 flex-col" data-signals={ templ.JSONString(editorSignals{SQL: initial, CSRF: p.CSRF}) }>
 					<div
 						id="sql-editor-pane"
