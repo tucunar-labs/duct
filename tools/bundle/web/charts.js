@@ -159,7 +159,9 @@ class DuctChart extends HTMLElement {
     if (!raw) return;
     let spec;
     try { spec = JSON.parse(raw); } catch { return this.message('Respuesta inválida', true); }
-    this.dataset.loaded = '1'; // hides the panel skeleton (ui/input.css)
+    // Datastar morphs this element from the server markup, which would drop an
+    // attribute set here; flag the (unpatched) panel instead to hide its skeleton.
+    if (this.parentElement) this.parentElement.dataset.chartLoaded = '1';
     if (spec.error) return this.message(spec.error, true);
     if (!spec.rows || spec.rows.length === 0) return this.message('Sin datos', false);
     const o = spec.options || {};

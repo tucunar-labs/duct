@@ -391,7 +391,8 @@
     var area = $("textarea[data-bind\\:sql], textarea[data-sql-signal]");
     var selInput = $("[data-bind\\:sel], [data-sql-sel]");
     var state = loadJSON(WS_KEY, null);
-    if (!Array.isArray(state) || state.length === 0) {
+    var hadStored = Array.isArray(state) && state.length > 0;
+    if (!hadStored) {
       state = [{ id: "w1", name: "Consulta 1", sql: area ? area.value : "" }];
     }
     var active = loadJSON(WS_ACTIVE, state[0].id);
@@ -400,12 +401,15 @@
     }))
       active = state[0].id;
 
-    // "Open in SQL editor" (?q=...): a fresh worksheet with that SQL.
+    // "Open in SQL editor" (?q=...): a fresh worksheet with that SQL; with no
+    // saved worksheets the initial textarea already holds it, so keep one tab.
     var params = new URLSearchParams(location.search);
     if (params.has("q")) {
-      var id = "w" + Date.now().toString(36);
-      state.push({ id: id, name: "Consulta " + (state.length + 1), sql: area ? area.value : params.get("q") });
-      active = id;
+      if (hadStored) {
+        var id = "w" + Date.now().toString(36);
+        state.push({ id: id, name: "Consulta " + (state.length + 1), sql: area ? area.value : params.get("q") });
+        active = id;
+      }
       history.replaceState(null, "", location.pathname);
     }
 

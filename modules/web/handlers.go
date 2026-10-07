@@ -349,8 +349,6 @@ func (a *app) catalogTable(w http.ResponseWriter, r *http.Request, sess session)
 	}
 	if snap, err := snapshotID(ctx, a.q); err == nil {
 		d.Snapshot = snap
-	} else {
-		d.SnapshotErr = err.Error()
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	p := a.page(sess, sn+"."+tn, "catalog")

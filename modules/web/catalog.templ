@@ -46,18 +46,6 @@ func tableURL(schemaName, tableName string) templ.SafeURL {
 	return templ.URL("/catalog/" + url.PathEscape(schemaName) + "/" + url.PathEscape(tableName))
 }
 
-// nullableLabel renders the nullable column of the Columns tab.
-func nullableLabel(v string) string {
-	switch v {
-	case "YES":
-		return "Sí"
-	case "NO":
-		return "No"
-	default:
-		return "—"
-	}
-}
-
 // treeSearchText is what the client-side search matches against.
 func treeSearchText(s schema, t *table, c *column) string {
 	out := s.Name
@@ -258,7 +246,6 @@ func catalogStats(schemas []schema) []pageStat {
 		{Label: "Esquemas", Value: strconv.Itoa(len(schemas)), Icon: "schema"},
 		{Label: "Tablas", Value: strconv.Itoa(tables), Icon: "table"},
 		{Label: "Columnas", Value: strconv.Itoa(cols), Icon: "columns"},
-		{Label: "Rol", Value: "", Icon: "admin"},
 	}
 }
 
@@ -268,13 +255,12 @@ func catalogStats(schemas []schema) []pageStat {
 // through the QueryHandler (row count) and the optional SemanticQuerier
 // (last DuckLake snapshot); anything denied by governance shows as "—".
 type tableDetail struct {
-	Schema      string
-	Name        string
-	Columns     []column
-	RowCount    string // "" = unknown
-	Snapshot    string // "" = unknown
-	CountErr    string
-	SnapshotErr string
+	Schema   string
+	Name     string
+	Columns  []column
+	RowCount string // "" = unknown
+	Snapshot string // "" = unknown
+	CountErr string
 }
 
 templ tablePage(p pageData, schemas []schema, d tableDetail, preview *queryResult) {
@@ -357,8 +343,8 @@ templ tablePage(p pageData, schemas []schema, d tableDetail, preview *queryResul
 							@detailRow("Esquema", d.Schema, "schema")
 							@detailRow("Tabla", d.Name, "table")
 							@detailRow("Columnas", colCount(len(d.Columns)), "columns")
-							@detailRow("Filas", orDash(d.RowCount, d.CountErr), "dashboards")
-							@detailRow("Último snapshot (DuckLake)", orDash(d.Snapshot, d.SnapshotErr), "history")
+							@detailRow("Filas", orDash(d.RowCount), "dashboards")
+							@detailRow("Último snapshot (DuckLake)", orDash(d.Snapshot), "history")
 						</dl>
 						<p class="mt-2 text-xs text-muted">Las cifras pasan por el manejador consultado con tu sesión: lo que tu rol no puede ver aparece como “—”.</p>
 					</section>
@@ -368,12 +354,9 @@ templ tablePage(p pageData, schemas []schema, d tableDetail, preview *queryResul
 	}
 }
 
-func orDash(v, errMsg string) string {
+func orDash(v string) string {
 	if v != "" {
 		return v
-	}
-	if errMsg != "" {
-		return "—"
 	}
 	return "—"
 }
