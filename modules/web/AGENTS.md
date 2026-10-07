@@ -16,7 +16,7 @@
   `row_limit` (default 1000), `query_timeout` (default `60s`),
   `dashboards_dir` (folder with `dashboards/*.yaml`; `duct serve` passes `<project>/dashboards`; unset: none).
 - **Routes:** `/login` (GET/POST), `/logout` (POST), `/catalog`, `/catalog/{schema}/{table}`,
-  `/sql`, `POST /sql/run` (Datastar SSE), `/dashboards`, `/dashboards/{name}`,
+  `/sql`, `GET /catalog.json` (role-visible schemas/tables/columns for drag & drop and autocompletion), `POST /sql/run` (Datastar SSE), `/dashboards`, `/dashboards/{name}`,
   `POST /dashboards/{name}/data` (SSE), `/static/*`.
 - **Shell:** server-rendered frame (templ) with a collapsible sidebar (Catalog, SQL editor,
   Dashboards, Jobs/Admin placeholders — Admin only for role `duct_admin`), breadcrumbs, a user
@@ -31,7 +31,7 @@
   it); the row count runs `SELECT count(*)` through `QueryHandler` as the session identity and the
   last snapshot through the OPTIONAL `contract.SemanticQuerier.LakeSnapshot`; whatever governance
   denies shows as "—". "Abrir en editor SQL" deep-links to `/sql?q=…`.
-- **SQL editor:** schema browser on the left (click inserts the qualified name), CodeMirror on
+- **SQL editor:** DBeaver-style schema browser on the left (click inserts at the cursor, double-click previews 100 rows, right-click menu, arrows/Enter, Ctrl/Cmd+click multi-selects columns, width and collapse persisted). Rows are HTML5-draggable with a custom payload (`application/json`); the editor's `domEventHandlers` resolve the drop with `posAtCoords`, draw a drop caret and return true so CodeMirror never inserts the raw text. Table on an empty editor/line -> `SELECT cols FROM s.t LIMIT 100`; Alt or inside a statement -> `s.t`. Autocompletion comes from `/catalog.json` through `lang-sql` (schema., table./alias. prefixes, keywords). CodeMirror on
   top, results below with a draggable splitter. `Ctrl/Cmd+Enter` (or Ejecutar) runs the selection
   if there is one, else the whole worksheet: the island keeps the selection in signal `sel` and
   the server prefers it over `sql`. Results have sticky headers, type badges, per-cell/per-row

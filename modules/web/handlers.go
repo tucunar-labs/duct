@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
@@ -77,6 +78,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.authed(a.logout))
 	mux.HandleFunc("GET /catalog", a.authed(a.catalog))
+	mux.HandleFunc("GET /catalog.json", a.authed(a.catalogJSON))
 	mux.HandleFunc("GET /catalog/{schema}/{table}", a.authed(a.catalogTable))
 	mux.HandleFunc("GET /sql", a.authed(a.sqlEditor))
 	mux.HandleFunc("POST /sql/run", a.authed(a.sqlRun))
@@ -310,6 +312,26 @@ func (a *app) catalog(w http.ResponseWriter, r *http.Request, sess session) {
 	p := a.page(sess, "Catálogo", "catalog")
 	p.Pinned = true
 	_ = catalogPage(p, schemas, msg, links).Render(r.Context(), w)
+}
+
+// catalogJSON is the catalog for the SQL editor island (drag & drop and
+// autocompletion): the same loadCatalog the trees use, so it only ever
+// contains what the session identity may see (ADR 0007). Read-only, no
+// data leaves the browser.
+func (a *app) catalogJSON(w http.ResponseWriter, r *http.Request, sess session) {
+	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.queryTimeout)
+	defer cancel()
+	schemas, err := loadCatalog(ctx, a.q, sess.who)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		slog.Warn("web: catalog query failed", "user", sess.who.User, "err", err)
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no se pudo leer el catálogo"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(struct {
+		Schemas []schema `json:"schemas"`
+	}{Schemas: schemas})
 }
 
 // catalogTable is the table detail: columns, a 100-row preview and metadata

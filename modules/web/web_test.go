@@ -658,8 +658,9 @@ func TestSQLEditorHasSchemaBrowser(t *testing.T) {
 	_, body := e.get("/sql")
 	for _, want := range []string{
 		"data-sql-editor", "data-bind:sql", "data-bind:sel", "/sql/run",
-		"data-worksheets", "data-history", "data-splitter", "data-insert",
-		"editor.js", "wordmark", "gold",
+		"data-worksheets", "data-history", "data-splitter", "data-splitter-v",
+		"data-obj", "data-tree", "draggable", "sql-schema-pane", "data-schema-collapse",
+		"editor.js", "grid.js", "wordmark", "gold",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("editor page missing %q", want)
@@ -711,5 +712,120 @@ func TestGridSpecEscaping(t *testing.T) {
 	}
 	if len(parsed.Rows) != 2 || parsed.Rows[0][0] != `it's </script> "q" & <b>` || parsed.Rows[1][0] != nil {
 		t.Errorf("round trip lost data: %#v", parsed.Rows)
+	}
+}
+
+// roleCatalogQ answers the catalog list with different objects per role:
+// the analyst sees gold.sales/orders, any other role only hidden.secret. The
+// JSON endpoint feeds the editor island, so it must never mix identities.
+type roleCatalogQ struct{ *fakeQ }
+
+func (r roleCatalogQ) Catalog(_ context.Context, id contract.Identity) (contract.Stream, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, call{id, "(catalog)"})
+	r.mu.Unlock()
+	mem := memory.NewGoAllocator()
+	str := func(vs ...string) arrow.Array {
+		b := array.NewStringBuilder(mem)
+		for _, v := range vs {
+			b.Append(v)
+		}
+		return b.NewArray()
+	}
+	names := []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"}
+	var cols []arrow.Array
+	if id.Role == "analyst" {
+		cols = []arrow.Array{
+			str("gold", "gold", "gold", "gold", "silver"),
+			str("sales", "sales", "sales", "orders", "orders"),
+			str("id", "name", "amount", "id", "total"),
+			str("BIGINT", "VARCHAR", "DOUBLE", "BIGINT", "DOUBLE"),
+			str("NO", "YES", "YES", "NO", "YES"),
+		}
+	} else {
+		cols = []arrow.Array{
+			str("hidden"), str("secret"), str("id"), str("BIGINT"), str("NO"),
+		}
+	}
+	fields := make([]arrow.Field, len(names))
+	for i, n := range names {
+		fields[i] = arrow.Field{Name: n, Type: cols[i].DataType(), Nullable: true}
+	}
+	sc := arrow.NewSchema(fields, nil)
+	rec := array.NewRecordBatch(sc, cols, int64(cols[0].Len()))
+	rdr, err := array.NewRecordReader(sc, []arrow.RecordBatch{rec})
+	return rdr, err
+}
+
+// TestCatalogJSON pins the contract of the endpoint the editor island uses
+// for drag & drop and autocompletion: JSON shaped catalog, session required
+// and only role-visible objects.
+func TestCatalogJSON(t *testing.T) {
+	newRoleEnv := func(role string) *env {
+		q := &fakeQ{}
+		srv := httptest.NewServer(newApp(roleCatalogQ{q}, &fakeAuth{role: role}, appConfig{rowLimit: 10, queryTimeout: time.Second, sessionTTL: time.Hour}).routes())
+		t.Cleanup(srv.Close)
+		jar, _ := cookiejar.New(nil)
+		return &env{t: t, srv: srv, q: q, c: &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	}
+	type col struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	type tbl struct {
+		Name    string `json:"name"`
+		Columns []col  `json:"columns"`
+	}
+	type sch struct {
+		Name   string `json:"name"`
+		Tables []tbl  `json:"tables"`
+	}
+	parse := func(body string) []sch {
+		var doc struct {
+			Schemas []sch `json:"schemas"`
+		}
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("invalid JSON %s: %v", body, err)
+		}
+		return doc.Schemas
+	}
+
+	// Anonymous: redirected to the login page, no data.
+	e := newRoleEnv("analyst")
+	resp, _ := e.get("/catalog.json")
+	if resp.StatusCode != http.StatusSeeOther || !strings.Contains(resp.Header.Get("Location"), "/login") {
+		t.Fatalf("anonymous: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	e.login()
+	resp, body := e.get("/catalog.json")
+	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("status %d type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	schemas := parse(body)
+	if len(schemas) != 2 || schemas[0].Name != "gold" || len(schemas[0].Tables) != 2 || schemas[1].Name != "silver" {
+		t.Fatalf("analyst catalog: %+v", schemas)
+	}
+	sales := schemas[0].Tables[0]
+	if sales.Name != "sales" || len(sales.Columns) != 3 || sales.Columns[1].Name != "name" || sales.Columns[1].Type != "VARCHAR" {
+		t.Errorf("shape: %+v", sales)
+	}
+
+	// Another role only gets its own objects, never the analyst's.
+	e2 := newRoleEnv("outsider")
+	e2.login()
+	_, body2 := e2.get("/catalog.json")
+	other := parse(body2)
+	if len(other) != 1 || other[0].Name != "hidden" || other[0].Tables[0].Name != "secret" {
+		t.Fatalf("outsider catalog: %+v", other)
+	}
+	if strings.Contains(body2, "sales") || strings.Contains(body2, "gold") || strings.Contains(body2, "orders") || strings.Contains(body2, "amount") {
+		t.Errorf("role leakage in %s", body2)
+	}
+	// Both requests ran through the session identity and the lister.
+	for _, c := range append(e.q.calls, e2.q.calls...) {
+		if c.sql != "(catalog)" || c.who.User != "ana" {
+			t.Errorf("call %+v not the session's catalog list", c)
+		}
 	}
 }
