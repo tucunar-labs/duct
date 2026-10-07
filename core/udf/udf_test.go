@@ -261,6 +261,22 @@ func TestPythonTimeoutKillsWorkerAndRecovers(t *testing.T) {
 	}
 }
 
+// A slow cold start (interpreter + imports) must not count against the
+// per-batch timeout.
+func TestPythonSlowStartDoesNotCountAgainstBatchTimeout(t *testing.T) {
+	py := pythonCmd(t)
+	root := t.TempDir()
+	write(t, filepath.Join(root, "functions", "f.py"), "import duct\n\n@duct.function\ndef one(x: int) -> int:\n    return x\n")
+	slow := append([]string{"sh", "-c", `case "$*" in *duct.udf.worker*) sleep 1.5;; esac; exec "$@"`, "sh"}, py...)
+	eng, _ := attach(t, root, Options{Python: slow, Workers: 1, Timeout: 500 * time.Millisecond})
+	f := eng.funcs["one"]
+	defer func() { _ = f.Close() }()
+	res, err := f.Call(context.Background(), []arrow.Array{ints(7)})
+	if err != nil || res.(*array.Int64).Value(0) != 7 {
+		t.Fatalf("cold start: %v %v", res, err)
+	}
+}
+
 func TestPythonMissingSDKExplains(t *testing.T) {
 	root := t.TempDir()
 	write(t, filepath.Join(root, "functions", "f.py"), "x = 1\n")

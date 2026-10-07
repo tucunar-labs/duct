@@ -18,6 +18,12 @@ type SQLPlan struct {
 	// Setup statements run first (INSTALL/LOAD of extensions, ...). They must
 	// be idempotent.
 	Setup []string
+	// Open statements run inside the load transaction, on its connection,
+	// before Select (e.g. SET VARIABLE with an explicit ODBC connection).
+	// Close statements run after Select, also when it fails, on the same
+	// connection: they release what Open acquired once the statement that
+	// used it has been destroyed. Both repeat on every transaction retry.
+	Open, Close []string
 	// Select is one SELECT statement producing the rows to load. It already
 	// applies the incremental filter derived from IngestState.
 	Select string

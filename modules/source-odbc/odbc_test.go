@@ -29,19 +29,25 @@ func TestPlanTableAndSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "SELECT * FROM odbc_query('DSN=pg', 'SELECT * FROM public.t')"
+	want := "SELECT * FROM odbc_query(getvariable('duct_odbc'), 'SELECT * FROM public.t')"
 	if p.Select != want {
 		t.Errorf("got %q want %q", p.Select, want)
 	}
 	if len(p.Setup) != 2 || p.Setup[0] != "INSTALL odbc_scanner" || p.Setup[1] != "LOAD odbc_scanner" {
 		t.Errorf("setup: %v", p.Setup)
 	}
+	if len(p.Open) != 1 || p.Open[0] != "SET VARIABLE duct_odbc = odbc_connect('DSN=pg')" {
+		t.Errorf("open: %v", p.Open)
+	}
+	if len(p.Close) != 1 || p.Close[0] != "SELECT odbc_close(getvariable('duct_odbc'))" {
+		t.Errorf("close: %v", p.Close)
+	}
 }
 
 func TestPlanIncrementalPushdown(t *testing.T) {
 	opts := map[string]any{"connection": "DSN=pg", "query": "SELECT id, ts FROM t WHERE x = 'a';"}
 	p, _ := plan(t, opts, "ts", contract.IngestState{Watermark: "2024-01-02 11:00:00"})
-	want := `SELECT * FROM odbc_query('DSN=pg', 'SELECT * FROM (SELECT id, ts FROM t WHERE x = ''a'') duct_src WHERE ts > ''2024-01-02 11:00:00''')`
+	want := `SELECT * FROM odbc_query(getvariable('duct_odbc'), 'SELECT * FROM (SELECT id, ts FROM t WHERE x = ''a'') duct_src WHERE ts > ''2024-01-02 11:00:00''')`
 	if p.Select != want {
 		t.Errorf("got %q\nwant %q", p.Select, want)
 	}
@@ -58,8 +64,8 @@ func TestPlanIncrementalPushdown(t *testing.T) {
 func TestEnvExpansionAndErrors(t *testing.T) {
 	t.Setenv("DUCT_TEST_PW", "s3cret")
 	p, err := plan(t, map[string]any{"connection": "DSN=pg;Pwd=${DUCT_TEST_PW}", "table": "t"}, "", contract.IngestState{})
-	if err != nil || !strings.Contains(p.Select, "Pwd=s3cret") {
-		t.Fatalf("got %q (%v)", p.Select, err)
+	if err != nil || len(p.Open) != 1 || !strings.Contains(p.Open[0], "Pwd=s3cret") {
+		t.Fatalf("got %q (%v)", p.Open, err)
 	}
 	for name, opts := range map[string]map[string]any{
 		"no connection": {"table": "t"},

@@ -50,6 +50,9 @@ type Options struct {
 	Workers int
 	// Timeout caps one batch (default 60 s).
 	Timeout time.Duration
+	// StartTimeout caps one Python worker cold start (interpreter + imports),
+	// separate from Timeout (default 2 min).
+	StartTimeout time.Duration
 	// ExtraEnv is added to the allow-listed environment of the children.
 	ExtraEnv map[string]string
 }
@@ -60,6 +63,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Workers <= 0 {
 		o.Workers = 2
+	}
+	if o.StartTimeout <= 0 {
+		o.StartTimeout = 2 * time.Minute
 	}
 	if o.Timeout <= 0 {
 		o.Timeout = time.Minute

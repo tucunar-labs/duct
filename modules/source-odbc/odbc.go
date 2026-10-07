@@ -40,6 +40,7 @@ var (
 	envRe     = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 	tableRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*){0,2}$`)
 	numberRe  = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
+	handleVar = "duct_odbc"
 	setupStmt = []string{"INSTALL odbc_scanner", "LOAD odbc_scanner"}
 )
 
@@ -96,9 +97,16 @@ func (s *Source) Plan(_ context.Context, st contract.IngestState) (contract.SQLP
 		}
 		remote = fmt.Sprintf("SELECT * FROM (%s) duct_src WHERE %s > %s", s.query, s.watermark, lit)
 	}
+	// Explicit connection (odbc_connect/odbc_close) instead of the implicit one
+	// of odbc_query(conn_string, ...): the scanner frees that one before the
+	// statement that used it, and unixODBC 2.3.12 (Ubuntu 24.04, Debian 12)
+	// segfaults in SQLFreeStmt on the second query of a process. Here the
+	// statement is destroyed first, then the connection is closed.
 	return contract.SQLPlan{
 		Setup:  setupStmt,
-		Select: fmt.Sprintf("SELECT * FROM odbc_query(%s, %s)", quote(s.conn), quote(remote)),
+		Open:   []string{"SET VARIABLE " + handleVar + " = odbc_connect(" + quote(s.conn) + ")"},
+		Select: fmt.Sprintf("SELECT * FROM odbc_query(getvariable('%s'), %s)", handleVar, quote(remote)),
+		Close:  []string{"SELECT odbc_close(getvariable('" + handleVar + "'))"},
 	}, nil
 }
 

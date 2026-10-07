@@ -95,7 +95,10 @@ func newPyPool(opt Options) *pyPool {
 	return &pyPool{opt: opt, wake: make(chan struct{}, 1)}
 }
 
-func (p *pyPool) acquire(ctx context.Context) (*pyWorker, error) {
+// acquire waits for an idle worker or starts one. Waiting is bounded by ctx;
+// a cold start is bounded by Options.StartTimeout under parent, never by the
+// per-batch timeout (a slow interpreter start must not fail the first query).
+func (p *pyPool) acquire(ctx, parent context.Context) (*pyWorker, error) {
 	for {
 		p.mu.Lock()
 		if p.closed {
@@ -111,7 +114,9 @@ func (p *pyPool) acquire(ctx context.Context) (*pyWorker, error) {
 		if p.started < p.opt.Workers {
 			p.started++
 			p.mu.Unlock()
-			w, err := startWorker(ctx, p.opt)
+			sctx, cancel := context.WithTimeout(parent, p.opt.StartTimeout)
+			w, err := startWorker(sctx, p.opt)
+			cancel()
 			if err != nil {
 				p.mu.Lock()
 				p.started--
@@ -159,12 +164,16 @@ func (p *pyPool) Close() error {
 
 func (p *pyPool) caller(s Spec) func(context.Context, []arrow.Array) (arrow.Array, error) {
 	return func(ctx context.Context, args []arrow.Array) (arrow.Array, error) {
-		ctx, cancel := context.WithTimeout(ctx, p.opt.Timeout)
-		defer cancel()
-		w, err := p.acquire(ctx)
+		parent := ctx
+		wctx, wcancel := context.WithTimeout(parent, p.opt.Timeout)
+		w, err := p.acquire(wctx, parent)
+		wcancel()
 		if err != nil {
 			return nil, err
 		}
+		// The batch clock starts once the worker is ready.
+		ctx, cancel := context.WithTimeout(parent, p.opt.Timeout)
+		defer cancel()
 		res, err := w.call(ctx, s.Name, args)
 		var remote *remoteError
 		// A function error leaves the worker healthy; I/O failures and timeouts do not.

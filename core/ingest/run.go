@@ -94,8 +94,10 @@ func Run(ctx context.Context, eng contract.Engine, root string, c Config) (res R
 	}
 
 	var (
-		recs    []arrow.RecordBatch // batch Source output, replayed on each attempt
-		stageFn string              // SELECT that fills the stage table
+		recs     []arrow.RecordBatch // batch Source output, replayed on each attempt
+		stageFn  string              // SELECT that fills the stage table
+		openSQL  []string            // SQLPlan.Open / Close, run inside each attempt
+		closeSQL []string
 	)
 	switch src := mod.(type) {
 	case contract.SQLSource:
@@ -108,7 +110,7 @@ func Run(ctx context.Context, eng contract.Engine, root string, c Config) (res R
 				return res, fmt.Errorf("source %s setup: %w", c.Source, err)
 			}
 		}
-		stageFn = plan.Select
+		stageFn, openSQL, closeSQL = plan.Select, plan.Open, plan.Close
 	case contract.Source:
 		var err error
 		if recs, err = collect(ctx, src); err != nil {
@@ -144,7 +146,7 @@ func Run(ctx context.Context, eng contract.Engine, root string, c Config) (res R
 			input = rr
 		}
 		return tr.InTx(ctx, input, func(ctx context.Context, tx contract.Tx) error {
-			n, newWM, err := load(ctx, tx, c, stageFn)
+			n, newWM, err := load(ctx, tx, c, stageFn, openSQL, closeSQL)
 			if err != nil {
 				return err
 			}
@@ -199,9 +201,9 @@ func collect(ctx context.Context, src contract.Source) ([]arrow.RecordBatch, err
 // load runs inside the transaction. It stages the source rows in a temporary
 // table (so a remote query runs once and the watermark is known), evolves the
 // target schema and writes.
-func load(ctx context.Context, tx contract.Tx, c Config, selectSQL string) (rows int64, newWM string, err error) {
+func load(ctx context.Context, tx contract.Tx, c Config, selectSQL string, open, closeSQL []string) (rows int64, newWM string, err error) {
 	target := c.Target
-	if _, err = count(ctx, tx, "CREATE OR REPLACE TEMP TABLE "+stageTable+" AS "+selectSQL); err != nil {
+	if err := stage(ctx, tx, selectSQL, open, closeSQL); err != nil {
 		return 0, "", err
 	}
 	defer func() { _ = tx.Exec(ctx, "DROP TABLE IF EXISTS "+stageTable) }()
@@ -240,6 +242,27 @@ func load(ctx context.Context, tx contract.Tx, c Config, selectSQL string) (rows
 	}
 	n, err := count(ctx, tx, "INSERT INTO "+target+" BY NAME SELECT * FROM "+stageTable)
 	return n, newWM, err
+}
+
+// stage fills the temp table from the source query. open/closeSQL bracket it:
+// the source acquires what it needs on this connection and releases it only
+// after the statement has been destroyed (the ODBC scanner crashes, with
+// unixODBC 2.3.12, if its implicit connection goes before the statement).
+func stage(ctx context.Context, tx contract.Tx, selectSQL string, open, closeSQL []string) (err error) {
+	for _, s := range open {
+		if err := tx.Exec(ctx, s); err != nil {
+			return err
+		}
+	}
+	defer func() {
+		for _, s := range closeSQL {
+			if cerr := tx.Exec(ctx, s); cerr != nil && err == nil {
+				err = cerr
+			}
+		}
+	}()
+	_, err = count(ctx, tx, "CREATE OR REPLACE TEMP TABLE "+stageTable+" AS "+selectSQL)
+	return err
 }
 
 // evolve adds to target the columns of stage that it lacks.

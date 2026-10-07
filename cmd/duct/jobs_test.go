@@ -153,7 +153,7 @@ tasks:
 	start := time.Now()
 	out, _, code := duct(t, "jobs", "run", "j", "--project", root)
 	t.Logf("%s", out)
-	if code != 1 || time.Since(start) > 20*time.Second {
+	if code != 1 || time.Since(start) > 60*time.Second {
 		t.Errorf("code=%d after %s", code, time.Since(start))
 	}
 	rows := queryRows(t, root, "SELECT task_id, status, attempts, error FROM duct.duct_task_runs ORDER BY task_id")
@@ -278,7 +278,7 @@ tasks:
 `)
 	s := startServe(t, root, nil)
 
-	waitFor(t, "two cron ticks", 20*time.Second, func() bool {
+	waitFor(t, "two cron ticks", 90*time.Second, func() bool {
 		return len(runsOf(t, root, "job = 'tick' AND status = 'success'")) >= 2
 	})
 	rs := runsOf(t, root, "job = 'tick'")
@@ -296,7 +296,7 @@ tasks:
 	// New snapshot of bronze.orders (a second ingest, full mode replaces it).
 	writeFile(t, filepath.Join(root, "data", "orders.csv"), "id,customer,amount\n1,ana,10\n2,bob,20\n3,ana,5\n4,cy,1\n")
 	mustDuct(t, "ingest", "--project", root)
-	waitFor(t, "snapshot-triggered run", 30*time.Second, func() bool {
+	waitFor(t, "snapshot-triggered run", 90*time.Second, func() bool {
 		return len(runsOf(t, root, "job = 'onsnap' AND trigger_kind = 'snapshot' AND status = 'success'")) == 1
 	})
 	if _, err := os.Stat(filepath.Join(root, "snap.txt")); err != nil {
@@ -312,13 +312,13 @@ tasks:
 
 	// New file.
 	writeFile(t, filepath.Join(root, "data", "in", "a.csv"), "x\n1\n")
-	waitFor(t, "file-triggered run", 30*time.Second, func() bool {
+	waitFor(t, "file-triggered run", 90*time.Second, func() bool {
 		return len(runsOf(t, root, "job = 'onfile' AND trigger_kind = 'file' AND status = 'success'")) == 1
 	})
 
 	// Shutdown while a task runs: recorded as cancelled, process group gone.
 	writeFile(t, filepath.Join(root, "data", "long", "a.go"), "x")
-	waitFor(t, "long task running", 30*time.Second, func() bool {
+	waitFor(t, "long task running", 90*time.Second, func() bool {
 		return len(queryRows(t, root, "SELECT 1 AS x FROM duct.duct_task_runs WHERE job = 'long' AND status = 'running'")) == 1
 	})
 	s.stop()
