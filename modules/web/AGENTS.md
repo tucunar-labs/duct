@@ -15,8 +15,28 @@
   `login_lockout` (15m, doubles on repeats, max 24h),
   `row_limit` (default 1000), `query_timeout` (default `60s`),
   `dashboards_dir` (folder with `dashboards/*.yaml`; `duct serve` passes `<project>/dashboards`; unset: none).
-- **Routes:** `/login` (GET/POST), `/logout` (POST), `/catalog`, `/sql`, `POST /sql/run`
-  (Datastar SSE), `/dashboards`, `/dashboards/{name}`, `POST /dashboards/{name}/data` (SSE), `/static/*`.
+- **Routes:** `/login` (GET/POST), `/logout` (POST), `/catalog`, `/catalog/{schema}/{table}`,
+  `/sql`, `POST /sql/run` (Datastar SSE), `/dashboards`, `/dashboards/{name}`,
+  `POST /dashboards/{name}/data` (SSE), `/static/*`.
+- **Shell:** server-rendered frame (templ) with a collapsible sidebar (Catalog, SQL editor,
+  Dashboards, Jobs/Admin placeholders — Admin only for role `duct_admin`), breadcrumbs, a user
+  menu and a light/dark/system toggle. The `static/shell.js` island (a classic script loaded in
+  `<head>` so the theme applies before first paint) persists the theme and sidebar in
+  `localStorage`, filters the schema trees client-side, drives the tabs and the editor/results
+  splitter, and keeps worksheets and the query history in `localStorage` (nothing leaves the
+  browser). Tabs are keyboard-navigable (`role="tab"` + arrows); contrast is AA.
+- **Catalog:** `/catalog` shows a searchable schema → table → columns tree plus an overview;
+  `/catalog/{schema}/{table}` adds tabs Columnas (name, type, nullable), Vista previa (first 100
+  rows) and Detalles. Nullability comes from `is_nullable` (the governed `Catalog` stream carries
+  it); the row count runs `SELECT count(*)` through `QueryHandler` as the session identity and the
+  last snapshot through the OPTIONAL `contract.SemanticQuerier.LakeSnapshot`; whatever governance
+  denies shows as "—". "Abrir en editor SQL" deep-links to `/sql?q=…`.
+- **SQL editor:** schema browser on the left (click inserts the qualified name), CodeMirror on
+  top, results below with a draggable splitter. `Ctrl/Cmd+Enter` (or Ejecutar) runs the selection
+  if there is one, else the whole worksheet: the island keeps the selection in signal `sel` and
+  the server prefers it over `sql`. Results have sticky headers, type badges, per-cell/per-row
+  copy, CSV export and an error panel with `Lx:Cy` when the engine reports a position. Worksheets
+  and history are client-side only.
 - **Dashboards:** the YAML is re-read on every request (edit and reload). Charts never run SQL: they call the
   OPTIONAL `contract.SemanticQuerier` of the QueryHandler (`SemanticQuery` as the session identity,
   `LakeSnapshot`); without it (or without a model) every chart shows an error panel. `POST .../data` gets
@@ -47,14 +67,20 @@
   - CodeMirror 6 island: `static/editor.js` is built by `just bundle` (`tools/bundle`,
     esbuild as a Go library) from `tools/bundle/web/editor.js`; the npm tarballs are pinned
     with sha512 integrity in `tools/bundle/web/package-lock.json`. The output is committed.
+    The shell island (`static/shell.js`, from `tools/bundle/web/shell.js`, no npm deps) is
+    built the same way and is tiny; each page loads only the islands it needs (editor on
+    `/sql`, charts on dashboards, shell everywhere).
   - ECharts island: `static/charts.js` (`<duct-chart>` custom element in a shadow root; ECharts 6.1.0 +
     zrender 6.1.0 + tslib 2.3.0 tree-shaken: line, bar, pie, scatter, heatmap, grid, tooltip, legend,
     visualMap, brush, canvas renderer) built by the same `just bundle` from `tools/bundle/web/charts.js`;
-    KPI and table need no ECharts. Light/dark themes follow `prefers-color-scheme` with the brand palette.
+    KPI and table need no ECharts. Light/dark themes follow `html[data-theme]` (the shell
+    toggle) or `prefers-color-scheme` with the brand palette; each chart panel shows a
+    skeleton until the island paints (or reports an error).
     CSP is unchanged: the island needs no `eval`, inline script or other origin.
   - Everything under `static/` is `go:embed`ed and served with content-hashed URLs. The brand
     SVGs in `static/brand/` are copies of `assets/brand/` (palette in its README).
 - **Tests:** `web_test.go` (httptest with fake QueryHandler/AuthProvider): `session_test.go` (restart, tamper, timeouts, rotation, logout, rate limits); login/CSRF/cookies,
-  redirects, catalog, query, truncation, errors, escaping, static, Serve lifecycle; `dashboards_test.go`
+  redirects, catalog, table detail (columns/preview/details, 404, nullable), admin-only nav, shell
+  markers, run selection, query, truncation, errors, escaping, `errPos`, static, Serve lifecycle; `dashboards_test.go`
   (fake SemanticQuerier: render, filters, cross-filter, cache by snapshot/role, role without access, LRU).
-- **Status:** experimental (M5 minimal web + dashboards; no notebooks, admin yet).
+- **Status:** experimental (M5 web + dashboards; Jobs/Admin are placeholders, no notebooks yet).
