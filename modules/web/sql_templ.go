@@ -107,7 +107,7 @@ func sqlPage(p pageData, initial string, schemas []schema) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</textarea></div></div><div class=\"splitter\" data-splitter data-split=\"#sql-editor-pane\" role=\"separator\" aria-orientation=\"horizontal\" aria-label=\"Redimensionar editor y resultados\" tabindex=\"0\"></div><div class=\"flex min-h-0 flex-1 flex-col\" data-results-host><div class=\"tabs flex-none\" role=\"tablist\" aria-label=\"Salida\"><button type=\"button\" role=\"tab\" id=\"tab-result\" aria-controls=\"panel-result\" aria-selected=\"true\" class=\"tab\">Resultado</button> <button type=\"button\" role=\"tab\" id=\"tab-history\" aria-controls=\"panel-history\" aria-selected=\"false\" tabindex=\"-1\" class=\"tab\"><span class=\"flex items-center gap-1.5\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</textarea></div></div><div class=\"splitter\" data-splitter data-split=\"#sql-editor-pane\" role=\"separator\" aria-orientation=\"horizontal\" aria-label=\"Redimensionar editor y resultados\" tabindex=\"0\"></div><div class=\"flex min-h-0 flex-1 flex-col\" data-results-host><div class=\"tabs flex-none\" data-tabs role=\"tablist\" aria-label=\"Salida\"><button type=\"button\" role=\"tab\" id=\"tab-result\" aria-controls=\"panel-result\" aria-selected=\"true\" class=\"tab\">Resultado</button> <button type=\"button\" role=\"tab\" id=\"tab-history\" aria-controls=\"panel-history\" aria-selected=\"false\" tabindex=\"-1\" class=\"tab\"><span class=\"flex items-center gap-1.5\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

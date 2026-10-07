@@ -469,6 +469,14 @@
   :root[data-sidebar="collapsed"] .sidebar {
     width: 3.5rem;
   }
+  /* The wordmark already contains the mark: expanded shows only the
+     wordmark, collapsed only the mark (never both). */
+  .sidebar-brand-mark {
+    display: none;
+  }
+  :root[data-sidebar="collapsed"] .sidebar-brand-mark {
+    display: block;
+  }
   :root[data-sidebar="collapsed"] .sidebar-label,
   :root[data-sidebar="collapsed"] .sidebar-section,
   :root[data-sidebar="collapsed"] .sidebar-brand-text {

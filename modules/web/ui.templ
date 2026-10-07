@@ -85,7 +85,9 @@ templ sidebar(p pageData) {
 	<aside class="sidebar" aria-label="Navegación principal">
 		<div class="flex items-center gap-2 px-3 py-3">
 			<a href="/catalog" class="flex items-center gap-2" aria-label="Duct, inicio">
-				@logo(p.Assets, "h-7 w-7 flex-none")
+				<span class="sidebar-brand-mark">
+					@logo(p.Assets, "h-7 w-7 flex-none")
+				</span>
 				<span class="sidebar-brand-text">
 					@wordmark(p.Assets, "h-6 w-auto")
 				</span>

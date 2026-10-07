@@ -91,7 +91,7 @@ function mount(host) {
   document.addEventListener("duct:sql-set", (e) => {
     const text = String(e.detail ?? "");
     if (view.state.doc.toString() === text) return;
-    view.dispatch({ changes: { from: 0, to: view.state.length, insert: text }, selection: { anchor: 0 } });
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, selection: { anchor: 0 } });
     view.focus();
   });
   document.addEventListener("duct:sql-insert", (e) => {
