@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/governance"
@@ -29,7 +30,7 @@ func hasSemanticModel(p *project.Project) bool {
 // cmdSemantic is `duct semantic validate|list|build|query` (ADR 0011).
 func cmdSemantic(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return usageErr("semantic needs a subcommand: validate [file...] | list | build --role R | query --role R --measures m")
+		return usageErr("semantic needs a subcommand: validate [file...] | list | build [--role R] [--force] [--sql] | status | query --role R --measures m")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -38,7 +39,9 @@ func cmdSemantic(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	case "list":
 		return semanticList(ctx, rest, stdout, stderr)
 	case "build":
-		return semanticBuild(rest, stdout, stderr)
+		return semanticBuild(ctx, rest, stdout, stderr)
+	case "status":
+		return semanticStatus(ctx, rest, stdout, stderr)
 	case "query":
 		return semanticQuery(ctx, rest, stdout, stderr)
 	}
@@ -74,6 +77,9 @@ func semanticValidate(args []string, stdout, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(stdout, "ok: %d documents, %d datasets, %d relationships, %d metrics (Ossie %s)\n",
 		len(m.Docs), len(m.Datasets), len(m.Relationships), len(m.Metrics), semantic.SpecVersion)
+	for _, p := range m.Preaggs() {
+		_, _ = fmt.Fprintf(stdout, "preaggregate %s: dims [%s] measures [%s] refresh %s\n", p.Name, strings.Join(p.Dims, ", "), strings.Join(p.Measures, ", "), p.Refresh)
+	}
 	return nil
 }
 
@@ -139,15 +145,43 @@ func semanticList(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	return nil
 }
 
-func semanticBuild(args []string, stdout, stderr io.Writer) error {
+// semanticBuild materialises the preaggregates declared in the model (one
+// table per role in the lake schema semantic_cache, built from the role's own
+// views); with --sql it only prints the SQL of every metric over a role's views.
+func semanticBuild(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs, dir := newFlags("semantic build", stderr)
-	role := fs.String("role", "", "role whose views the SQL reads (required)")
-	out := fs.String("out", "", "write one <metric>.sql per metric into this folder instead of printing")
+	role := fs.String("role", "", "only this role (with --sql: the role whose views the SQL reads, required)")
+	force := fs.Bool("force", false, "rebuild even the preaggregates that are fresh")
+	printSQL := fs.Bool("sql", false, "print the SQL of every metric instead of building preaggregates")
+	out := fs.String("out", "", "with --sql: write one <metric>.sql per metric into this folder instead of printing")
 	if err := parse(fs, args); err != nil {
 		return err
 	}
+	if !*printSQL {
+		m, p, err := loadModel(*dir, nil)
+		if err != nil {
+			return err
+		}
+		eng, err := openEngine(ctx, p, false)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = eng.Close() }()
+		if _, err := project.Migrate(ctx, eng); err != nil {
+			return err
+		}
+		rep, err := governance.RefreshPreaggs(ctx, eng, m, governance.PreaggOptions{Role: *role, Force: *force, Manual: true})
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "preaggregates: %d built, %d already fresh, %d skipped, %d dropped\n", rep.Built, rep.Current, rep.Skipped, rep.Dropped)
+		for _, n := range rep.Notes {
+			_, _ = fmt.Fprintf(stdout, "  skipped %s\n", n)
+		}
+		return nil
+	}
 	if *role == "" {
-		return usageErr("semantic build needs --role: the SQL reads the views of that role")
+		return usageErr("semantic build --sql needs --role: the SQL reads the views of that role")
 	}
 	m, _, err := loadModel(*dir, nil)
 	if err != nil {
@@ -180,6 +214,41 @@ func semanticBuild(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+// semanticStatus lists the preaggregates built and whether each would serve now.
+func semanticStatus(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs, dir := newFlags("semantic status", stderr)
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	m, p, err := loadModel(*dir, nil)
+	if err != nil {
+		return err
+	}
+	eng, err := openEngine(ctx, p, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = eng.Close() }()
+	if _, err := project.Migrate(ctx, eng); err != nil {
+		return err
+	}
+	for _, pa := range m.Preaggs() {
+		_, _ = fmt.Fprintf(stdout, "preaggregate %s: dims [%s] measures [%s] refresh %s\n", pa.Name, strings.Join(pa.Dims, ", "), strings.Join(pa.Measures, ", "), pa.Refresh)
+	}
+	sts, err := governance.PreaggStatuses(ctx, eng, m)
+	if err != nil {
+		return err
+	}
+	for _, s := range sts {
+		state := "STALE (queries read the role views)"
+		if s.Fresh {
+			state = "fresh"
+		}
+		_, _ = fmt.Fprintf(stdout, "  role %-12s %-20s %7d rows  built %s  %s\n", s.Role, s.Name, s.Rows, s.BuiltAt.Format(time.RFC3339), state)
+	}
+	return nil
+}
+
 type multiFlag []string
 
 func (m *multiFlag) String() string     { return strings.Join(*m, "; ") }
@@ -202,6 +271,8 @@ func semanticQuery(ctx context.Context, args []string, stdout, stderr io.Writer)
 	measures := fs.String("measures", "", "comma-separated metrics")
 	var filters multiFlag
 	fs.Var(&filters, "filter", "condition, repeatable: 'field=value', field!=v, <, <=, >, >=, 'field~pattern' (LIKE), 'field in a,b', 'field is null'")
+	var having multiFlag
+	fs.Var(&having, "having", "condition on a metric, repeatable: 'revenue>=100', 'units in 1,2' (groups after aggregating)")
 	order := fs.String("order", "", "comma-separated sort keys, prefix with - for descending")
 	limit := fs.Int("limit", 0, "maximum rows (default from the model)")
 	format := fs.String("format", "table", "output format: table, csv or json")
@@ -224,6 +295,14 @@ func semanticQuery(ctx context.Context, args []string, stdout, stderr io.Writer)
 		}
 		req.Filters = append(req.Filters, fl)
 	}
+	for _, f := range having {
+		fl, err := parseFilter(f)
+		if err != nil {
+			return usageErr("%v", err)
+		}
+		fl.Metric, fl.Field = fl.Field, ""
+		req.Filters = append(req.Filters, fl)
+	}
 	for _, o := range splitList(*order) {
 		req.Order = append(req.Order, semantic.Order{By: strings.TrimPrefix(o, "-"), Desc: strings.HasPrefix(o, "-")})
 	}
@@ -237,20 +316,32 @@ func semanticQuery(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err != nil {
 		return err
 	}
-	c, err := m.Query(sc, req)
-	if err != nil {
-		return err
-	}
 	if *showSQL {
+		c, err := m.Query(sc, req)
+		if err != nil {
+			return err
+		}
 		_, _ = fmt.Fprintln(stdout, c.SQL)
 		return nil
 	}
-	st, err := h.ForProtocol("cli").Query(ctx, id, c.SQL)
+	// Through the handler, like serve does: a fresh preaggregate serves the query.
+	h.SetSemanticModel(m)
+	sr := contract.SemanticRequest{Dims: req.Dims, Measures: req.Measures, Limit: req.Limit}
+	for _, f := range req.Filters {
+		sr.Filters = append(sr.Filters, contract.SemanticFilter{Field: f.Field, Metric: f.Metric, Op: f.Op, Value: f.Value})
+	}
+	for _, o := range req.Order {
+		sr.Order = append(sr.Order, contract.SemanticOrder{By: o.By, Desc: o.Desc})
+	}
+	res, err := h.ForProtocol("cli").(contract.SemanticQuerier).SemanticQuery(ctx, id, sr)
 	if err != nil {
 		return err
 	}
-	defer st.Release()
-	return writeStream(st, *format, stdout)
+	defer res.Stream.Release()
+	if strings.Contains(res.SQL, `"`+semantic.PreaggSchema+`"`) {
+		_, _ = fmt.Fprintln(stderr, "served from a preaggregate")
+	}
+	return writeStream(res.Stream, *format, stdout)
 }
 
 var filterRe = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_.]*)\s*(!=|<=|>=|=|<|>|~)\s*(.*?)\s*$`)

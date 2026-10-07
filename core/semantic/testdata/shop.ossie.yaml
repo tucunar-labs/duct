@@ -73,6 +73,9 @@ metrics:
     expression: {dialects: [{dialect: ANSI_SQL, expression: SUM(order_items.qty)}]}
   - name: item_revenue
     expression: {dialects: [{dialect: ANSI_SQL, expression: SUM(order_items.line_total)}]}
+  - name: revenue_per_unit
+    description: Ventas por unidad vendida (pedidos y líneas son hechos distintos)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: revenue / units}]}
 custom_extensions:
   - vendor_name: DUCT
-    data: '{"default_limit": 500, "max_limit": 5000}'
+    data: '{"default_limit": 500, "max_limit": 5000, "preaggregate": {"name": "ventas_region", "dims": ["customers.region", "orders.status"], "measures": ["revenue", "order_count", "avg_order"], "refresh": "on_snapshot"}}'

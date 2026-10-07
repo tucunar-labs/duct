@@ -30,11 +30,15 @@ type StreamSettings struct{}
 //
 //	[alerts]
 //	group = "duct-alerts"            # Kafka consumer group (default duct-alerts)
+//	instance = "alerts-1"            # name of this process in the shared state (default: random); several instances may run at once
+//	lease_ttl = "15s"                # how long a claim/confirmation holds; a dead instance is replaced after about this long
 //	[alerts.channels.oncall]
 //	type = "ntfy"
 //	topic = "planta-incendios"
 //	token_env = "NTFY_TOKEN"         # <key>_env = name of an env var holding <key>
 type AlertsSettings struct {
 	Group    string                    `toml:"group"`
+	Instance string                    `toml:"instance"`
+	LeaseTTL string                    `toml:"lease_ttl"`
 	Channels map[string]map[string]any `toml:"channels"`
 }

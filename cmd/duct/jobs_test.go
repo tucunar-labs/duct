@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -326,5 +327,147 @@ tasks:
 	runs := runsOf(t, root, "job = 'long'")
 	if len(rows) != 1 || rows[0]["status"] != "cancelled" || runs[0]["status"] != "cancelled" {
 		t.Errorf("after shutdown: tasks=%v runs=%v", rows, runs)
+	}
+}
+
+const quickJob = `name: %s
+schedule: "%s"
+%s
+tasks:
+  - {id: t, type: shell, params: {command: [sh, -c, "echo x >> %s.txt"]}}
+`
+
+func quickJobYAML(name, schedule, extra string) string {
+	return fmt.Sprintf(quickJob, name, schedule, extra, name)
+}
+
+// TestJobsHotReload: serve follows jobs/*.yaml. A new job starts ticking, an
+// invalid edit is rejected (the old definitions keep running), a removed job
+// stops, and the first job of a project that had none is picked up.
+func TestJobsHotReload(t *testing.T) {
+	old := jobsReloadEvery
+	jobsReloadEvery = 200 * time.Millisecond
+	t.Cleanup(func() { jobsReloadEvery = old })
+	root := newProject(t) // no jobs at all
+	s := startServe(t, root, nil)
+	defer s.stop()
+	ticks := func(job string) int { return len(runsOf(t, root, "job = '"+job+"' AND status = 'success'")) }
+
+	writeJob(t, root, "a", quickJobYAML("a", "@every 1s", ""))
+	waitFor(t, "first job loaded into a server that had none", 60*time.Second, func() bool { return ticks("a") >= 2 })
+
+	writeJob(t, root, "b", quickJobYAML("b", "@every 1s", ""))
+	waitFor(t, "new job", 60*time.Second, func() bool { return ticks("b") >= 1 })
+
+	// Invalid edit (unknown key): rejected as a whole, a keeps running, b is not touched.
+	writeJob(t, root, "a", "name: a\nschedule: \"@every 1s\"\nbogus: 1\ntasks:\n  - {id: t, type: shell, params: {command: [true]}}\n")
+	before := ticks("a")
+	waitFor(t, "a keeps ticking after an invalid edit", 30*time.Second, func() bool { return ticks("a") >= before+2 })
+
+	// Fix a (the whole set is validated, so the broken file would block any change), then remove b: it stops; a keeps going.
+	writeJob(t, root, "a", quickJobYAML("a", "@every 1s", ""))
+	if err := os.Remove(filepath.Join(root, "jobs", "b.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1500 * time.Millisecond) // the reload sees the removal (polled every 200 ms)
+	waitFor(t, "b's in-flight run to end", 60*time.Second, func() bool {
+		return len(runsOf(t, root, "job = 'b' AND status = 'running'")) == 0
+	})
+	nb := len(runsOf(t, root, "job = 'b'"))
+	time.Sleep(3 * time.Second)
+	if n := len(runsOf(t, root, "job = 'b'")); n != nb {
+		t.Errorf("job b kept starting runs after its file was removed (%d -> %d)", nb, n)
+	}
+}
+
+func setCron(t *testing.T, root, job string, last time.Time) {
+	t.Helper()
+	mustDuct(t, "query", "--project", root, fmt.Sprintf("DELETE FROM duct.duct_jobs_state WHERE state_key = 'cron:%s'", job))
+	mustDuct(t, "query", "--project", root, fmt.Sprintf("INSERT INTO duct.duct_jobs_state VALUES ('cron:%s', '%d', now())", job, last.Unix()))
+}
+
+// TestJobsCatchup: ticks missed while nothing ran are handled by the policy
+// (last: one run, all: one per tick in order, none: nothing), and two servers
+// on the same state still start exactly one run per tick.
+func TestJobsCatchup(t *testing.T) {
+	root := newProject(t)
+	down := time.Now().Add(-5*time.Minute - 10*time.Second) // ~5 missed "* * * * *" ticks
+	writeJob(t, root, "keep", quickJobYAML("keep", "* * * * *", "catchup: last"))
+	writeJob(t, root, "every", quickJobYAML("every", "* * * * *", "catchup: all"))
+	writeJob(t, root, "none", quickJobYAML("none", "* * * * *", "catchup: none"))
+	writeJob(t, root, "fresh", quickJobYAML("fresh", "* * * * *", "")) // default last, but no recorded tick
+	mustDuct(t, "migrate", "--project", root)
+	for _, j := range []string{"keep", "every", "none"} {
+		setCron(t, root, j, down)
+	}
+	a := startServe(t, root, nil)
+	b := startServe(t, root, nil) // a second machine on the same state
+	defer a.stop()
+	defer b.stop()
+	waitFor(t, "catch-up runs", 90*time.Second, func() bool {
+		return len(runsOf(t, root, "job = 'every' AND status = 'success'")) >= 4 &&
+			len(runsOf(t, root, "job = 'keep' AND status = 'success'")) >= 1
+	})
+	time.Sleep(3 * time.Second)
+	keep := runsOf(t, root, "job = 'keep'")
+	if len(keep) != 1 || keep[0]["trigger_kind"] != "cron" {
+		t.Errorf("last: %d runs %v", len(keep), keep)
+	}
+	all := runsOf(t, root, "job = 'every'")
+	if len(all) < 4 || len(all) > 6 {
+		t.Errorf("all: %d runs", len(all))
+	}
+	seen := map[any]bool{}
+	prev := ""
+	for _, r := range all {
+		s, _ := r["scheduled_for"].(string)
+		if seen[s] || s <= prev {
+			t.Errorf("all: ticks repeated or out of order: %v", all)
+			break
+		}
+		seen[s], prev = true, s
+	}
+	if n := len(runsOf(t, root, "job = 'none'")); n != 0 {
+		t.Errorf("none: %d runs", n)
+	}
+	if n := len(runsOf(t, root, "job = 'fresh'")); n != 0 {
+		t.Errorf("a job that never ticked replayed %d runs", n)
+	}
+}
+
+// TestJobsHistoryRetention: `duct gc` deletes finished runs past [jobs]
+// history_retention (and their attempts), never the running ones or the fresh ones.
+func TestJobsHistoryRetention(t *testing.T) {
+	root := newProject(t)
+	mustDuct(t, "migrate", "--project", root)
+	f, err := os.OpenFile(filepath.Join(root, "duct.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("\n[jobs]\nhistory_retention = \"30d\"\n")
+	_ = f.Close()
+	q := func(sql string) { mustDuct(t, "query", "--project", root, sql) }
+	run := func(id int, status, age string) {
+		fin := "now() - INTERVAL " + age
+		if status == "running" {
+			fin = "NULL"
+		}
+		q(fmt.Sprintf("INSERT INTO duct.duct_jobs_runs (id, job, trigger_kind, status, started_at, finished_at) VALUES (%d, 'j', 'manual', '%s', now() - INTERVAL %s, %s)", id, status, age, fin))
+		q(fmt.Sprintf("INSERT INTO duct.duct_task_runs (run_id, task_id, job, task_type, depends_on, status, attempts, max_attempts) VALUES (%d, 't', 'j', 'shell', '[]', '%s', 1, 1)", id, status))
+	}
+	run(1, "success", "'40 days'")
+	run(2, "failed", "'31 days'")
+	run(3, "success", "'2 days'")
+	run(4, "running", "'45 days'")
+	out := mustDuct(t, "gc", "--project", root)
+	if !strings.Contains(out, "prune jobs history") || !strings.Contains(out, "2 runs") {
+		t.Errorf("gc: %s", out)
+	}
+	left := queryRows(t, root, "SELECT id FROM duct.duct_jobs_runs ORDER BY id")
+	if len(left) != 2 || left[0]["id"].(float64) != 3 || left[1]["id"].(float64) != 4 {
+		t.Errorf("runs left: %v", left)
+	}
+	if n := queryRows(t, root, "SELECT count(*) AS n FROM duct.duct_task_runs")[0]["n"].(float64); n != 2 {
+		t.Errorf("task attempts left: %v", n)
 	}
 }

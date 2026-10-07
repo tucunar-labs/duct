@@ -83,15 +83,19 @@ func cmdIngest(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if _, err := project.Migrate(ctx, eng); err != nil { // duct_ingest_state may be new
 		return err
 	}
+	ca := newCLIAudit(p, eng)
+	defer ca.close()
 	failed := 0
 	for _, c := range selected {
 		start := time.Now()
 		res, err := ingest.Run(ctx, eng, p.Root, c)
 		if err != nil {
 			failed++
+			ca.record("duct ingest "+c.Name, start, 0, err)
 			_, _ = fmt.Fprintf(stdout, "%-20s FAILED: %v\n", c.Name, err)
 			continue
 		}
+		ca.record("duct ingest "+c.Name, start, int64(res.Rows), nil)
 		_, _ = fmt.Fprintf(stdout, "%-20s %-24s %8d rows  %s\n", c.Name, res.Table, res.Rows, time.Since(start).Round(time.Millisecond))
 	}
 	if failed > 0 {

@@ -71,6 +71,7 @@ type Server struct {
 	roles    sync.Map // user -> role, for the audit hook
 	auditor  atomic.Pointer[contract.Auditor]
 	admin    atomic.Pointer[contract.Administrator]
+	limiter  atomic.Pointer[contract.Limiter]
 	failures failureTracker
 	wg       sync.WaitGroup
 }
@@ -203,6 +204,11 @@ func (s *Server) Serve(ctx context.Context, h contract.QueryHandler, auth contra
 	}
 	if a, ok := h.(contract.Administrator); ok {
 		s.admin.Store(&a)
+	}
+	if l, ok := h.(contract.Limiter); ok {
+		s.limiter.Store(&l)
+	} else {
+		slog.Warn("serve-pg: the query handler has no quotas; Postgres statements are not limited")
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()

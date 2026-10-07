@@ -50,17 +50,23 @@ func (h *Handler) semanticQuery(ctx context.Context, proto string, id contract.I
 	}
 	sr := semantic.Request{Dims: req.Dims, Measures: req.Measures, Limit: req.Limit}
 	for _, f := range req.Filters {
-		sr.Filters = append(sr.Filters, semantic.Filter{Field: f.Field, Op: f.Op, Value: f.Value})
+		sr.Filters = append(sr.Filters, semantic.Filter{Field: f.Field, Metric: f.Metric, Op: f.Op, Value: f.Value})
 	}
 	for _, o := range req.Order {
 		sr.Order = append(sr.Order, semantic.Order{By: o.By, Desc: o.Desc})
 	}
+	sc.Fresh = h.freshPreaggs(ctx, m, sc)
 	c, err := m.Query(sc, sr)
 	if err != nil {
 		return nil, err
 	}
-	// From here the statement is audited like any other.
-	st, err := h.query(ctx, proto, id, c.SQL)
+	// From here the statement is audited like any other. A query routed to a
+	// preaggregate reads semantic_cache, which only compiler output may do.
+	qctx := ctx
+	if c.Preagg != "" {
+		qctx = withCompiled(ctx)
+	}
+	st, err := h.query(qctx, proto, id, c.SQL)
 	if err != nil {
 		return nil, err
 	}

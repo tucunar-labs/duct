@@ -72,6 +72,8 @@ func runProject(cmd string, args []string, stdout, stderr io.Writer) int {
 		err = cmdFunctions(ctx, args, stdout, stderr)
 	case "notebook":
 		err = cmdNotebook(ctx, args, stdout, stderr)
+	case "audit":
+		err = cmdAudit(ctx, args, stdout, stderr)
 	case "mlflow":
 		err = cmdMLflow(ctx, args, stdout, stderr)
 	case "enable":
@@ -235,12 +237,7 @@ func cmdQuery(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	defer func() { _ = eng.Close() }()
-	st, err := eng.Query(ctx, sqlText)
-	if err != nil {
-		return err
-	}
-	defer st.Release()
-	return writeStream(st, *format, stdout)
+	return auditedQuery(ctx, p, eng, sqlText, *format, stdout)
 }
 
 func cmdMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) error {

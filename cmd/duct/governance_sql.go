@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/alonsoburon/duct/core/governance"
 )
@@ -43,19 +44,22 @@ func cmdSQL(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 			return err
 		}
 		defer func() { _ = eng.Close() }()
-		st, err := eng.Query(ctx, sql)
-		if err != nil {
-			return err
-		}
-		defer st.Release()
-		return writeStream(st, *format, stdout)
+		return auditedQuery(ctx, p, eng, sql, *format, stdout)
 	}
 	store, eng, done, err := govSession(ctx, *dir)
 	if err != nil {
 		return err
 	}
 	defer done()
+	p, err := findProject(*dir)
+	if err != nil {
+		return err
+	}
+	ca := newCLIAudit(p, eng)
+	defer ca.close()
+	start := time.Now()
 	res, err := store.Execute(ctx, stmt)
+	ca.record(sql, start, 0, err)
 	if err != nil {
 		return err
 	}

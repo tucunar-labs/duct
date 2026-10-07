@@ -29,7 +29,7 @@ type Entry struct {
 }
 
 // Store records transitions in bronze.duct_alerts and keeps the firing set
-// in duct.duct_alert_state (so a restart neither forgets nor repeats them).
+// in duct.duct_alert_state (so a restart neither forgets nor repeats them; see coord.go).
 type Store struct{ Eng contract.Engine }
 
 // Init creates the Bronze table (and schema) if needed.
@@ -44,9 +44,9 @@ func (s Store) Init(ctx context.Context) error {
 
 func lit(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
-// Record writes the Bronze rows and updates the firing set.
+// Record writes the Bronze rows. The firing set (duct.duct_alert_state) is
+// kept by Coord as each transition is claimed, not here.
 func (s Store) Record(ctx context.Context, es []Entry) error {
-	var stateStmts []string
 	for _, e := range es {
 		t := e.Transition
 		labels, _ := json.Marshal(t.Row)
@@ -58,21 +58,14 @@ func (s Store) Record(ctx context.Context, es []Entry) error {
 		if err != nil {
 			return fmt.Errorf("record alert: %w", err)
 		}
-		stateStmts = append(stateStmts, "DELETE FROM duct.duct_alert_state WHERE rule = "+lit(t.Rule)+" AND alert_key = "+lit(t.Key))
-		if t.State == contract.AlertFiring {
-			stateStmts = append(stateStmts, fmt.Sprintf(
-				"INSERT INTO duct.duct_alert_state (rule, alert_key, severity, message, labels, firing_since) VALUES (%s, %s, %s, %s, %s, make_timestamp(%d))",
-				lit(t.Rule), lit(t.Key), lit(e.Severity), lit(t.Message), lit(string(labels)), t.Since.UnixMicro()))
-		}
 	}
-	return txretry.Do(ctx, txretry.Default, func(ctx context.Context) error {
-		return s.Eng.ExecTx(ctx, stateStmts...)
-	})
+	return nil
 }
 
 // Firing returns the persisted firing alerts, grouped by rule.
 func (s Store) Firing(ctx context.Context) (map[string][]Firing, error) {
-	st, err := s.Eng.Query(ctx, "SELECT rule, alert_key, labels, CAST(epoch_us(CAST(firing_since AS TIMESTAMP)) AS BIGINT) FROM duct.duct_alert_state")
+	st, err := s.Eng.Query(ctx, "SELECT rule, alert_key, labels, CAST(epoch_us(CAST(firing_since AS TIMESTAMP)) AS BIGINT), "+
+		"COALESCE(CAST(notified_at_us AS VARCHAR), '') FROM duct.duct_alert_state")
 	if err != nil {
 		return nil, fmt.Errorf("read alert state (run `duct migrate`): %w", err)
 	}
@@ -88,7 +81,8 @@ func (s Store) Firing(ctx context.Context) (map[string][]Firing, error) {
 			if _, err := fmt.Sscan(rec.Column(3).ValueStr(i), &micros); err != nil {
 				return nil, err
 			}
-			out[rule] = append(out[rule], Firing{Key: key, Since: time.UnixMicro(micros).UTC(), Row: row})
+			out[rule] = append(out[rule], Firing{Key: key, Since: time.UnixMicro(micros).UTC(), Row: row,
+				NotifiedAt: microTime(strings.Clone(rec.Column(4).ValueStr(i)))})
 		}
 	}
 	return out, st.Err()

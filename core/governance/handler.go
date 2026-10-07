@@ -39,11 +39,13 @@ type Handler struct {
 	quotas  quotaCache // per-role limits (quota.go)
 
 	semModel atomic.Pointer[semanticModel] // see semantic.go; nil: no model
+	fresh    freshCache                    // preaggregates that may serve a role (preagg.go)
 }
 
 var (
 	_ contract.QueryHandler = (*Handler)(nil)
 	_ contract.Auditor      = (*Handler)(nil)
+	_ contract.Limiter      = (*Handler)(nil)
 )
 
 // NewHandler returns a Handler over eng. Close it to flush the audit log.
@@ -106,7 +108,13 @@ func (h *Handler) query(ctx context.Context, proto string, id contract.Identity,
 	if err != nil {
 		return fail(err)
 	}
-	if !handled {
+	switch {
+	case handled:
+	case compiledByUs(ctx):
+		// SQL the semantic compiler produced for a preaggregate (semantic.go):
+		// it reads semantic_cache, which the role schema guard does not allow.
+		rewritten = sql
+	default:
 		if rewritten, err = h.authorize(ctx, id, sql); err != nil {
 			return fail(err)
 		}
@@ -278,6 +286,11 @@ func (h *Handler) Catalog(ctx context.Context, id contract.Identity) (contract.S
 // Administer forwards to the Handler.
 func (p *protocolHandler) Administer(ctx context.Context, id contract.Identity, sql string) (string, bool, error) {
 	return p.h.Administer(ctx, id, sql)
+}
+
+// Admit forwards to the Handler.
+func (p *protocolHandler) Admit(ctx context.Context, id contract.Identity) (contract.Admission, error) {
+	return p.h.Admit(ctx, id)
 }
 
 // Catalog forwards to the Handler.

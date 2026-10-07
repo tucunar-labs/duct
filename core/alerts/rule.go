@@ -48,6 +48,9 @@ func (c ChannelRef) String() string {
 //	-- SEVERITY critical                 info | warning | error | critical (default warning)
 //	-- CHANNELS ntfy:fire, webhook:ops   where to notify (none = only recorded in Bronze)
 //	-- MESSAGE {sensor_id} at {temp} C   template; {column} comes from the row, plus {rule} and {key}
+//	-- FOR 30s                           the condition must hold this long before the alert fires (default: at once)
+//	-- RESOLVE_FOR 1m                    and be absent this long before it resolves (default: at once)
+//	-- REPEAT 1h                         while firing, notify again (a reminder) every period (default: never)
 //
 // The statement is a SELECT whose rows are the alerts firing right now, one
 // per key. Streams with a window are tables named after the stream.
@@ -60,6 +63,8 @@ type Rule struct {
 	Severity string
 	Channels []ChannelRef
 	Message  string
+	// For, ResolveFor and Repeat: hysteresis and reminders (0 = off).
+	For, ResolveFor, Repeat time.Duration
 }
 
 var (
@@ -87,7 +92,7 @@ func ParseRule(name, src string) (Rule, error) {
 		word, arg, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(line, "--")), " ")
 		arg = strings.TrimSpace(arg)
 		switch word {
-		case "EVERY", "KEY", "SEVERITY", "CHANNELS", "MESSAGE":
+		case "EVERY", "KEY", "SEVERITY", "CHANNELS", "MESSAGE", "FOR", "RESOLVE_FOR", "REPEAT":
 		default:
 			continue // an ordinary comment
 		}
@@ -132,6 +137,22 @@ func ParseRule(name, src string) (Rule, error) {
 			}
 		case "MESSAGE":
 			r.Message = arg
+		case "FOR", "RESOLVE_FOR", "REPEAT":
+			d, err := time.ParseDuration(arg)
+			if err != nil || d <= 0 {
+				return r, fmt.Errorf("%s %q must be a positive duration (e.g. 30s, 5m, 1h)", word, arg)
+			}
+			if word == "REPEAT" && d < time.Second {
+				return r, fmt.Errorf("REPEAT %q must be at least 1s", arg)
+			}
+			switch word {
+			case "FOR":
+				r.For = d
+			case "RESOLVE_FOR":
+				r.ResolveFor = d
+			default:
+				r.Repeat = d
+			}
 		}
 	}
 	r.SQL = strings.TrimSpace(src)

@@ -46,8 +46,18 @@ func init() {
 type Server struct {
 	ln     net.Listener
 	tlsCfg *tls.Config
-	model  *semantic.Model // nil: no semantic model, only the sql tool can work
+	live   *semantic.Live // never nil after Init; Model() nil: only the sql tool can work
 	sql    bool
+	// ownLive: this server created live and must watch it itself.
+	ownLive bool
+}
+
+// model is the current semantic model (nil: none).
+func (s *Server) model() *semantic.Model {
+	if s.live == nil {
+		return nil
+	}
+	return s.live.Model()
 }
 
 var (
@@ -92,17 +102,18 @@ func (s *Server) Init(_ context.Context, cfg contract.Config) error {
 		return fmt.Errorf("mcp: %q is not a loopback address: bearer tokens would travel in clear text; set tls_cert and tls_key, or put it behind a TLS proxy and keep 127.0.0.1", listen)
 	}
 	if dir, _ := cfg["semantic_dir"].(string); dir != "" {
-		m, err := semantic.LoadDir(dir)
-		switch {
-		case err == nil:
-			s.model = m
-		case errors.Is(err, semantic.ErrNoModel):
-		default:
-			return fmt.Errorf("mcp: semantic model: %w", err)
+		if l, ok := cfg["semantic_live"].(*semantic.Live); ok && l != nil {
+			s.live = l // shared with `duct serve`, which keeps it reloaded
+		} else {
+			l, err := semantic.NewLive(dir)
+			if err != nil {
+				return fmt.Errorf("mcp: semantic model: %w", err)
+			}
+			s.live, s.ownLive = l, true
 		}
 	}
 	s.sql, _ = cfg["sql"].(bool)
-	if s.model == nil && !s.sql {
+	if s.model() == nil && !s.sql {
 		return errors.New("mcp: no semantic model (semantic/*.ossie.yaml) and the sql tool is disabled: nothing to serve")
 	}
 	ln, err := net.Listen("tcp", listen)
@@ -133,6 +144,9 @@ func (s *Server) Close() error {
 func (s *Server) Serve(ctx context.Context, h contract.QueryHandler, authp contract.AuthProvider) error {
 	if s.ln == nil {
 		return errors.New("mcp: not initialised")
+	}
+	if s.ownLive {
+		go s.live.Watch(ctx, 0, slog.Default())
 	}
 	srv := newTools(s, h)
 	mcpHandler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, &sdk.StreamableHTTPOptions{

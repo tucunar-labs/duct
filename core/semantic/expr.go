@@ -112,16 +112,18 @@ func tokenize(s string) ([]token, error) {
 type segKind int
 
 const (
-	segRaw  segKind = iota // SQL text kept as written
-	segRef                 // dataset.field
-	segBare                // a bare identifier that is not a function or keyword
+	segRaw    segKind = iota // SQL text kept as written
+	segRef                   // dataset.field
+	segBare                  // a bare identifier that is not a function or keyword
+	segMetric                // a reference to a base metric (derived metrics only)
 )
 
 type seg struct {
 	kind  segKind
-	text  string // raw text, or the bare identifier
-	ds    string // segRef: dataset name as written
-	field string // segRef: field name as written
+	text  string  // raw text, or the bare identifier
+	ds    string  // segRef: dataset name as written
+	field string  // segRef: field name as written
+	mt    *Metric // segMetric
 }
 
 // keywords allowed bare in an expression (everything else bare is a metric

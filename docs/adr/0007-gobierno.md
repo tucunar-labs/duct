@@ -97,6 +97,50 @@ ALTER TABLE s.t ALTER COLUMN c SET MASK <expr> FOR ROLE r;   ... DROP MASK FOR R
   vista. Quien necesite un cruce (p. ej. filtrar por una tabla de permisos) lo materializa en la
   tabla base o en un pipeline: no se permite en la expresión.
 
+## Implementado: auditoría (2026-10-07)
+Tabla `duct.duct_audit` (una fila por sentencia, permitida o denegada; protocolos pg, http, mcp, web,
+admin, sharing, `cli`). Cambios de hoy:
+- **Retención**: `[audit] retention = "90d"` (por defecto 90d; `0` = para siempre). La aplican `duct gc`
+  (paso `prune audit`), `duct serve` (al arrancar y cada hora) y `duct audit prune --older-than 30d`.
+  Borra por lotes de ~5000 filas en orden de tiempo (cada `DELETE` es corto; reintenta si SQLite
+  dice `database is locked`). La copia exportada al lake no se poda.
+- **Exportación al lake**: `[audit] export = true` agrega las filas nuevas a `lake.bronze.duct_audit_log`
+  (solo-agregar) cada minuto en `duct serve`, una vez más al apagar, y con `duct audit export`. Idempotente:
+  cada fila lleva `audit_id` (aleatorio; las anteriores a la migración 9 usan un md5 de la fila), la
+  marca de agua está en `duct.duct_audit_state` y solo acota el escaneo; se relee 24 h antes de ella
+  porque una fila lleva la hora de inicio y se escribe al terminar (una sentencia larga llega "tarde"), y
+  lo ya exportado se omite por `audit_id`. Es una tabla bronze normal: ningún rol la lee salvo que un
+  admin la conceda.
+- **Aciertos de caché** (dashboards): fila con `status=ok`, `cached=true`, `duration_ms` = lo que tardó
+  la búsqueda en caché, `rows_returned` = filas del gráfico y SQL `-- semantic query (cache hit) <petición>`.
+  Decisión: **se agregan**, no una fila por acierto. Los aciertos con mismo usuario, rol, protocolo y
+  petición dentro de 60 s se funden en una fila con `hits = N` (duración promedio). Un dashboard con
+  8 gráficos y un espectador que refresca cada 5 s escribe 8 filas por minuto, no 96. Los fallos de
+  caché ya se auditan por la vía normal (`cached` nulo/false, `hits` 1).
+- **CLI**: `duct query`, `duct sql`, `duct run` y `duct ingest` escriben filas con protocolo `cli`,
+  usuario = `$USER` (si falta, el usuario del proceso) y rol `local`; `duct run`/`ingest` registran una
+  descripción (`duct run silver.orders`) y no el SQL interno. `[audit] cli = false` lo apaga. El fallo al
+  escribir nunca afecta al comando (un proyecto sin migrar, por ejemplo, no deja filas).
+- **Tipos e índices**: en Postgres `occurred_at` ya era `TIMESTAMP`. En SQLite no es posible: el escritor
+  SQLite de DuckDB declara toda columna de tiempo como `VARCHAR` (probado con TIMESTAMP, TIMESTAMPTZ,
+  DATE). La migración 9 reescribe los textos existentes (`10:00:00.5`, `10:00:00`) al formato fijo
+  `YYYY-MM-DD HH:MM:SS.ffffff` (UTC), que el escritor usa siempre; así el orden del texto es el orden
+  del tiempo, los filtros de rango y el índice son correctos, y `CAST(occurred_at AS TIMESTAMP)` lo lee
+  como timestamp en ambos motores. Índices `duct_audit_at (occurred_at)` y
+  `duct_audit_user_at (user_name, occurred_at)`: en SQLite con `USE duct; CREATE INDEX`, en Postgres con
+  `postgres_execute`; ambos de mejor esfuerzo. También agrega `audit_id`, `cached` y `hits`
+  (NULL = falso / 1).
+- **Redacción**: antes de guardar, `governance.RedactSQL` oculta el cuerpo de `CREATE SECRET`, asignaciones
+  `password=`/`token=`/`api_key=`/`secret_key=…`, cláusulas `PASSWORD 'x'`, `Bearer …`, `user:clave@` en URLs
+  y tokens `dct_…`. Es una red de seguridad (prefiere ocultar de más), no un parser; también se aplica
+  al leer en `duct audit query`.
+- **`duct audit query [--user u] [--since 1h] [--status denied] [--limit 100] [--format table|json]`**:
+  filas más nuevas primero; `*` marca los aciertos de caché.
+- Evidencia: `cmd/duct/audit_test.go` (CLI, redacción, lotes de poda y retención por `gc`, exportación
+  idempotente con filas tardías, fusión de aciertos, migración de datos existentes con índices, bucle de
+  mantenimiento) y `TestDashboardCacheBySnapshot` (aciertos auditados).
+- Límite conocido: los timestamps de las demás tablas `duct_*` siguen siendo texto en SQLite (mismo motivo).
+
 ## Por probar
 - Madurez de quack-oauth.
 

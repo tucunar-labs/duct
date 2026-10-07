@@ -244,7 +244,12 @@ func (s *Server) session(ctx context.Context, conn net.Conn, r *bufio.Reader, w 
 	}
 
 	pid, key := pidSeq(s), server.GenerateSecretKey()
-	cc := server.NewClientConn(s.srv, conn, r, w, id.User, "", duckgresCatalog, app, exec, pid, key, -1, "")
+	var qexec server.QueryExecutor = exec
+	if lp := s.limiter.Load(); lp != nil {
+		qexec = newQuotaExecutor(exec, *lp, id)
+		defer func() { _ = qexec.Close() }() // frees slots left open; also closes db (Close is idempotent for sql.DB)
+	}
+	cc := server.NewClientConn(s.srv, conn, r, w, id.User, "", duckgresCatalog, app, qexec, pid, key, -1, "")
 	defer server.CancelClientConn(cc)
 	server.SetConnectionIdleTimeout(cc, s.idle)
 	server.SetConnectionPhysicalCatalog(cc, duckgresCatalog)

@@ -97,11 +97,42 @@ func (m *Model) Describe(sc Scope) ModelInfo {
 func (m *Model) ListMetrics(sc Scope) []MetricInfo {
 	out := []MetricInfo{}
 	for _, mt := range m.Metrics {
-		if mt.Hidden || mt.home.Hidden || !sc.has(mt.home) {
+		if !mt.visible() {
+			continue
+		}
+		granted := true
+		var names []string
+		for _, h := range mt.Homes() {
+			granted = granted && sc.has(h)
+			names = append(names, h.Name)
+		}
+		if !granted {
 			continue
 		}
 		out = append(out, MetricInfo{Name: mt.Name, Description: mt.Description, Datatype: mt.Datatype,
-			Dataset: mt.home.Name, AIContext: mt.AIContext, Dimensions: m.dimensionsOf(sc, mt.home)})
+			Dataset: strings.Join(names, ", "), AIContext: mt.AIContext, Dimensions: m.dimensionsOfAll(sc, mt.Homes())})
+	}
+	return out
+}
+
+// dimensionsOfAll lists the dimensions reachable from every one of facts.
+func (m *Model) dimensionsOfAll(sc Scope, facts []*Dataset) []string {
+	out := m.dimensionsOf(sc, facts[0])
+	for _, f := range facts[1:] {
+		keep := map[string]bool{}
+		for _, d := range m.dimensionsOf(sc, f) {
+			keep[d] = true
+		}
+		var next []string
+		for _, d := range out {
+			if keep[d] {
+				next = append(next, d)
+			}
+		}
+		out = next
+	}
+	if out == nil {
+		out = []string{}
 	}
 	return out
 }

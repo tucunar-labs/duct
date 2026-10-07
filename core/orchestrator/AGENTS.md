@@ -7,6 +7,9 @@ Orquestador propio (ADR 0005), dentro de `duct serve` y por CLI (`duct jobs list
   módulos `task/*`), reintentos con backoff, timeout, `alerts.on_failure` (canal por registro).
 - **Estado** (migración 6): `duct_jobs_runs`, `duct_task_runs`, `duct_jobs_fires`, `duct_jobs_state`.
   No guarda params ni credenciales: cada worker lee `jobs/` de su propio proyecto.
+- **Recarga y retención (2026-10-07):** `Reload(jobs)` cambia el catálogo atómicamente (serve sondea
+  `jobs/`); `catchup: none|last|all` retoma desde `cron:<job>` en `duct_jobs_state`; `[jobs] history_retention`
+  se aplica al arrancar, cada hora y en `duct gc` (`project.PruneJobsHistory`).
 - **Una vez por tick:** la PK de `duct_jobs_fires` (`cron:<job>:<tick>`, `snap:<job>:<id>`,
   `file:<job>:<hash>`) decide quién crea la corrida; `@every` se alinea a la época.
 - **Cola:** cada proceso reclama tareas listas con `UPDATE ... WHERE status='pending'` + lectura

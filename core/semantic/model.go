@@ -41,6 +41,8 @@ type Model struct {
 	Metrics       []*Metric
 
 	defaultLimit, maxLimit int
+	preSpecs               []preaggSpec
+	preaggs                []*Preagg
 	dsIdx                  map[string]*Dataset
 	metIdx                 map[string]*Metric
 }
@@ -166,6 +168,13 @@ type Metric struct {
 	refs     []fieldRef
 	resolved bool
 	visiting bool
+
+	// Derived metrics combine metrics that live on different facts (revenue /
+	// units): each part is computed on its own fact at the requested grain and
+	// the results are combined afterwards. segs and home are unused then.
+	derived bool
+	dsegs   []seg     // segRaw and segMetric
+	parts   []*Metric // base (non derived) metrics it reads, in order of appearance
 }
 
 type fieldRef struct {
@@ -173,8 +182,47 @@ type fieldRef struct {
 	f  *Field
 }
 
-// Home returns the dataset the metric is computed on.
+// Home returns the dataset the metric is computed on (nil for a derived
+// metric computed across datasets: see Homes).
 func (m *Metric) Home() *Dataset { return m.home }
+
+// Derived reports whether the metric combines metrics of several datasets.
+func (m *Metric) Derived() bool { return m.derived }
+
+// Homes returns the datasets the metric reads: one, or one per fact for a
+// derived metric.
+func (m *Metric) Homes() []*Dataset {
+	if !m.derived {
+		return []*Dataset{m.home}
+	}
+	var out []*Dataset
+	for _, p := range m.parts {
+		out = appendDS(out, p.home)
+	}
+	return out
+}
+
+// leaves are the base metrics that are actually aggregated.
+func (m *Metric) leaves() []*Metric {
+	if m.derived {
+		return m.parts
+	}
+	return []*Metric{m}
+}
+
+// visible reports whether clients may use the metric: neither it nor a dataset
+// it reads is hidden.
+func (m *Metric) visible() bool {
+	if m.Hidden {
+		return false
+	}
+	for _, h := range m.Homes() {
+		if h.Hidden {
+			return false
+		}
+	}
+	return true
+}
 
 var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
@@ -209,6 +257,11 @@ func parseDoc(file string, data []byte) (*Model, error) {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
 	m.defaultLimit, m.maxLimit = lim.DefaultLimit, lim.MaxLimit
+	specs, err := parsePreaggSpecs(file, lim.Preaggregate)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	m.preSpecs = specs
 	return m, nil
 }
 
@@ -221,6 +274,7 @@ func Merge(models ...*Model) (*Model, error) {
 		out.Datasets = append(out.Datasets, m.Datasets...)
 		out.Relationships = append(out.Relationships, m.Relationships...)
 		out.Metrics = append(out.Metrics, m.Metrics...)
+		out.preSpecs = append(out.preSpecs, m.preSpecs...)
 		if m.defaultLimit > 0 {
 			out.defaultLimit = m.defaultLimit
 		}
@@ -293,6 +347,8 @@ func LoadDir(dir string) (*Model, error) {
 type modelExt struct {
 	DefaultLimit int `json:"default_limit"`
 	MaxLimit     int `json:"max_limit"`
+	// Preaggregate is one object or a list of them (see preagg.go).
+	Preaggregate json.RawMessage `json:"preaggregate"`
 }
 
 type nodeExt struct {
@@ -450,7 +506,7 @@ func (m *Model) resolve() error {
 			return fmt.Errorf("metric %s: %w", mt.Name, err)
 		}
 	}
-	return nil
+	return m.resolvePreaggs()
 }
 
 func (m *Model) resolveRelationships() error {
@@ -554,19 +610,34 @@ func (m *Model) resolveMetric(mt *Metric) error {
 		return err
 	}
 	hasAgg := p.hasAgg
-	var segs []seg
+	var segs, dsegs []seg
+	var parts []*Metric
 	var home *Dataset
-	bind := func(ds *Dataset) error {
+	var conflict string // the first pair of datasets a plain metric would span
+	cross, direct := false, false
+	bind := func(ds *Dataset) {
 		if home != nil && home != ds {
-			return fmt.Errorf("it spans datasets %s and %s: a metric must be computed on a single dataset (define it on the fact and bring the other side in with a relationship)", home.Name, ds.Name)
+			cross = true
+			if conflict == "" {
+				conflict = fmt.Sprintf("it spans datasets %s and %s: a metric must be computed on a single dataset (define it on the fact and bring the other side in with a relationship), or be a ratio of metrics, each on its own dataset", home.Name, ds.Name)
+			}
+			return
 		}
 		home = ds
-		return nil
+	}
+	addPart := func(x *Metric) {
+		for _, y := range parts {
+			if y == x {
+				return
+			}
+		}
+		parts = append(parts, x)
 	}
 	for _, s := range p.segs {
 		switch s.kind {
 		case segRaw:
 			segs = append(segs, s)
+			dsegs = append(dsegs, s)
 		case segRef:
 			ds, ok := m.dsIdx[strings.ToLower(s.ds)]
 			if !ok {
@@ -576,9 +647,8 @@ func (m *Model) resolveMetric(mt *Metric) error {
 			if !ok {
 				return fmt.Errorf("dataset %s has no field %q", ds.Name, s.field)
 			}
-			if err := bind(ds); err != nil {
-				return err
-			}
+			direct = true
+			bind(ds)
 			mt.refs = append(mt.refs, fieldRef{ds, f})
 			segs = append(segs, seg{kind: segRef, ds: ds.Name, field: f.Name})
 		case segBare:
@@ -589,15 +659,35 @@ func (m *Model) resolveMetric(mt *Metric) error {
 			if err := m.resolveMetric(other); err != nil {
 				return err
 			}
-			if err := bind(other.home); err != nil {
-				return err
-			}
 			hasAgg = hasAgg || other.hasAggregate()
-			segs = append(segs, seg{kind: segRaw, text: "("})
-			segs = append(segs, other.segs...)
-			segs = append(segs, seg{kind: segRaw, text: ")"})
+			dsegs = append(dsegs, seg{kind: segRaw, text: "("})
+			if other.derived {
+				cross = true
+				dsegs = append(dsegs, other.dsegs...)
+				for _, x := range other.parts {
+					addPart(x)
+				}
+			} else {
+				bind(other.home)
+				dsegs = append(dsegs, seg{kind: segMetric, mt: other})
+				addPart(other)
+				segs = append(segs, seg{kind: segRaw, text: "("})
+				segs = append(segs, other.segs...)
+				segs = append(segs, seg{kind: segRaw, text: ")"})
+			}
+			dsegs = append(dsegs, seg{kind: segRaw, text: ")"})
 			mt.refs = append(mt.refs, other.refs...)
 		}
+	}
+	if cross {
+		if direct || p.hasAgg {
+			if conflict == "" {
+				conflict = "it mixes a derived metric with dataset fields"
+			}
+			return errors.New(conflict)
+		}
+		mt.dsegs, mt.parts, mt.derived, mt.resolved = dsegs, parts, true, true
+		return nil
 	}
 	if home == nil {
 		return errors.New("it references no dataset field (write e.g. COUNT(orders.id) instead of COUNT(*))")

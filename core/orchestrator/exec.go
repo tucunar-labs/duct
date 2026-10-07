@@ -25,7 +25,7 @@ func (o *Orchestrator) execute(ctx context.Context, row TaskRow, token string) {
 		res contract.TaskResult
 		err error
 	)
-	job, jok := o.jobs[row.Job]
+	job, jok := o.job(row.Job)
 	task, tok := job.Task(row.ID)
 	var actx context.Context
 	var cancel context.CancelFunc = func() {}
@@ -211,7 +211,7 @@ func (o *Orchestrator) onFinished(ctx context.Context, f finished, rows []TaskRo
 		}
 	}
 	o.log.Info("job finished", "job", name, "run", f.RunID, "status", f.Status)
-	job, ok := o.jobs[name]
+	job, ok := o.job(name)
 	if !ok || len(job.Alerts.OnFailure) == 0 {
 		return
 	}

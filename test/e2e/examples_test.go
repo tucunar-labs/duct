@@ -6,8 +6,6 @@
 package e2e
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"html"
@@ -110,55 +108,9 @@ func itoa(n int) string { return strconv.Itoa(n) }
 // serveWeb starts `duct serve` (web + http) and returns the addresses.
 func (c *cli) serveWeb() map[string]string {
 	t := c.t
-	ctx, cancel := context.WithCancel(context.Background())
-	srv := exec.CommandContext(ctx, c.bin, "serve", "--project", c.root, //nolint:gosec // test
-		"--listen", "http=127.0.0.1:0", "--listen", "web=127.0.0.1:0", "--protocols", "http,web")
-	srv.Dir = c.root
-	pipe, err := srv.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var srvErr bytes.Buffer
-	srv.Stderr = &srvErr
-	if err := srv.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cancel()
-		done := make(chan struct{})
-		go func() { _ = srv.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
-			_ = srv.Process.Kill()
-		}
-	})
-	addrs := map[string]string{}
-	var mu sync.Mutex
-	ready := make(chan struct{})
-	go func() {
-		sc := bufio.NewScanner(pipe)
-		for sc.Scan() {
-			f := strings.Fields(sc.Text())
-			if len(f) == 4 && f[0] == "serving" {
-				mu.Lock()
-				addrs[f[1]] = f[3]
-				if len(addrs) == 2 {
-					close(ready)
-				}
-				mu.Unlock()
-			}
-		}
-		_, _ = io.Copy(io.Discard, pipe)
-	}()
-	select {
-	case <-ready:
-	case <-time.After(90 * time.Second):
-		t.Fatalf("serve did not start\nstderr: %s", srvErr.String())
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	return map[string]string{"http": addrs["http"], "web": addrs["web"]}
+	srv := startServer(t, c.bin, c.root, 2, "--listen", "http=127.0.0.1:0", "--listen", "web=127.0.0.1:0", "--protocols", "http,web")
+	c.srv = srv
+	return map[string]string{"http": srv.addrs["http"], "web": srv.addrs["web"]}
 }
 
 // browser is a client without JavaScript: cookies, the dashboard page, its data endpoint.
@@ -190,16 +142,23 @@ func login(t *testing.T, base, user, pass string) *browser {
 
 func (b *browser) do(method, path, body string, h map[string]string) (*http.Response, string) {
 	b.t.Helper()
-	req, _ := http.NewRequest(method, b.base+path, strings.NewReader(body))
-	for k, v := range h {
-		req.Header.Set(k, v)
-	}
-	resp, err := b.c.Do(req)
+	var resp *http.Response
+	var raw []byte
+	err := retry(func() (err error) {
+		req, _ := http.NewRequest(method, b.base+path, strings.NewReader(body))
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		if resp, err = b.c.Do(req); err != nil {
+			return err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		raw, err = io.ReadAll(resp.Body)
+		return err
+	})
 	if err != nil {
-		b.t.Fatal(err)
+		b.t.Fatalf("%s %s%s: %v", method, b.base, path, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(resp.Body)
 	return resp, string(raw)
 }
 
@@ -276,14 +235,21 @@ func (c *cli) serveAndCheck(dashboards map[string][]string, first map[string]str
 		}
 	}
 	token := strings.TrimSpace(c.must("token", "create", "--user", "ana", "--ttl", "1h"))
-	req, _ := http.NewRequest("POST", "http://"+addrs["http"]+"/query", strings.NewReader("SELECT * FROM silver.penguins"))
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
-	if err != nil {
-		t.Fatal(err)
+	var status int
+	if err := retry(func() error {
+		req, _ := http.NewRequest("POST", "http://"+addrs["http"]+"/query", strings.NewReader("SELECT * FROM silver.penguins"))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+		status = resp.StatusCode
+		return nil
+	}); err != nil {
+		c.srv.failf("POST /query: %v", err)
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode == 200 {
+	if status == 200 {
 		t.Errorf("silver table must be denied to analistas over http, got 200")
 	}
 }

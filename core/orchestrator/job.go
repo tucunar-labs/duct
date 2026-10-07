@@ -36,6 +36,20 @@ const (
 
 var taskTypes = []string{TypePipeline, TypeIngest, TypePython, TypeShell, TypeNotebook}
 
+// Catch-up policies for the cron ticks missed during downtime.
+const (
+	CatchupNone = "none" // forget them
+	CatchupLast = "last" // one run for the most recent one (default)
+	CatchupAll  = "all"  // one run per tick, oldest first, one at a time
+)
+
+// Catch-up bounds: at most MaxCatchup ticks of policy all, none older than
+// CatchupHorizon (fire keys are kept 7 days, see pruneFires).
+const (
+	MaxCatchup     = 100
+	CatchupHorizon = 6 * 24 * time.Hour
+)
+
 // Defaults for a task that does not say.
 const (
 	DefaultTimeout    = time.Hour
@@ -65,9 +79,12 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 
 // Job is one jobs/<name>.yaml file (schema: specs/jobs.schema.json).
 type Job struct {
-	Name     string   `yaml:"name"`
-	Schedule string   `yaml:"schedule"`
-	Timezone string   `yaml:"timezone"`
+	Name     string `yaml:"name"`
+	Schedule string `yaml:"schedule"`
+	Timezone string `yaml:"timezone"`
+	// Catchup says what to do with the cron ticks missed while the orchestrator
+	// was not running: none, last (default) or all (see CatchupAll).
+	Catchup  string   `yaml:"catchup"`
 	Triggers Triggers `yaml:"triggers"`
 	Tasks    []Task   `yaml:"tasks"`
 	Alerts   Alerts   `yaml:"alerts"`
@@ -180,6 +197,14 @@ func (j *Job) Validate() error {
 		}
 	} else if j.Timezone != "" {
 		return errors.New("timezone needs a schedule")
+	}
+	switch j.Catchup {
+	case "", CatchupNone, CatchupLast, CatchupAll:
+	default:
+		return fmt.Errorf("catchup %q must be none, last or all", j.Catchup)
+	}
+	if j.Catchup != "" && j.Schedule == "" {
+		return errors.New("catchup needs a schedule")
 	}
 	for _, t := range j.Triggers.OnSnapshot {
 		if !tableRe.MatchString(strings.ToLower(strings.TrimSpace(t))) {

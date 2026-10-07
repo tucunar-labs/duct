@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -265,6 +266,17 @@ func waitFor(t *testing.T, what string, within time.Duration, f func() bool) {
 	}
 }
 
+var streamRowsRe = regexp.MustCompile(`(?m)^\S+\s+\S+\s+(\d+) rows `)
+
+// rowsInOutput sums the rows of the batch lines `duct stream -v` printed.
+func rowsInOutput(out string) int {
+	n := 0
+	for _, m := range streamRowsRe.FindAllStringSubmatch(out, -1) {
+		n += atoi(m[1])
+	}
+	return n
+}
+
 func atoi(s string) int {
 	n, _ := strconv.Atoi(strings.TrimSpace(s))
 	return n
@@ -342,28 +354,40 @@ func TestStreamKafkaToBronze(t *testing.T) {
 	}
 
 	// 2. kill -9 in the middle of a flow, restart, nothing lost or repeated.
+	// The producer is throttled (~1000 msg/s, so ~4 s) and the kill is based on
+	// the progress `duct stream -v` reports (rows committed to the lake): as
+	// soon as 10% of the flow landed, long before 80%, whatever the speed of
+	// the machine. Polling the lake with `duct query` is too slow for that.
 	total := 10
 	const bulk = 4000
+	all := total + bulk
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 10; i < 10+bulk; i++ {
 			produce(i)
-			if i%100 == 0 {
-				time.Sleep(20 * time.Millisecond)
+			if i%50 == 0 {
+				_ = cl.Flush(ctx)
+				time.Sleep(50 * time.Millisecond)
 			}
 		}
 		_ = cl.Flush(ctx)
 	}()
-	waitFor(t, "some of the flow landed", 60*time.Second, func() bool { return count() > 10 })
+	landed := func() int { return rowsInOutput(stream.out.String()) }
+	waitFor(t, "10% of the flow landed", 60*time.Second, func() bool { return landed() >= all/10 })
 	stream.signal(syscall.SIGKILL)
-	atKill := count()
-	t.Logf("kill -9 with %d of %d rows in bronze", atKill, total+bulk)
+	atKill := landed()
+	t.Logf("kill -9 with ~%d of %d rows committed (stream output)", atKill, all)
+	if atKill > all*8/10 {
+		t.Logf("the machine landed more than 80%% before the kill; the guarantees below still apply")
+	}
 	<-done
 	stream = startDuct(t, root, nil, "stream", "-v")
-	waitFor(t, "all rows after restart", 120*time.Second, func() bool { return count() >= total+bulk })
-	if got := q("SELECT count(*) AS n, count(DISTINCT (_kafka_partition, _kafka_offset)) AS d, count(DISTINCT seq) AS s FROM bronze.sensores"); got != fmt.Sprintf("n,d,s\n%d,%d,%d", total+bulk, total+bulk, total+bulk) {
-		t.Fatalf("after crash+restart: %q", got)
+	waitFor(t, "all rows after restart", 120*time.Second, func() bool { return count() >= all })
+	// No loss, no duplicates (also when everything had landed before the kill:
+	// then the restart has nothing to process and must still converge).
+	if got := q("SELECT count(*) AS n, count(DISTINCT (_kafka_partition, _kafka_offset)) AS d, count(DISTINCT seq) AS s FROM bronze.sensores"); got != fmt.Sprintf("n,d,s\n%d,%d,%d", all, all, all) {
+		t.Fatalf("after crash+restart (killed at ~%d): %q", atKill, got)
 	}
 	// Per partition the offsets are contiguous from 0: nothing skipped.
 	if got := q("SELECT count(*) FROM (SELECT _kafka_partition, count(*) c, max(_kafka_offset) m FROM bronze.sensores GROUP BY 1) WHERE c <> m + 1"); got != "count_star()\n0" {
@@ -372,9 +396,6 @@ func TestStreamKafkaToBronze(t *testing.T) {
 	// Offsets are committed after landing: the group catches up to lag 0.
 	waitFor(t, "lag 0", 30*time.Second, func() bool { return k.groupLag(t, "duct-stream-sensores") == 0 })
 	stream.signal(syscall.SIGINT)
-	if !strings.Contains(stream.out.String(), "rows") {
-		t.Errorf("duct stream -v printed no batches:\n%s", stream.out.String())
-	}
 
 	// 3. Not JSON: set aside in <target>_rejects, the rest flows on.
 	stream = startDuct(t, root, nil, "stream")

@@ -9,13 +9,14 @@ import (
 	"sync"
 	"time"
 
+	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/metrics"
 )
 
 // Quota caps what a role may consume. A nil limit means unlimited. The
 // handler enforces both over the protocols it runs itself (HTTP, MCP, web);
-// the Postgres wire protocol runs its own DuckDB session and is not covered
-// (ADR 0013).
+// the Postgres wire protocol runs its own DuckDB session and enforces them
+// through Handler.Admit (contract.Limiter).
 type Quota struct {
 	Role          string
 	MaxConcurrent *int   // statements running at the same time, per role, per process
@@ -30,8 +31,15 @@ func IsQuotaError(err error) bool {
 	return err != nil && strings.HasPrefix(err.Error(), quotaPrefix)
 }
 
+// quotaError is a quota refusal. Over the Postgres protocol it travels with
+// SQLSTATE 53400 (configuration_limit_exceeded); HTTP/MCP/web map it to 429.
+type quotaError struct{ msg string }
+
+func (e *quotaError) Error() string    { return e.msg }
+func (e *quotaError) SQLState() string { return "53400" }
+
 func quotaErr(format string, a ...any) error {
-	return errors.New(quotaPrefix + ": " + fmt.Sprintf(format, a...))
+	return &quotaError{quotaPrefix + ": " + fmt.Sprintf(format, a...)}
 }
 
 var quotaRejections = metrics.Default().Counter("duct_quota_rejections_total", "Statements refused or cut by a role quota.", "kind")
@@ -161,4 +169,31 @@ func (h *Handler) WithAdmin(fn func(*Store) error) error {
 	h.adminMu.Lock()
 	defer h.adminMu.Unlock()
 	return fn(NewStore(h.eng))
+}
+
+type admission struct {
+	h       *Handler
+	role    string
+	maxRows int64
+	release func()
+}
+
+func (a *admission) MaxRows() int64 { return a.maxRows }
+func (a *admission) Release()       { a.release() }
+func (a *admission) RowsExceeded() error {
+	quotaRejections.Inc("rows")
+	return quotaErr("role %s may receive at most %d rows per statement", a.role, a.maxRows)
+}
+
+// Admit implements contract.Limiter for protocols with their own session.
+func (h *Handler) Admit(ctx context.Context, id contract.Identity) (contract.Admission, error) {
+	q, release, err := h.quotas.admit(ctx, NewStore(h.eng), id.Role)
+	if err != nil {
+		return nil, err
+	}
+	a := &admission{h: h, role: id.Role, release: release}
+	if q.MaxRows != nil {
+		a.maxRows = *q.MaxRows
+	}
+	return a, nil
 }

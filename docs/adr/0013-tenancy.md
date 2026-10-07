@@ -95,8 +95,12 @@ con protocolo `admin` y sin secretos. Un admin no puede borrarse ni deshabilitar
 
 **Cuotas** (por rol, `duct_quotas`): `max_concurrent` (sentencias a la vez en el proceso) y `max_rows`
 (filas por sentencia: se corta antes del lote que la cruzaría). Las aplica `governance.Handler`, o sea
-HTTP, MCP y web, con 429; el protocolo Postgres usa su propia sesión DuckDB y **no** las aplica (hueco
-conocido). Cambios por la API valen al instante; por otro proceso, en ≤5 s.
+HTTP, MCP y web, con 429. El protocolo Postgres (sesión DuckDB propia) las aplica envolviendo el
+ejecutor de duckgres (`modules/serve-pg/quota.go`) con `contract.Limiter` del mismo handler: mismo
+contador de concurrencia y misma métrica `duct_quota_rejections_total`. Error con SQLSTATE **53400**
+(`configuration_limit_exceeded`); el parche del fork (`embedderSQLState`) deja pasar ese código. `max_rows`
+corta el flujo al fila `max_rows+1` (el cliente ya pudo recibir las anteriores y recibe el error al final).
+Las consultas de catálogo de las herramientas (`\d`, JDBC) también cuentan. Cambios por la API valen al instante; por otro proceso, en ≤5 s.
 
 **CI** (`integration` en `.github/workflows/ci.yml`): `docker run` de Postgres 17, RustFS y Kafka KRaft
 en el runner y `just test-integration` con `DUCT_TEST_PG_DSN`, `DUCT_TEST_S3_*` y `DUCT_TEST_KAFKA_BROKERS`;

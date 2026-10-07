@@ -30,6 +30,11 @@ type AuditRecord struct {
 	Rows     int64
 	// Err is empty on success; otherwise a short reason (refused or failed).
 	Err string
+	// Cached marks a result served from a cache (dashboards) without running
+	// SQL; Duration is then the cache lookup. Hits > 1 means that many
+	// identical cached answers were coalesced into this record (0 or 1: one).
+	Cached bool
+	Hits   int64
 }
 
 // Administrator is an OPTIONAL interface of a QueryHandler for protocols that

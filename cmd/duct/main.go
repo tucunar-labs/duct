@@ -25,7 +25,8 @@ commands:
   backup --to X        consistent backup of catalog, state, project files and lake data (folder or s3://); backup list
   restore --from X DIR restore a backup into an empty folder and verify it (snapshot, row counts, files)
   catalog              catalog tools: info, migrate --to postgres://... (SQLite -> Postgres)
-  gc                   checkpoint the catalog WAL and run DuckLake maintenance
+  audit <cmd>          query audit log: query [--user --since --status --limit], prune --older-than 30d, export
+  gc                   prune the audit log, checkpoint the catalog WAL and run DuckLake maintenance
   ingest [name...]     load ingest/*.yaml sources into bronze tables
   stream [name...]     land Kafka topics (streams/*.yaml) in bronze tables, committing offsets after each batch
   alerts [check]       evaluate alerts/*.sql over the last minutes of the streams and notify (ntfy, webhook, WhatsApp, PagerDuty)
@@ -71,7 +72,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		for _, m := range registry.List("") {
 			_, _ = fmt.Fprintf(stdout, "%s\t%s\n", m.Kind, m.Name)
 		}
-	case "init", "query", "sql", "migrate", "catalog", "gc", "run", "serve", "role", "user", "token", "grant", "revoke", "policy", "semantic", "share", "recipient", "functions", "notebook", "mlflow", "enable":
+	case "init", "query", "sql", "migrate", "catalog", "gc", "run", "serve", "role", "user", "token", "grant", "revoke", "policy", "semantic", "share", "recipient", "functions", "notebook", "mlflow", "enable", "audit":
 		return runProject(fs.Arg(0), fs.Args()[1:], stdout, stderr)
 	case "backup", "restore":
 		return runBackupCmd(fs.Arg(0), fs.Args()[1:], stdout, stderr)

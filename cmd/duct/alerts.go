@@ -55,12 +55,16 @@ func cmdAlerts(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			break
 		}
 		if sub != "" {
-			return usageErr("alerts takes at most one subcommand (check)")
+			return usageErr("alerts takes at most one subcommand")
 		}
 		sub, rest = rest[0], rest[1:]
+		switch sub { // these only touch the Duct state and parse their own arguments
+		case "status", "silences", "silence", "unsilence":
+			return alertsOps(ctx, sub, *dir, rest, stdout, stderr)
+		}
 	}
 	if sub != "" && sub != "check" {
-		return usageErr("unknown subcommand %q (only: check)", sub)
+		return usageErr("unknown subcommand %q (check | status | silences | silence <rule> | unsilence <id>)", sub)
 	}
 	p, err := findProject(*dir)
 	if err != nil {
@@ -194,5 +198,16 @@ func runAlerts(ctx context.Context, p *project.Project, log *slog.Logger, onEven
 	defer cons.Close()
 	r := &alerts.Runner{Lake: lake, Window: window, Consumer: cons, Streams: windowed, Rules: rules,
 		Channels: ch, Log: log, OnEvent: onEvent}
+	r.Instance = os.Getenv("DUCT_ALERTS_INSTANCE")
+	if p.Config.Alerts != nil {
+		if p.Config.Alerts.Instance != "" {
+			r.Instance = p.Config.Alerts.Instance
+		}
+		if s := p.Config.Alerts.LeaseTTL; s != "" {
+			if r.LeaseTTL, err = time.ParseDuration(s); err != nil || r.LeaseTTL < time.Second {
+				return fmt.Errorf("[alerts] lease_ttl %q must be a duration of at least 1s", s)
+			}
+		}
+	}
 	return r.Run(ctx)
 }

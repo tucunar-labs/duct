@@ -61,6 +61,11 @@ type Config struct {
 	// and mlflowconfig.go; ADR 0005, 0006, 0010). MLflow is nil until `duct enable mlflow`.
 	Python PythonSettings  `toml:"python"`
 	MLflow *MLflowSettings `toml:"mlflow"`
+	// Audit configures the query audit log: retention, export to the lake and
+	// CLI auditing (see auditconfig.go; ADR 0007).
+	Audit AuditSettings `toml:"audit"`
+	// Jobs configures the orchestrator: history retention (jobsretention.go).
+	Jobs JobsSettings `toml:"jobs"`
 }
 
 // S3Config is the [s3] table of duct.toml, used when storage is s3://...:
@@ -144,6 +149,12 @@ func Load(dir string) (*Project, error) {
 		if _, err := pgconn.Parse(cfg.Catalog); err != nil {
 			return nil, fmt.Errorf("%s: catalog: %w", ConfigFile, err)
 		}
+	}
+	if _, err := cfg.Audit.RetentionDuration(); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
+	}
+	if _, err := cfg.Jobs.RetentionDuration(); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
 	return &Project{Root: root, Config: cfg}, nil
 }

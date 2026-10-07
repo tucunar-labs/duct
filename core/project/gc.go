@@ -43,6 +43,23 @@ func (p *Project) GC(ctx context.Context, eng contract.Engine, opts GCOptions) (
 		{"delete orphaned files", "CALL ducklake_delete_orphaned_files('lake', older_than => " + cutoff + ")"},
 	}
 	var steps []GCStep
+	// The audit log of the state database ([audit] retention; 0 keeps it). The
+	// exported copy in the lake (bronze.duct_audit_log) is not pruned.
+	if ret, err := p.Config.Audit.RetentionDuration(); err == nil && ret > 0 {
+		n, err := PruneAudit(ctx, eng, time.Now().Add(-ret), 0)
+		if err != nil && !strings.Contains(err.Error(), "does not exist") { // project not migrated yet
+			return steps, fmt.Errorf("prune audit: %w", err)
+		}
+		steps = append(steps, GCStep{"prune audit", fmt.Sprintf("%d rows older than %s", n, ret)})
+	}
+	// Finished job runs ([jobs] history_retention; unset keeps them).
+	if ret, err := p.Config.Jobs.RetentionDuration(); err == nil && ret > 0 {
+		n, err := PruneJobsHistory(ctx, eng, time.Now().Add(-ret))
+		if err != nil && !strings.Contains(err.Error(), "does not exist") {
+			return steps, fmt.Errorf("prune jobs history: %w", err)
+		}
+		steps = append(steps, GCStep{"prune jobs history", fmt.Sprintf("%d runs older than %s", n, ret)})
+	}
 	for _, c := range calls {
 		n, err := countRows(ctx, eng, c.sql)
 		if err != nil {

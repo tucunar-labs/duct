@@ -2,11 +2,14 @@ package contracts
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/governance"
 	"github.com/alonsoburon/duct/core/pipeline"
+	"github.com/alonsoburon/duct/core/semantic"
 )
 
 // Refresh is the outcome of RunPipeline.
@@ -64,6 +67,18 @@ func RunPipeline(ctx context.Context, eng contract.Engine, root string, tables [
 		}
 		for _, s := range rr.Skipped {
 			out.Warnings = append(out.Warnings, "granted relation no longer exists ("+s+")")
+		}
+		// Semantic preaggregates are built from the role views just rebuilt.
+		if m, merr := semantic.LoadDir(filepath.Join(root, "semantic")); merr == nil {
+			pr, perr := governance.RefreshPreaggs(ctx, eng, m, governance.PreaggOptions{})
+			switch {
+			case perr != nil:
+				out.Warnings = append(out.Warnings, "semantic preaggregates: "+perr.Error())
+			case pr.Built > 0 || pr.Dropped > 0:
+				out.Log = append(out.Log, fmt.Sprintf("semantic preaggregates: %d built, %d dropped", pr.Built, pr.Dropped))
+			}
+		} else if !errors.Is(merr, semantic.ErrNoModel) {
+			out.Warnings = append(out.Warnings, "semantic model: "+merr.Error())
 		}
 	}
 	return out, runErr

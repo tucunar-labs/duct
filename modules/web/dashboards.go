@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -36,6 +37,7 @@ const (
 type chartData struct {
 	Columns []specColumn
 	Rows    json.RawMessage
+	N       int // number of rows (for the audit record of a cache hit)
 }
 
 func (d *chartData) size() int { return len(d.Rows) + 64*len(d.Columns) + 64 }
@@ -80,8 +82,10 @@ func cacheKey(snapshot, role string, req contract.SemanticRequest) string {
 func (a *app) semanticData(ctx context.Context, sq contract.SemanticQuerier, snapshot string, who contract.Identity, req contract.SemanticRequest) (*chartData, error) {
 	key := ""
 	if snapshot != "" {
+		t0 := time.Now()
 		key = cacheKey(snapshot, who.Role, req)
 		if d, ok := a.chartCache.get(key); ok {
+			a.auditCacheHit(ctx, who, req, d, time.Since(t0), t0)
 			return d, nil
 		}
 	}
@@ -121,10 +125,25 @@ read:
 	if data.Rows, err = json.Marshal(rows); err != nil {
 		return nil, err
 	}
+	data.N = len(rows)
 	if key != "" {
 		a.chartCache.put(key, data)
 	}
 	return data, nil
+}
+
+// auditCacheHit records a dashboard answer served from the cache: status ok,
+// cached=true, duration of the lookup. The audit log coalesces identical hits
+// (same user, role and request) inside a window, so a busy dashboard writes
+// one row per widget and viewer per minute with hits = how many.
+func (a *app) auditCacheHit(ctx context.Context, who contract.Identity, req contract.SemanticRequest, d *chartData, took time.Duration, at time.Time) {
+	au, ok := a.q.(contract.Auditor)
+	if !ok {
+		return
+	}
+	raw, _ := json.Marshal(req)
+	au.Audit(ctx, contract.AuditRecord{At: at.UTC(), User: who.User, Role: who.Role, SQL: "-- semantic query (cache hit) " + string(raw),
+		Duration: took, Rows: int64(d.N), Cached: true, Hits: 1})
 }
 
 // jsonCell converts one Arrow value to something encoding/json writes the way

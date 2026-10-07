@@ -31,6 +31,11 @@ type Scope struct {
 	// Tables are the views the role owns (lower case table names). nil means
 	// "unknown": nothing is pre-checked and the guard of the server decides.
 	Tables map[string]bool
+	// Fresh maps the name of each preaggregate that may serve this role right
+	// now (built from the role's views under its current policies, from the
+	// current data) to its table in the semantic_cache schema. The caller
+	// decides; the compiler only routes to what is listed. nil: never route.
+	Fresh map[string]string
 }
 
 func (s Scope) has(d *Dataset) bool { return s.Tables == nil || s.Tables[d.Table] }
@@ -42,14 +47,18 @@ func (s Scope) check(d *Dataset) error {
 	return nil
 }
 
-// Filter is one structured condition. Op is one of =, !=, <, <=, >, >=, in,
-// not_in, like, not_like, between, is_null, is_not_null. Value is a string,
-// number, bool; a list for in/not_in; a [low, high] pair for between; absent
-// for is_null/is_not_null. It is never SQL.
+// Filter is one structured condition. Set Field to filter rows (WHERE, before
+// aggregating) or Metric to filter groups by the value of a metric (HAVING,
+// after aggregating); never both. Op is one of =, !=, <, <=, >, >=, in,
+// not_in, like, not_like, between, is_null, is_not_null (like and not_like
+// only on fields). Value is a string, number, bool; a list for in/not_in; a
+// [low, high] pair for between; absent for is_null/is_not_null. It is never
+// SQL.
 type Filter struct {
-	Field string `json:"field"`
-	Op    string `json:"op"`
-	Value any    `json:"value,omitempty"`
+	Field  string `json:"field,omitempty"`
+	Metric string `json:"metric,omitempty"`
+	Op     string `json:"op"`
+	Value  any    `json:"value,omitempty"`
 }
 
 // Order sorts by a requested dimension or measure.
@@ -67,6 +76,8 @@ type Request struct {
 	Filters  []Filter `json:"filters,omitempty"`
 	Limit    int      `json:"limit,omitempty"`
 	Order    []Order  `json:"order,omitempty"`
+
+	unlimited bool // internal: no LIMIT (building a preaggregate)
 }
 
 // Column describes one column of the result.
@@ -80,6 +91,9 @@ type Column struct {
 type Compiled struct {
 	SQL     string
 	Columns []Column
+	// Preagg is the preaggregate the query was routed to ("" when it reads the
+	// role views).
+	Preagg string
 }
 
 const (
@@ -94,15 +108,47 @@ type dimSel struct {
 	alias string
 }
 
+type cond struct {
+	ref fieldRef
+	f   Filter
+}
+
+type havingCond struct {
+	mt *Metric
+	f  Filter
+}
+
+// aliasesFor names the output column of each dimension: the field name, or
+// dataset.field when two dimensions share the field name.
+func aliasesFor(refs []fieldRef) []string {
+	count := map[string]int{}
+	for _, r := range refs {
+		count[strings.ToLower(r.f.Name)]++
+	}
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.f.Name
+		if count[strings.ToLower(r.f.Name)] > 1 {
+			out[i] = r.ds.Name + "." + r.f.Name
+		}
+	}
+	return out
+}
+
 // Query compiles req to one SELECT over the role views of sc.
 //
-// Strategy (no fan-out, ever): every metric is computed on its home dataset (the
-// fact). For each fact the query aggregates once, joining only towards the
-// "one" side of relationships (many-to-one: from -> to), which cannot
-// multiply fact rows. A dimension or filter that lives on the "many" side of
-// the fact is refused. Several facts are aggregated separately and combined
-// with a FULL OUTER JOIN on the dimensions (conformed dimensions), so a
-// customer with 3 orders and 10 order lines is never counted 30 times.
+// Strategy (no fan-out, ever): every base metric is computed on its home
+// dataset (the fact). For each fact the query aggregates once, joining only
+// towards the "one" side of relationships (many-to-one: from -> to), which
+// cannot multiply fact rows. A dimension or filter that lives on the "many"
+// side of the fact is refused. Several facts are aggregated separately and
+// combined with a FULL OUTER JOIN on the dimensions (conformed dimensions), so
+// a customer with 3 orders and 10 order lines is never counted 30 times. A
+// derived metric (revenue / units, each on its own fact) is evaluated after
+// that join, over the already aggregated parts. Filters on metrics (HAVING)
+// are applied on the combined result.
+//
+// When sc.Fresh lists a compatible preaggregate the SQL reads it instead.
 func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 	if !roleNameRe.MatchString(sc.Role) {
 		return nil, reqErr("invalid role %q", sc.Role)
@@ -115,6 +161,7 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 	}
 	limit := req.Limit
 	switch {
+	case req.unlimited:
 	case limit < 0:
 		return nil, reqErr("limit must be positive")
 	case limit == 0:
@@ -122,21 +169,26 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 	case limit > m.maxLimit:
 		return nil, reqErr("limit %d exceeds the maximum of %d", limit, m.maxLimit)
 	}
+	if req.unlimited {
+		limit = 0
+	}
 
 	// Measures.
 	var measures []*Metric
 	seenM := map[*Metric]bool{}
 	for _, name := range req.Measures {
 		mt, ok := m.Metric(name)
-		if !ok || mt.Hidden || mt.home.Hidden {
+		if !ok || !mt.visible() {
 			return nil, reqErr("unknown measure %q (see list_metrics)", name)
 		}
 		if seenM[mt] {
 			return nil, reqErr("measure %q is repeated", name)
 		}
 		seenM[mt] = true
-		if err := sc.check(mt.home); err != nil {
-			return nil, err
+		for _, h := range mt.Homes() {
+			if err := sc.check(h); err != nil {
+				return nil, err
+			}
 		}
 		measures = append(measures, mt)
 	}
@@ -144,6 +196,7 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 	// Dimensions.
 	dims := make([]dimSel, len(req.Dims))
 	seenD := map[fieldRef]bool{}
+	var dimRefs []fieldRef
 	for i, name := range req.Dims {
 		ref, err := m.resolveField(name)
 		if err != nil {
@@ -157,16 +210,10 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 			return nil, err
 		}
 		dims[i] = dimSel{ref: ref}
+		dimRefs = append(dimRefs, ref)
 	}
-	nameCount := map[string]int{}
-	for _, d := range dims {
-		nameCount[strings.ToLower(d.ref.f.Name)]++
-	}
-	for i := range dims {
-		dims[i].alias = dims[i].ref.f.Name
-		if nameCount[strings.ToLower(dims[i].ref.f.Name)] > 1 {
-			dims[i].alias = dims[i].ref.ds.Name + "." + dims[i].ref.f.Name
-		}
+	for i, a := range aliasesFor(dimRefs) {
+		dims[i].alias = a
 	}
 	for _, mt := range measures {
 		for _, d := range dims {
@@ -176,13 +223,38 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 		}
 	}
 
-	// Filters.
-	type cond struct {
-		ref fieldRef
-		f   Filter
-	}
-	conds := make([]cond, len(req.Filters))
-	for i, f := range req.Filters {
+	// Filters: on fields (WHERE) and on metrics (HAVING).
+	var conds []cond
+	var having []havingCond
+	for _, f := range req.Filters {
+		if f.Metric != "" {
+			if f.Field != "" {
+				return nil, reqErr("a filter has a field or a metric, not both")
+			}
+			mt, ok := m.Metric(f.Metric)
+			if !ok || !mt.visible() {
+				return nil, reqErr("unknown metric %q in a filter (see list_metrics)", f.Metric)
+			}
+			for _, h := range mt.Homes() {
+				if err := sc.check(h); err != nil {
+					return nil, err
+				}
+			}
+			switch strings.ToLower(strings.TrimSpace(f.Op)) {
+			case "like", "not_like":
+				return nil, reqErr("filter on metric %q: %s only applies to fields", f.Metric, f.Op)
+			}
+			probe := f
+			probe.Field = f.Metric
+			if _, err := filterSQL("x", probe); err != nil {
+				return nil, err
+			}
+			having = append(having, havingCond{mt, f})
+			continue
+		}
+		if strings.TrimSpace(f.Field) == "" {
+			return nil, reqErr("a filter needs a field or a metric")
+		}
 		ref, err := m.resolveField(f.Field)
 		if err != nil {
 			return nil, err
@@ -193,12 +265,38 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 		if _, err := filterSQL("x", f); err != nil {
 			return nil, err
 		}
-		conds[i] = cond{ref, f}
+		conds = append(conds, cond{ref, f})
 	}
 
-	// Facts: the home datasets of the measures, in order of appearance.
-	var facts []*Dataset
+	// A fresh preaggregate that covers the query serves it.
+	if c, err := m.routed(sc, req, dims, measures, conds, having, limit); err != nil || c != nil {
+		return c, err
+	}
+
+	// Base metrics to aggregate: the leaves of the measures and of the metric
+	// filters, in order of appearance.
+	var leaves []*Metric
+	addLeaves := func(mt *Metric) {
+		for _, l := range mt.leaves() {
+			found := false
+			for _, x := range leaves {
+				found = found || x == l
+			}
+			if !found {
+				leaves = append(leaves, l)
+			}
+		}
+	}
 	for _, mt := range measures {
+		addLeaves(mt)
+	}
+	for _, h := range having {
+		addLeaves(h.mt)
+	}
+
+	// Facts: the home datasets of the leaves, in order of appearance.
+	var facts []*Dataset
+	for _, mt := range leaves {
 		if !containsDS(facts, mt.home) {
 			facts = append(facts, mt.home)
 		}
@@ -229,10 +327,12 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 			used[s.child] = true
 		}
 	}
-	for _, mt := range measures {
+	leafPlan := map[*Metric]int{}
+	for _, mt := range leaves {
 		for i := range plans {
 			if plans[i].fact == mt.home {
 				plans[i].ms = append(plans[i].ms, mt)
+				leafPlan[mt] = i
 			}
 		}
 	}
@@ -253,15 +353,15 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 		}
 	}
 
-	measureCol := map[*Metric]string{}
+	leafCol := map[*Metric]string{}
 	for i, p := range plans {
 		var sel []string
 		for j, d := range dims {
 			sel = append(sel, refSQL(d.ref)+" AS "+quoteIdent(fmt.Sprintf("d%d", j)))
 		}
 		for _, mt := range p.ms {
-			col := fmt.Sprintf("m%d", len(measureCol))
-			measureCol[mt] = col
+			col := fmt.Sprintf("m%d", len(leafCol))
+			leafCol[mt] = col
 			sel = append(sel, metricSQL(mt)+" AS "+quoteIdent(col))
 		}
 		q := "SELECT " + strings.Join(sel, ", ") + "\n  FROM " + quoteIdent(p.fact.Name)
@@ -285,7 +385,6 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 		}
 		emit(quoteIdent(fmt.Sprintf("q%d", i)), q)
 	}
-	b.WriteString("\n")
 
 	// Final select: one fact reads its CTE; several are combined on the dims.
 	qn := func(i int) string { return quoteIdent(fmt.Sprintf("q%d", i)) }
@@ -299,29 +398,19 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 		}
 		return "COALESCE(" + strings.Join(parts, ", ") + ")"
 	}
+	colOf := func(l *Metric) string { return qn(leafPlan[l]) + "." + quoteIdent(leafCol[l]) }
 	var cols []Column
 	var final []string
-	dimAlias := map[fieldRef]string{}
 	for j, d := range dims {
 		final = append(final, dimExpr(j, len(plans))+" AS "+quoteIdent(d.alias))
 		cols = append(cols, Column{Name: d.alias, Kind: "dimension", Datatype: d.ref.f.Datatype})
-		dimAlias[d.ref] = d.alias
-	}
-	measureAlias := map[*Metric]string{}
-	for _, mt := range measures {
-		measureAlias[mt] = mt.Name
 	}
 	for _, mt := range measures { // keep the order the caller asked
-		var qi int
-		for i, p := range plans {
-			if p.fact == mt.home {
-				qi = i
-			}
-		}
-		final = append(final, qn(qi)+"."+quoteIdent(measureCol[mt])+" AS "+quoteIdent(mt.Name))
+		final = append(final, mt.exprSQL(colOf)+" AS "+quoteIdent(mt.Name))
 		cols = append(cols, Column{Name: mt.Name, Kind: "measure", Datatype: mt.Datatype})
 	}
-	b.WriteString("SELECT " + strings.Join(final, ", ") + "\nFROM " + qn(0))
+	var from strings.Builder
+	from.WriteString("FROM " + qn(0))
 	for i := 1; i < len(plans); i++ {
 		var on []string
 		for j := range dims {
@@ -331,10 +420,51 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 		if len(on) > 0 {
 			cond = strings.Join(on, " AND ")
 		}
-		b.WriteString("\nFULL OUTER JOIN " + qn(i) + " ON " + cond)
+		from.WriteString("\nFULL OUTER JOIN " + qn(i) + " ON " + cond)
 	}
+	if len(having) == 0 {
+		b.WriteString("\n")
+		b.WriteString("SELECT " + strings.Join(final, ", ") + "\n" + from.String())
+	} else {
+		var hs []string
+		for i, h := range having {
+			final = append(final, h.mt.exprSQL(colOf)+" AS "+quoteIdent(fmt.Sprintf("__h%d", i)))
+			hs = append(hs, havingSQL(i, h))
+		}
+		emit(quoteIdent("r"), "SELECT "+strings.Join(final, ", ")+"\n"+from.String())
+		b.WriteString("\nSELECT " + outCols(cols) + "\nFROM " + quoteIdent("r") + "\nWHERE " + strings.Join(hs, " AND "))
+	}
+	if err := m.tail(&b, req, dims, measures, limit); err != nil {
+		return nil, err
+	}
+	return &Compiled{SQL: b.String(), Columns: cols}, nil
+}
 
-	// ORDER BY.
+func havingSQL(i int, h havingCond) string {
+	probe := h.f
+	probe.Field = h.mt.Name
+	w, _ := filterSQL(quoteIdent(fmt.Sprintf("__h%d", i)), probe)
+	return w
+}
+
+func outCols(cols []Column) string {
+	var out []string
+	for _, c := range cols {
+		out = append(out, quoteIdent(c.Name))
+	}
+	return strings.Join(out, ", ")
+}
+
+// tail writes ORDER BY and LIMIT (limit 0: none).
+func (m *Model) tail(b *strings.Builder, req Request, dims []dimSel, measures []*Metric, limit int) error {
+	dimAlias := map[fieldRef]string{}
+	for _, d := range dims {
+		dimAlias[d.ref] = d.alias
+	}
+	measureAlias := map[*Metric]string{}
+	for _, mt := range measures {
+		measureAlias[mt] = mt.Name
+	}
 	var order []string
 	if len(req.Order) == 0 {
 		for _, d := range dims {
@@ -344,7 +474,7 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 	for _, o := range req.Order {
 		alias, err := m.orderTarget(o.By, dimAlias, measureAlias)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		dir := " ASC"
 		if o.Desc {
@@ -355,8 +485,27 @@ func (m *Model) Query(sc Scope, req Request) (*Compiled, error) {
 	if len(order) > 0 {
 		b.WriteString("\nORDER BY " + strings.Join(order, ", "))
 	}
-	b.WriteString("\nLIMIT " + strconv.Itoa(limit))
-	return &Compiled{SQL: b.String(), Columns: cols}, nil
+	if limit > 0 {
+		b.WriteString("\nLIMIT " + strconv.Itoa(limit))
+	}
+	return nil
+}
+
+// exprSQL renders the metric over the aggregated columns of its base metrics
+// (a derived metric) or as the aggregate itself.
+func (mt *Metric) exprSQL(colOf func(*Metric) string) string {
+	if !mt.derived {
+		return colOf(mt)
+	}
+	var b strings.Builder
+	for _, s := range mt.dsegs {
+		if s.kind == segMetric {
+			b.WriteString(colOf(s.mt))
+		} else {
+			b.WriteString(s.text)
+		}
+	}
+	return b.String()
 }
 
 func (m *Model) orderTarget(by string, dimAlias map[fieldRef]string, measureAlias map[*Metric]string) (string, error) {

@@ -17,6 +17,7 @@
   patch) asks the handler's optional `contract.Administrator` first: admin (`duct_admin`) runs them
   and gets a constant SELECT back (prefixed `/*duct:admin*/`, skipped by the audit hook because the
   original is audited by `intercept`); others get 42501.
+- **Quotas** (ADR 0013): if the handler is a `contract.Limiter`, `quota.go` wraps the executor given to duckgres: one slot per statement until its row set closes (shared counter with HTTP/MCP/web), `max_rows` stops the row set with a 53400 error (the fork reports `SQLState()` of executor errors). Tested in `cmd/duct/serve_quota_test.go`.
 - **Config** (`[serve.pg]`): `listen` (default `127.0.0.1:5433`), `tls_cert`+`tls_key`
   (when set, plaintext logins are refused), `allow_insecure` (needed for non-loopback without TLS),
   `max_connections` (32), `idle_timeout` (15m), `memory_limit` (256MB/session), `threads` (2).

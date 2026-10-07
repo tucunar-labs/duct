@@ -114,7 +114,7 @@ func TestSemanticCLI(t *testing.T) {
 	if code == 0 || !strings.Contains(errs, "not granted") {
 		t.Errorf("role without grant: code=%d %q", code, errs)
 	}
-	if out := mustDuct(t, "semantic", "build", "--project", root, "--role", "jefes"); !strings.Contains(out, `"role_jefes"."orders"`) {
+	if out := mustDuct(t, "semantic", "build", "--project", root, "--sql", "--role", "jefes"); !strings.Contains(out, `"role_jefes"."orders"`) {
 		t.Errorf("build: %q", out)
 	}
 }
@@ -352,4 +352,191 @@ func TestE2EMCP(t *testing.T) {
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// preaggModel is shopModel plus a derived metric across facts and a preaggregate.
+const preaggModel = shopModel + `  - name: revenue_per_unit
+    expression: {dialects: [{dialect: ANSI_SQL, expression: revenue / units}]}
+custom_extensions:
+  - vendor_name: DUCT
+    data: '{"preaggregate": {"name": "ventas", "dims": ["customers.region", "orders.status"], "measures": ["revenue"], "refresh": "on_snapshot"}}'
+`
+
+func TestSemanticDerivedHavingAndPreaggregates(t *testing.T) {
+	root := semanticProject(t)
+	writeFile(t, filepath.Join(root, "semantic", "shop.ossie.yaml"), preaggModel)
+	q := func(args ...string) (string, string) {
+		t.Helper()
+		out, errs, code := duct(t, append([]string{"semantic", "query", "--project", root, "--format", "csv"}, args...)...)
+		if code != 0 {
+			t.Fatalf("query %v: %s", args, errs)
+		}
+		return out, errs
+	}
+	// Derived across facts: revenue / units, each on its own grain (CL: 450/15, AR: 200/1).
+	out, _ := q("--role", "jefes", "--dims", "region", "--measures", "revenue_per_unit")
+	if !strings.Contains(out, "CL,30") || !strings.Contains(out, "AR,200") {
+		t.Errorf("derived: %q", out)
+	}
+	// HAVING on a metric that is not even selected.
+	out, _ = q("--role", "jefes", "--dims", "region", "--measures", "units", "--having", "revenue>300")
+	if !strings.Contains(out, "CL,15") || strings.Contains(out, "AR") || strings.Contains(out, "revenue") {
+		t.Errorf("having: %q", out)
+	}
+
+	// A role with no row filter: build preaggregates, then query from them.
+	mustDuct(t, "role", "create", "gerencia", "--project", root)
+	for _, tb := range []string{"customers", "orders", "order_items"} {
+		mustDuct(t, "grant", "select", "on", "gold."+tb, "to", "gerencia", "--project", root)
+	}
+	out = mustDuct(t, "semantic", "build", "--project", root)
+	if !strings.Contains(out, "built") {
+		t.Fatalf("build: %q", out)
+	}
+	if st := mustDuct(t, "semantic", "status", "--project", root); !strings.Contains(st, "gerencia") || !strings.Contains(st, "fresh") || strings.Contains(st, "STALE") {
+		t.Errorf("status: %q", st)
+	}
+	out, errs := q("--role", "gerencia", "--dims", "region,status", "--measures", "revenue")
+	if !strings.Contains(errs, "preaggregate") || !strings.Contains(out, "CL,void,300") || !strings.Contains(out, "CL,paid,150") {
+		t.Errorf("preaggregate (exact): err=%q out=%q", errs, out)
+	}
+	out, errs = q("--role", "gerencia", "--dims", "region", "--measures", "revenue", "--filter", "status=paid")
+	if !strings.Contains(errs, "preaggregate") || !strings.Contains(out, "CL,150") || !strings.Contains(out, "AR,200") {
+		t.Errorf("preaggregate (rollup+filter): err=%q out=%q", errs, out)
+	}
+
+	// The filtered role of the project has its OWN table, built from its view:
+	// it never sees the void order, with or without the preaggregate.
+	out, errs = q("--role", "analistas", "--dims", "region,status", "--measures", "revenue")
+	if !strings.Contains(errs, "preaggregate") || strings.Contains(out, "void") || !strings.Contains(out, "CL,paid,150") {
+		t.Errorf("filtered role: err=%q out=%q", errs, out)
+	}
+
+	// Tightening a policy makes the table of that role stale AT ONCE: the query
+	// falls back to the (now filtered) views and the void rows are gone.
+	mustDuct(t, "policy", "row-filter", "gold.orders", "--role", "gerencia", "--where", "status = 'paid'", "--project", root)
+	out, errs = q("--role", "gerencia", "--dims", "region,status", "--measures", "revenue")
+	if strings.Contains(errs, "preaggregate") || strings.Contains(out, "void") {
+		t.Errorf("stale table served after a policy change: err=%q out=%q", errs, out)
+	}
+	if st := mustDuct(t, "semantic", "status", "--project", root); !strings.Contains(st, "STALE") {
+		t.Errorf("status after policy change: %q", st)
+	}
+	// Rebuilt under the new policy: served from the preaggregate, still filtered.
+	mustDuct(t, "semantic", "build", "--project", root)
+	out, errs = q("--role", "gerencia", "--dims", "region,status", "--measures", "revenue")
+	if !strings.Contains(errs, "preaggregate") || strings.Contains(out, "void") || !strings.Contains(out, "CL,paid,150") {
+		t.Errorf("rebuilt: err=%q out=%q", errs, out)
+	}
+	// New data makes it stale too (no silently old numbers).
+	mustDuct(t, "query", "--project", root, "INSERT INTO gold.orders VALUES (14, 2, 1000, 'paid')")
+	out, errs = q("--role", "analistas", "--dims", "region,status", "--measures", "revenue")
+	if strings.Contains(errs, "preaggregate") || !strings.Contains(out, "AR,paid,1200") {
+		t.Errorf("after an insert: err=%q out=%q", errs, out)
+	}
+	// Dropping the preaggregate from the model drops the tables.
+	writeFile(t, filepath.Join(root, "semantic", "shop.ossie.yaml"), shopModel)
+	if out := mustDuct(t, "semantic", "build", "--project", root); !strings.Contains(out, "dropped") || strings.Contains(out, "0 dropped") {
+		t.Errorf("drop: %q", out)
+	}
+	if st := mustDuct(t, "semantic", "status", "--project", root); strings.Contains(st, "role ") {
+		t.Errorf("records left: %q", st)
+	}
+}
+
+// TestServeSemanticHotReload: the model is swapped in place (MCP follows), an
+// invalid edit is rejected, and serve builds and uses the preaggregates by itself.
+func TestServeSemanticHotReload(t *testing.T) {
+	old := preaggRefreshEvery
+	preaggRefreshEvery = 300 * time.Millisecond
+	t.Cleanup(func() { preaggRefreshEvery = old })
+	root := semanticProject(t)
+	modelPath := filepath.Join(root, "semantic", "shop.ossie.yaml")
+	writeFile(t, modelPath, preaggModel)
+	tokJefa := strings.TrimSpace(mustDuct(t, "token", "create", "--user", "jefa", "--project", root))
+	p, err := project.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Config.Serve.Modules = map[string]map[string]any{"mcp": {}}
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan map[string]string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, p, serveOptions{Protocols: []string{"mcp"}, Listen: map[string]string{"mcp": "127.0.0.1:0"},
+			Ready: func(a map[string]string) { ready <- a }})
+	}()
+	var addr string
+	select {
+	case a := <-ready:
+		addr = a["mcp"]
+	case err := <-done:
+		t.Fatalf("serve exited: %v", err)
+	case <-time.After(60 * time.Second):
+		t.Fatal("serve did not start")
+	}
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("serve did not shut down")
+		}
+	})
+	s, err := mcpConnect(ctx, addr, tokJefa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	metrics := func() string {
+		out, _, _ := callTool(t, ctx, s, "list_metrics", map[string]any{})
+		return toJSON(out)
+	}
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(200 * time.Millisecond) {
+			if ok() {
+				return
+			}
+		}
+		t.Fatalf("timeout waiting for %s", what)
+	}
+	query := func() (rows, sql string) {
+		out, text, isErr := callTool(t, ctx, s, "query_metrics", map[string]any{
+			"dims": []string{"region", "status"}, "measures": []string{"revenue"}})
+		if isErr {
+			t.Fatalf("query_metrics: %s", text)
+		}
+		return toJSON(out["rows"]), toJSON(out["sql"])
+	}
+
+	if m := metrics(); !strings.Contains(m, "revenue_per_unit") || strings.Contains(m, "rev_per_unit") {
+		t.Fatalf("metrics = %s", m)
+	}
+	// An invalid edit is rejected: the previous model keeps serving.
+	writeFile(t, modelPath, strings.Replace(preaggModel, "SUM(orders.amount)", "SUM(orders.nope)", 1))
+	time.Sleep(5 * time.Second)
+	if m := metrics(); !strings.Contains(m, "revenue_per_unit") {
+		t.Errorf("invalid model replaced the good one: %s", m)
+	}
+	// A valid edit shows up without restarting anything.
+	writeFile(t, modelPath, strings.Replace(preaggModel, "name: revenue_per_unit", "name: rev_per_unit", 1))
+	waitFor("the reloaded model", func() bool { return strings.Contains(metrics(), "rev_per_unit") })
+
+	// Serve builds the preaggregates by itself and queries start reading them.
+	waitFor("the preaggregate to serve", func() bool { _, sql := query(); return strings.Contains(sql, "semantic_cache") })
+	rows, _ := query()
+	if !strings.Contains(rows, `"CL","paid",150`) || !strings.Contains(rows, `"CL","void",300`) {
+		t.Errorf("rows from the preaggregate: %s", rows)
+	}
+	// New data: queries read the views (never old numbers), then the refresh catches up.
+	mustDuct(t, "query", "--project", root, "INSERT INTO gold.orders VALUES (14, 2, 1000, 'paid')")
+	rows, sql := query()
+	if strings.Contains(sql, "semantic_cache") || !strings.Contains(rows, `"AR","paid",1200`) {
+		t.Errorf("after an insert: sql=%s rows=%s", sql, rows)
+	}
+	waitFor("the refreshed preaggregate", func() bool { _, sql := query(); return strings.Contains(sql, "semantic_cache") })
+	if rows, _ := query(); !strings.Contains(rows, `"AR","paid",1200`) {
+		t.Errorf("refreshed rows: %s", rows)
+	}
 }

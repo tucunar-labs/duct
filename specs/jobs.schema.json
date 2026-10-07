@@ -5,7 +5,10 @@
   "description": "A job: a DAG of tasks run on a schedule, by a trigger or by hand (`duct jobs run <name>`). Scheduler and workers live in `duct serve`. Runs are recorded in duct.duct_jobs_runs and duct.duct_task_runs.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "tasks"],
+  "required": [
+    "name",
+    "tasks"
+  ],
   "properties": {
     "name": {
       "description": "Unique job name.",
@@ -13,12 +16,21 @@
       "pattern": "^[a-z][a-z0-9_]*$"
     },
     "schedule": {
-      "description": "Cron expression with 5 fields (\"*/5 * * * *\"), a descriptor (@hourly, @daily, @weekly, @monthly) or \"@every <duration>\" (at least 1s, aligned to the Unix epoch so every machine ticks together). A tick that finds the previous run still active is skipped; ticks missed while `duct serve` was down are not replayed.",
+      "description": "Cron expression with 5 fields (\"*/5 * * * *\"), a descriptor (@hourly, @daily, @weekly, @monthly) or \"@every <duration>\" (at least 1s, aligned to the Unix epoch so every machine ticks together). A tick that finds the previous run still active is skipped (catchup: all waits for it instead). Ticks missed while `duct serve` was down are handled by `catchup`.",
       "type": "string"
     },
     "timezone": {
       "description": "IANA timezone of a cron expression (America/Santiago). Default: the server's local time. Needs schedule.",
       "type": "string"
+    },
+    "catchup": {
+      "description": "What to do with the cron ticks missed while no `duct serve` was running (needs schedule; the last handled tick is kept in the Duct state, so the first start of a job never replays anything). none: forget them. last (default): one run for the most recent missed tick. all: one run per missed tick, oldest first, one at a time, at most 100 (the oldest are dropped) and none older than 6 days. Across machines each tick still starts exactly one run.",
+      "enum": [
+        "none",
+        "last",
+        "all"
+      ],
+      "default": "last"
     },
     "triggers": {
       "description": "Start a run when something changes. The first look only records a baseline: what already exists never fires. Changes that happen while the job is running are coalesced into one run afterwards.",
@@ -28,7 +40,10 @@
         "on_snapshot": {
           "description": "Lake tables (schema.table, bare = main). A new DuckLake snapshot that inserts, deletes, alters or creates one of them fires. Do not list a table this job writes itself.",
           "type": "array",
-          "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)?$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)?$"
+          }
         },
         "on_file": {
           "description": "Glob relative to the project (no ** ), polled for new or changed files. A file modified in the last 2 s is waited for. Needs a folder every `duct serve` sees.",
@@ -40,7 +55,9 @@
       "description": "The DAG. A task starts when every task in depends_on succeeded; if one fails (after its retries) the tasks below it are skipped and the run fails.",
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/task" }
+      "items": {
+        "$ref": "#/$defs/task"
+      }
     },
     "alerts": {
       "description": "Whom to tell. Alerts go through AlertChannel modules (webhook, ...).",
@@ -53,10 +70,18 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["channel"],
+            "required": [
+              "channel"
+            ],
             "properties": {
-              "channel": { "description": "Alert channel module name, e.g. webhook.", "type": "string" },
-              "config": { "description": "The channel's Init config, e.g. {url: https://hooks.example/x}.", "type": "object" }
+              "channel": {
+                "description": "Alert channel module name, e.g. webhook.",
+                "type": "string"
+              },
+              "config": {
+                "description": "The channel's Init config, e.g. {url: https://hooks.example/x}.",
+                "type": "object"
+              }
             }
           }
         }
@@ -64,31 +89,136 @@
     }
   },
   "$defs": {
-    "duration": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" },
+    "duration": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
+    },
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type"],
+      "required": [
+        "id",
+        "type"
+      ],
       "properties": {
-        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
         "type": {
           "description": "pipeline: refresh pipelines/ tables. ingest: run ingest/*.yaml. shell: run a program (argument list, no shell). python: python script.py. notebook: python notebook.py --k v (marimo).",
-          "enum": ["pipeline", "ingest", "python", "shell", "notebook"]
+          "enum": [
+            "pipeline",
+            "ingest",
+            "python",
+            "shell",
+            "notebook"
+          ]
         },
-        "depends_on": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
         "params": {
           "description": "pipeline: targets (list), only (bool). ingest: names (list; empty = all). shell: command (list), cwd, env. python: script, args (list), uv (bool), python, cwd, env. notebook: notebook, args (map), uv, python, cwd, env. Task processes get DUCT_URL/DUCT_TOKEN and a minimal environment, never the lake credentials.",
           "type": "object"
         },
-        "retries": { "description": "Extra attempts after a failure (0-20).", "type": "integer", "minimum": 0, "maximum": 20, "default": 0 },
-        "backoff": { "description": "Wait before the first retry; doubles each time. Default 10s.", "$ref": "#/$defs/duration" },
-        "max_backoff": { "description": "Cap of one wait. Default 5m.", "$ref": "#/$defs/duration" },
-        "timeout": { "description": "Per attempt. Default 1h. The attempt is cancelled and counts as a failure.", "$ref": "#/$defs/duration" }
+        "retries": {
+          "description": "Extra attempts after a failure (0-20).",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20,
+          "default": 0
+        },
+        "backoff": {
+          "description": "Wait before the first retry; doubles each time. Default 10s.",
+          "$ref": "#/$defs/duration"
+        },
+        "max_backoff": {
+          "description": "Cap of one wait. Default 5m.",
+          "$ref": "#/$defs/duration"
+        },
+        "timeout": {
+          "description": "Per attempt. Default 1h. The attempt is cancelled and counts as a failure.",
+          "$ref": "#/$defs/duration"
+        }
       },
       "allOf": [
-        { "if": { "properties": { "type": { "const": "shell" } } }, "then": { "required": ["params"], "properties": { "params": { "required": ["command"], "properties": { "command": { "type": "array", "minItems": 1, "items": { "type": "string" } } } } } } },
-        { "if": { "properties": { "type": { "const": "python" } } }, "then": { "required": ["params"], "properties": { "params": { "required": ["script"] } } } },
-        { "if": { "properties": { "type": { "const": "notebook" } } }, "then": { "required": ["params"], "properties": { "params": { "required": ["notebook"] } } } }
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "shell"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "required": [
+                  "command"
+                ],
+                "properties": {
+                  "command": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "python"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "required": [
+                  "script"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "notebook"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "required": [
+                  "notebook"
+                ]
+              }
+            }
+          }
+        }
       ]
     }
   }

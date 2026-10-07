@@ -227,8 +227,9 @@ func (o *Orchestrator) pollFiles(ctx context.Context, job Job) error {
 }
 
 func (o *Orchestrator) pollTriggers(ctx context.Context) {
-	for _, name := range o.names {
-		job := o.jobs[name]
+	cat := o.cat.Load()
+	for _, name := range cat.names {
+		job := cat.jobs[name]
 		if err := o.pollSnapshots(ctx, job); err != nil && ctx.Err() == nil {
 			o.log.Warn("snapshot trigger", "job", name, "err", err)
 		}
@@ -240,7 +241,7 @@ func (o *Orchestrator) pollTriggers(ctx context.Context) {
 
 // hasTriggers reports whether any job watches snapshots or files.
 func (o *Orchestrator) hasTriggers() bool {
-	for _, j := range o.jobs {
+	for _, j := range o.cat.Load().jobs {
 		if len(j.Triggers.OnSnapshot) > 0 || j.Triggers.OnFile != "" {
 			return true
 		}

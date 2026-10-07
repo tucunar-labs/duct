@@ -138,7 +138,10 @@ Pendientes conocidos para v0.2:
       resolución ~195 ms, sensor mudo a 2,0 s), `TestServeRunsStreamAndAlerts`.
 - [ ] WhatsApp contra la API real de Meta (hoy solo `httptest`: falta cuenta, número y plantilla
       *utility* aprobada).
-- [ ] Alertas: histéresis (`FOR`), recordatorios y silencios; activo/activo con varias instancias.
+- [x] Alertas (2026-10-07, ADR 0009): `FOR`/`RESOLVE_FOR`/`REPEAT`, silencios (`duct alerts silence`)
+      y activo/activo con un lease por (regla, clave) en el estado de Duct. Evidencia:
+      `TestTracker*`, `TestAlertsHysteresisAndReminders`, `TestAlertsSilences`, `TestAlertsActiveActive`
+      (SQLite, dos instancias) y `test/integration` `TestAlertsActiveActive` (Postgres + Kafka, `kill -9`).
 - [ ] Streaming: Avro/Protobuf con registry, métricas, DLQ por tipo incompatible.
 
 ## v0.3 — Orquestación, contratos, semántica (2026-10-07)
@@ -189,12 +192,24 @@ Pendientes conocidos para v0.2:
       `/admin/v1` (+ `specs/admin.openapi.yaml`), cuotas por rol, `/readyz` y `/metrics` ampliado.
       Evidencia: `TestE2EBackupRestoreSQLite`, `TestE2EAdminAPI`, `TestQuotaConcurrent`,
       `TestBackupRestoreS3` (SQLite y Postgres sobre RustFS).
+- [x] Auditoría v2 (2026-10-07, ADR 0007): retención `[audit] retention` (gc, serve cada hora,
+      `duct audit prune`), exportación idempotente a `bronze.duct_audit_log` (`[audit] export`,
+      `duct audit export`), aciertos de caché de dashboards (agregados por minuto), filas del CLI
+      (`[audit] cli`), `occurred_at` normalizado + índices, redacción y `duct audit query`. Evidencia:
+      `cmd/duct/audit_test.go`. Falta: columnas de tiempo reales en SQLite (límite de DuckDB), redacción
+      con parser en vez de expresiones regulares.
 - [ ] Cuotas en el protocolo Postgres (usa su propia sesión DuckDB: hoy solo HTTP, MCP y web).
 - [ ] Respaldo: cifrado (lakes con `encrypted`), objetos de más de 5 GiB, restauración parcial por tabla.
 - [x] Job de CI `integration` (docker run de Postgres, RustFS y Kafka + `just test-integration` con
       `DUCT_TEST_*`). Evidencia: las 17 pruebas pasan en local contra servidores externos (192 s);
       falta verlo verde en Actions.
-- [ ] Semántica: métricas multi-dataset, filtros sobre métricas, preagregados, recarga en caliente.
-- [ ] Jobs: recarga en caliente, retención del historial, recuperar ticks perdidos.
-- [ ] Alertas: histéresis (`FOR`), silencios, recordatorios, activo/activo.
+- [x] Semántica (2026-10-07, ADR 0011): métricas derivadas entre hechos, filtros sobre métricas (HAVING),
+      preagregados por rol en `semantic_cache` (solo si frescos; una política nueva los invalida al
+      instante) y recarga en caliente del modelo. Evidencia: `core/semantic` (goldens),
+      `TestSemanticDerivedHavingAndPreaggregates`, `TestServeSemanticHotReload`.
+- [x] Jobs (2026-10-07, ADR 0005): recarga en caliente de `jobs/`, `[jobs] history_retention`, `catchup`.
+      Evidencia: `TestJobsHotReload`, `TestJobsCatchup`, `TestJobsHistoryRetention`.
+- [ ] Semántica: preagregados incrementales (hoy reconstrucción completa por rol), dashboards YAML con
+      filtros de métrica, `refresh` por horario.
+- [ ] Alertas: persistir los relojes de `FOR`/`RESOLVE_FOR`; silencios por etiqueta/severidad.
 - [ ] Subir a DuckDB 2.0 (despriorizado por el usuario).

@@ -108,6 +108,13 @@ func (fd *feeder) send(sensor string, temp float64) {
 // startAlerts runs a Runner over a fake consumer until the returned stop is called.
 func startAlerts(t *testing.T, root string, srvURL string) (fd *feeder, stop func()) {
 	t.Helper()
+	return startAlertsAs(t, root, srvURL, "", 0)
+}
+
+// startAlertsAs is startAlerts for one of several instances (instance names it
+// in the shared state; ttl is its lease, 0 = default).
+func startAlertsAs(t *testing.T, root string, srvURL string, instance string, ttl time.Duration) (fd *feeder, stop func()) {
+	t.Helper()
 	p, err := project.Load(root)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +141,7 @@ func startAlerts(t *testing.T, root string, srvURL string) (fd *feeder, stop fun
 		t.Fatal(err)
 	}
 	f := newFake()
-	r := &alerts.Runner{Lake: lake, Window: window, Consumer: f, Streams: cfgs, Rules: rules, Channels: ch, Log: slog.New(slog.NewTextHandler(testWriter{t}, nil))}
+	r := &alerts.Runner{Lake: lake, Window: window, Consumer: f, Streams: cfgs, Rules: rules, Channels: ch, Log: slog.New(slog.NewTextHandler(testWriter{t}, nil)), Instance: instance, LeaseTTL: ttl}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -284,4 +291,218 @@ type testWriter struct{ t *testing.T }
 func (w testWriter) Write(b []byte) (int, error) {
 	w.t.Log(strings.TrimSpace(string(b)))
 	return len(b), nil
+}
+
+// quietRule fires when a sensor's last reading is over 80 (like hotSQL) with extra directives.
+func ruleWith(directives string) string {
+	return "-- EVERY 100ms\n-- KEY sensor_id\n-- CHANNELS webhook:ops\n-- MESSAGE {sensor_id} marca {temp} C\n" + directives +
+		`SELECT sensor_id, temp FROM (
+  SELECT *, row_number() OVER (PARTITION BY sensor_id ORDER BY _kafka_ts DESC, _kafka_offset DESC) AS rn FROM sensors
+) WHERE rn = 1 AND temp > 80`
+}
+
+func alertsProject(t *testing.T, rule string) (root string, h *hook, url string) {
+	t.Helper()
+	root = newProject(t)
+	writeFile(t, root+"/streams/sensores.yaml", "name: sensors\ntopic: planta.sensores\nwindow: 1m\n")
+	writeFile(t, root+"/alerts/hot.sql", rule)
+	h = &hook{}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return root, h, srv.URL
+}
+
+// TestAlertsHysteresisAndReminders: FOR holds the alert back until the
+// condition lasted (a blip never fires), RESOLVE_FOR keeps it firing through a
+// short dip, and REPEAT re-notifies while it stays firing.
+func TestAlertsHysteresisAndReminders(t *testing.T) {
+	root, h, url := alertsProject(t, ruleWith("-- FOR 1s\n-- RESOLVE_FOR 1s\n-- REPEAT 1s\n"))
+	fd, stop := startAlerts(t, root, url)
+	defer stop()
+	fd.send("s1", 20)
+	time.Sleep(400 * time.Millisecond)
+
+	// A blip shorter than FOR: nothing.
+	fd.send("s1", 95)
+	time.Sleep(400 * time.Millisecond)
+	fd.send("s1", 20)
+	time.Sleep(600 * time.Millisecond)
+	if got := h.snapshot(); len(got) != 0 {
+		t.Fatalf("a blip fired: %v", got)
+	}
+
+	// Sustained: fires only after FOR (~1s), not before.
+	start := time.Now()
+	fd.send("s1", 96)
+	at := h.find(t, "hot", "s1", "firing", 4*time.Second)
+	if d := at.Sub(start); d < 800*time.Millisecond {
+		t.Errorf("fired after %s, FOR is 1s", d)
+	}
+	// Reminders while it stays firing (REPEAT 1s), marked as such.
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) && h.count("hot", "s1", "firing") < 3 {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if n := h.count("hot", "s1", "firing"); n < 3 {
+		t.Fatalf("expected the alert and 2 reminders, got %d notifications", n)
+	}
+	h.mu.Lock()
+	first, second := h.got[0], h.got[1]
+	h.mu.Unlock()
+	if first["labels"].(map[string]any)["reminder"] != nil || second["labels"].(map[string]any)["reminder"] != "true" || !strings.HasPrefix(second["message"].(string), "[reminder] ") {
+		t.Errorf("first=%v second=%v", first, second)
+	}
+	// A dip shorter than RESOLVE_FOR does not resolve it.
+	fd.send("s1", 20)
+	time.Sleep(500 * time.Millisecond)
+	fd.send("s1", 97)
+	time.Sleep(700 * time.Millisecond)
+	if n := h.count("hot", "s1", "resolved"); n != 0 {
+		t.Fatalf("resolved during a short dip")
+	}
+	// A real recovery resolves after RESOLVE_FOR.
+	rec := time.Now()
+	fd.send("s1", 20)
+	at = h.find(t, "hot", "s1", "resolved", 4*time.Second)
+	if d := at.Sub(rec); d < 800*time.Millisecond {
+		t.Errorf("resolved after %s, RESOLVE_FOR is 1s", d)
+	}
+	reminders := queryCSV(t, root, "SELECT count(*) FROM bronze.duct_alerts WHERE state = 'reminder'")
+	if strings.TrimSpace(strings.TrimPrefix(reminders, "count_star()\n")) == "0" {
+		t.Errorf("reminders not recorded in Bronze: %q", reminders)
+	}
+}
+
+// TestAlertsSilences: a silence mutes notifications (firing, reminders and
+// resolved) of a rule or one key, is recorded in Bronze, shows in `status`
+// and ends by itself or with `unsilence`; the state keeps tracking meanwhile.
+func TestAlertsSilences(t *testing.T) {
+	root, h, url := alertsProject(t, ruleWith("-- REPEAT 1s\n"))
+	if out, errs, code := duct(t, "alerts", "silence", "nope", "--for", "1h", "--reason", "x", "--project", root); code == 0 {
+		t.Fatalf("silencing an unknown rule worked: %s %s", out, errs)
+	}
+	if _, _, code := duct(t, "alerts", "silence", "hot", "--project", root); code == 0 {
+		t.Error("silence without --for/--reason accepted")
+	}
+	out := mustDuct(t, "alerts", "silence", "hot", "--key", "s1", "--for", "1h", "--reason", "mantención planta", "--project", root)
+	if !strings.Contains(out, "silenced hot [s1]") {
+		t.Fatalf("silence: %q", out)
+	}
+	fd, stop := startAlerts(t, root, url)
+	defer stop()
+	fd.send("s1", 20)
+	fd.send("s2", 20)
+	time.Sleep(400 * time.Millisecond)
+	fd.send("s1", 95) // silenced
+	fd.send("s2", 95) // not
+	h.find(t, "hot", "s2", "firing", 3*time.Second)
+	time.Sleep(2500 * time.Millisecond) // s1 stays firing for 2 reminder periods, silently
+	if n := h.count("hot", "s1", "firing"); n != 0 {
+		t.Errorf("silenced key notified %d times", n)
+	}
+	status := mustDuct(t, "alerts", "status", "--project", root)
+	if !strings.Contains(status, "SILENCED") || !strings.Contains(status, "mantención planta") || !strings.Contains(status, "hot [s1]") {
+		t.Errorf("status: %s", status)
+	}
+	if lst := mustDuct(t, "alerts", "silences", "--project", root); !strings.Contains(lst, "hot") || !strings.Contains(lst, "s1") {
+		t.Errorf("silences: %s", lst)
+	}
+	// Resolved while silenced: nothing sent either, but recorded.
+	fd.send("s1", 20)
+	time.Sleep(600 * time.Millisecond)
+	if n := h.count("hot", "s1", "resolved"); n != 0 {
+		t.Errorf("silenced resolved was sent")
+	}
+	var rec string
+	waitFor(t, "the silenced transitions in Bronze", 20*time.Second, func() bool {
+		rec = queryCSV(t, root, "SELECT state, channels FROM bronze.duct_alerts WHERE alert_key = 's1' ORDER BY occurred_at")
+		return strings.Contains(rec, "firing,silenced #") && strings.Contains(rec, "resolved,silenced #")
+	})
+	if !strings.Contains(rec, "firing,silenced #") || !strings.Contains(rec, "resolved,silenced #") {
+		t.Errorf("silenced transitions not recorded:\n%s", rec)
+	}
+	// Lifting the silence: the next alert is delivered.
+	id := strings.Fields(strings.TrimSpace(mustDuct(t, "alerts", "silences", "--project", root)))[0]
+	if o := mustDuct(t, "alerts", "unsilence", id, "--project", root); !strings.Contains(o, "removed") {
+		t.Errorf("unsilence: %q", o)
+	}
+	fd.send("s1", 96)
+	h.find(t, "hot", "s1", "firing", 3*time.Second)
+}
+
+// TestAlertsActiveActive: two instances watching the same data (as two
+// consumer groups would) notify each transition exactly once; when the
+// instance that holds an alert dies, the other one takes it over and resolves it.
+func TestAlertsActiveActive(t *testing.T) {
+	root, h, url := alertsProject(t, ruleWith("-- REPEAT 1s\n"))
+	fa, stopA := startAlertsAs(t, root, url, "a", 3*time.Second)
+	fb, stopB := startAlertsAs(t, root, url, "b", 3*time.Second)
+	defer stopB()
+	stoppedA := false
+	defer func() {
+		if !stoppedA {
+			stopA()
+		}
+	}()
+	both := func(sensor string, temp float64) { fa.send(sensor, temp); fb.send(sensor, temp) }
+	both("s1", 20)
+	time.Sleep(500 * time.Millisecond)
+	for i := range 4 { // fire, stay hot (reminders every 1s), several keys
+		both("s1", 95)
+		both(fmt.Sprintf("k%d", i), 91)
+		time.Sleep(100 * time.Millisecond)
+	}
+	h.find(t, "hot", "s1", "firing", 3*time.Second)
+	for i := range 4 {
+		h.find(t, "hot", fmt.Sprintf("k%d", i), "firing", 3*time.Second)
+	}
+	// ~2.5 s of reminders, both instances evaluating every 100 ms.
+	for range 25 {
+		both("s1", 95)
+		time.Sleep(100 * time.Millisecond)
+	}
+	if n := h.count("hot", "s1", "firing"); n < 1 || n > 4 {
+		t.Errorf("s1: %d notifications (1 firing + ~2 reminders expected, never doubled): %v", n, h.snapshot())
+	}
+	for i := range 4 {
+		k := fmt.Sprintf("k%d", i)
+		// the first notification is state firing and unlabelled; reminders carry the label
+		h.mu.Lock()
+		firsts := 0
+		for _, m := range h.got {
+			if m["rule"] == "hot" && m["key"] == k && m["state"] == "firing" && m["labels"].(map[string]any)["reminder"] == nil {
+				firsts++
+			}
+		}
+		h.mu.Unlock()
+		if firsts != 1 {
+			t.Errorf("%s: %d initial firing notifications", k, firsts)
+		}
+	}
+	// Recovery seen by both: one resolved.
+	both("s1", 20)
+	h.find(t, "hot", "s1", "resolved", 5*time.Second)
+	time.Sleep(1500 * time.Millisecond)
+	if n := h.count("hot", "s1", "resolved"); n != 1 {
+		t.Errorf("s1 resolved %d times", n)
+	}
+
+	// Failover: whoever holds k0 goes away; the survivor still tracks it and resolves it.
+	stopA()
+	stoppedA = true
+	both("k0", 20) // only b is listening (fa has no consumer anymore)
+	h.find(t, "hot", "k0", "resolved", 8*time.Second)
+	time.Sleep(1500 * time.Millisecond)
+	if n := h.count("hot", "k0", "resolved"); n != 1 {
+		t.Errorf("k0 resolved %d times after a failover", n)
+	}
+	if t.Failed() {
+		t.Logf("transitions:\n%s", queryCSV(t, root, "SELECT occurred_at, alert_key, state, channels FROM bronze.duct_alerts WHERE alert_key = 's1' ORDER BY occurred_at"))
+	}
+	rows := queryCSV(t, root, "SELECT alert_key, state, count(*) FROM bronze.duct_alerts WHERE state IN ('firing','resolved') GROUP BY ALL ORDER BY ALL")
+	for _, line := range strings.Split(strings.TrimSpace(rows), "\n")[1:] {
+		if !strings.HasSuffix(line, ",1") {
+			t.Errorf("Bronze has a duplicated transition: %s\n%s", line, rows)
+		}
+	}
 }

@@ -49,3 +49,27 @@ Estado: aceptada (2026-10-03)
 - **Límites.** Solo los tipos escalares de arriba (nada de DATE, DECIMAL, LIST…); las funciones
   son escalares (sin agregados ni tablas); `duct serve` registra las funciones al arrancar
   (reiniciar para recargar).
+
+## Implementado (2026-10-07): recarga, retención y ticks perdidos
+- **Recarga en caliente de `jobs/*.yaml`** en `duct serve`: se sondea la carpeta (hash del
+  contenido, 2 s), se parsea y valida el conjunto completo y `Orchestrator.Reload` cambia el
+  catálogo de jobs de forma atómica; un archivo inválido se registra y todo sigue como estaba.
+  Las corridas en curso terminan (las de un job borrado con su última definición conocida; las
+  tareas pendientes de un job editado toman los parámetros nuevos); un job nuevo o con otro
+  `schedule`/`timezone` empieza su cron desde ahora, los triggers de un job nuevo toman su línea
+  base en el siguiente sondeo (no disparan por lo que ya existe). Un servidor sin jobs
+  empieza a servirlos cuando aparece el primero. Evidencia: `TestJobsHotReload`.
+- **`catchup: none|last|all`** por job (por defecto `last`, esquema en `specs/jobs.schema.json`). El
+  último tick tratado se guarda en `duct_jobs_state` (`cron:<job>`) y al arrancar se retoma desde
+  ahí: `none` lo olvida; `last` lanza una corrida por el tick más reciente perdido (lo que ya hacía
+  la coalescencia en memoria, ahora también tras un reinicio); `all` lanza uno por tick perdido, del
+  más viejo al más nuevo y **de a uno** (espera a que termine la corrida activa), con tope de 100
+  ticks (se descartan los más viejos) y ninguno de más de 6 días (las claves de `duct_jobs_fires` se
+  guardan 7). La primera vez que corre un job no hay estado y no se repite nada. Con varias máquinas
+  cada tick sigue creando una sola corrida (la clave `cron:<job>:<tick>` de `duct_jobs_fires`); las
+  corridas de recuperación llevan `detail = catch-up`. Evidencia: `TestJobsCatchup` (dos servidores
+  sobre el mismo estado: `last` 1 corrida, `all` 4–6 en orden, `none` 0).
+- **Retención del historial:** `[jobs] history_retention = "30d"` (sin valor o `0` conserva todo)
+  borra corridas terminadas y sus intentos al arrancar, cada hora en `duct serve` y en `duct gc`
+  (`project.PruneJobsHistory`); nunca toca corridas en curso y las claves de disparo se guardan
+  al menos 7 días. Evidencia: `TestJobsHistoryRetention`.

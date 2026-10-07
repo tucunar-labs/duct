@@ -213,3 +213,111 @@ func TestSerialKeepsOrderPerKey(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRuleHysteresisDirectives(t *testing.T) {
+	r, err := ParseRule("r", "-- FOR 30s\n-- RESOLVE_FOR 2m\n-- REPEAT 1h\nSELECT 1 AS key")
+	if err != nil || r.For != 30*time.Second || r.ResolveFor != 2*time.Minute || r.Repeat != time.Hour {
+		t.Fatalf("rule = %+v err %v", r, err)
+	}
+	for name, src := range map[string]string{
+		"for zero":      "-- FOR 0s\nSELECT 1",
+		"for text":      "-- FOR soon\nSELECT 1",
+		"resolve neg":   "-- RESOLVE_FOR -1s\nSELECT 1",
+		"repeat fast":   "-- REPEAT 100ms\nSELECT 1",
+		"repeat twice":  "-- REPEAT 1m\n-- REPEAT 2m\nSELECT 1",
+		"for no value":  "-- FOR\nSELECT 1",
+		"resolve alone": "-- RESOLVE_FOR\nSELECT 1",
+	} {
+		if _, err := ParseRule("r", src); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+func TestTrackerForHoldsBackAndResetsOnABlip(t *testing.T) {
+	r, _ := ParseRule("r", "-- FOR 30s\nSELECT 1 AS key")
+	tr := NewTracker(r, nil)
+	t0 := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	if got := states(tr.Apply(at(0), hits("a"))); got != "" {
+		t.Fatalf("fired at once: %q", got)
+	}
+	tr.Apply(at(10), hits("a"))
+	// The condition goes away at 20 s: the clock starts over.
+	tr.Apply(at(20), nil)
+	tr.Apply(at(25), hits("a"))
+	if got := states(tr.Apply(at(50), hits("a"))); got != "" {
+		t.Fatalf("fired 25 s after the restart: %q", got)
+	}
+	ts := tr.Apply(at(56), hits("a"))
+	if got := states(ts); got != "firing:a" {
+		t.Fatalf("after FOR: %q", got)
+	}
+	if !ts[0].Since.Equal(at(25)) {
+		t.Errorf("since = %s, want the start of the condition (25 s)", ts[0].Since)
+	}
+	if tr.Len() != 1 {
+		t.Error("Len")
+	}
+	// An alert that never fired resolves silently (nothing was announced).
+	tr = NewTracker(r, nil)
+	tr.Apply(at(0), hits("b"))
+	if got := states(tr.Apply(at(5), nil)); got != "" {
+		t.Fatalf("a pending alert produced %q", got)
+	}
+}
+
+func TestTrackerResolveForRidesOutADip(t *testing.T) {
+	r, _ := ParseRule("r", "-- RESOLVE_FOR 10s\nSELECT 1 AS key")
+	tr := NewTracker(r, nil)
+	t0 := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	if got := states(tr.Apply(at(0), hits("a"))); got != "firing:a" {
+		t.Fatal(got)
+	}
+	if got := states(tr.Apply(at(5), nil)); got != "" {
+		t.Fatalf("resolved after a 0 s dip: %q", got)
+	}
+	tr.Apply(at(8), hits("a")) // it came back: the dip is forgotten
+	if got := states(tr.Apply(at(12), nil)); got != "" {
+		t.Fatalf("a new dip resolved at once: %q", got)
+	}
+	if got := states(tr.Apply(at(23), nil)); got != "resolved:a" {
+		t.Fatalf("after RESOLVE_FOR: %q", got)
+	}
+}
+
+func TestTrackerRepeat(t *testing.T) {
+	r, _ := ParseRule("r", "-- REPEAT 1h\nSELECT 1 AS key")
+	tr := NewTracker(r, nil)
+	t0 := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	if got := states(tr.Apply(t0, hits("a"))); got != "firing:a" {
+		t.Fatal(got)
+	}
+	if got := states(tr.Apply(t0.Add(59*time.Minute), hits("a"))); got != "" {
+		t.Fatalf("early reminder: %q", got)
+	}
+	ts := tr.Apply(t0.Add(61*time.Minute), hits("a"))
+	if got := states(ts); got != "reminder:a" || !ts[0].Since.Equal(t0) {
+		t.Fatalf("reminder: %q since %v", got, ts[0].Since)
+	}
+	// The next one is an hour after the reminder, not after the first alert.
+	if got := states(tr.Apply(t0.Add(2*time.Hour), hits("a"))); got != "" {
+		t.Fatalf("second reminder too soon: %q", got)
+	}
+	if got := states(tr.Apply(t0.Add(2*time.Hour+2*time.Minute), hits("a"))); got != "reminder:a" {
+		t.Fatalf("second reminder: %q", got)
+	}
+	// Resolved still resolves; a restart-seeded alert waits a full period.
+	if got := states(tr.Apply(t0.Add(3*time.Hour), nil)); got != "resolved:a" {
+		t.Fatal(got)
+	}
+	tr = NewTracker(r, []Firing{{Key: "a", Since: t0}})
+	if got := states(tr.Apply(t0.Add(5*time.Hour), hits("a"))); got != "" {
+		t.Fatalf("seeded without NotifiedAt reminded at once: %q", got)
+	}
+	tr = NewTracker(r, []Firing{{Key: "a", Since: t0, NotifiedAt: t0}})
+	if got := states(tr.Apply(t0.Add(5*time.Hour), hits("a"))); got != "reminder:a" {
+		t.Fatalf("seeded with NotifiedAt: %q", got)
+	}
+}

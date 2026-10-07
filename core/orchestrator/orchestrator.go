@@ -13,6 +13,7 @@ import (
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/project"
 )
 
 // Options configure an Orchestrator. Zero values mean the defaults.
@@ -33,6 +34,10 @@ type Options struct {
 	HeartbeatTTL time.Duration
 	// FileSettle: a file modified more recently than this is not "new" yet (default 2s).
 	FileSettle time.Duration
+	// HistoryRetention: finished runs (and their task attempts) older than this
+	// are deleted at start and hourly (0 keeps everything). `duct gc` applies
+	// the same setting.
+	HistoryRetention time.Duration
 	// Now is the clock of the cron scheduler (default time.Now).
 	Now func() time.Time
 	// Logger receives the operational log (default slog.Default()).
@@ -74,9 +79,7 @@ type Orchestrator struct {
 	eng      contract.Engine
 	st       *store
 	opt      Options
-	jobs     map[string]Job
-	names    []string
-	scheds   map[string]Schedule
+	cat      atomic.Pointer[catalog] // the jobs now defined; Reload swaps it
 	instance string
 	seq      atomic.Int64
 	log      *slog.Logger
@@ -88,6 +91,54 @@ type Orchestrator struct {
 
 	mu     sync.Mutex
 	cursor map[string]time.Time // next cron tick per job
+	known  map[string]Job       // every job ever loaded: runs in flight outlive an edit or removal
+}
+
+// catalog is an immutable set of validated jobs.
+type catalog struct {
+	jobs   map[string]Job
+	names  []string
+	scheds map[string]Schedule
+}
+
+func newCatalog(jobs []Job) (*catalog, error) {
+	c := &catalog{jobs: map[string]Job{}, scheds: map[string]Schedule{}}
+	for _, j := range jobs {
+		if err := j.Validate(); err != nil {
+			return nil, fmt.Errorf("job %s: %w", j.Name, err)
+		}
+		if _, dup := c.jobs[j.Name]; dup {
+			return nil, fmt.Errorf("job %s defined twice", j.Name)
+		}
+		c.jobs[j.Name] = j
+		c.names = append(c.names, j.Name)
+		if j.Schedule != "" {
+			sc, _ := ParseSchedule(j.Schedule, j.Timezone)
+			c.scheds[j.Name] = sc
+		}
+	}
+	sort.Strings(c.names)
+	return c, nil
+}
+
+// job returns the current definition of name, or the last one seen when it was
+// removed while a run of it was still going.
+func (o *Orchestrator) job(name string) (Job, bool) {
+	if j, ok := o.cat.Load().jobs[name]; ok {
+		return j, true
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	j, ok := o.known[name]
+	return j, ok
+}
+
+func (o *Orchestrator) remember(c *catalog) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for n, j := range c.jobs {
+		o.known[n] = j
+	}
 }
 
 // New validates the jobs and builds an orchestrator. The Duct tables must
@@ -97,26 +148,16 @@ func New(eng contract.Engine, jobs []Job, opt Options) (*Orchestrator, error) {
 	host, _ := os.Hostname()
 	o := &Orchestrator{
 		eng: eng, st: &store{eng: eng}, opt: opt, log: opt.Logger,
-		jobs: map[string]Job{}, scheds: map[string]Schedule{}, cursor: map[string]time.Time{},
+		cursor: map[string]time.Time{}, known: map[string]Job{},
 		instance: fmt.Sprintf("%s-%d-%s", host, os.Getpid(), randHex(3)),
 		kick:     make(chan struct{}, 1), sem: make(chan struct{}, opt.Workers), ready: make(chan struct{}),
 	}
-	for _, j := range jobs {
-		j := j
-		if err := j.Validate(); err != nil {
-			return nil, fmt.Errorf("job %s: %w", j.Name, err)
-		}
-		if _, dup := o.jobs[j.Name]; dup {
-			return nil, fmt.Errorf("job %s defined twice", j.Name)
-		}
-		o.jobs[j.Name] = j
-		o.names = append(o.names, j.Name)
-		if j.Schedule != "" {
-			sc, _ := ParseSchedule(j.Schedule, j.Timezone)
-			o.scheds[j.Name] = sc
-		}
+	c, err := newCatalog(jobs)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(o.names)
+	o.cat.Store(c)
+	o.remember(c)
 	return o, nil
 }
 
@@ -162,31 +203,133 @@ func (o *Orchestrator) fire(ctx context.Context, job Job, trigger, key string, s
 	return created, nil
 }
 
-// fireDue starts the runs of every cron job whose tick has come.
+// cronKey is the Duct state key holding the last cron tick of job that was
+// handled (fired, skipped or deliberately forgotten): where a restart resumes.
+func cronKey(job string) string { return "cron:" + job }
+
+func policyOf(j Job) string {
+	if j.Catchup == "" {
+		return CatchupLast
+	}
+	return j.Catchup
+}
+
+// initCursor sets where the cron loop of job resumes: right after the last
+// tick handled before (so ticks missed while nothing was running are seen
+// again, then dealt with by the catchup policy), or after now when the job is
+// new or its policy is none.
+func (o *Orchestrator) initCursor(ctx context.Context, j Job, sc Schedule, now time.Time) {
+	next := sc.Next(now)
+	if policyOf(j) != CatchupNone {
+		if v, ok, err := o.st.getState(ctx, cronKey(j.Name)); err == nil && ok {
+			if sec, err := strconv.ParseInt(v, 10, 64); err == nil {
+				next = sc.Next(time.Unix(sec, 0).UTC())
+			}
+		} else if err != nil {
+			o.log.Warn("cron cursor", "job", j.Name, "err", err)
+		}
+	}
+	o.mu.Lock()
+	o.cursor[j.Name] = next
+	o.mu.Unlock()
+}
+
+// dueTicks lists the ticks of sc from cursor up to now, oldest first, keeping
+// only the last max (and none older than CatchupHorizon). next is the cursor
+// after all of them.
+func dueTicks(sc Schedule, cursor, now time.Time, max int) (ticks []time.Time, next time.Time) {
+	if floor := now.Add(-CatchupHorizon); cursor.Before(floor) {
+		cursor = sc.Next(floor)
+	}
+	next = cursor
+	for !next.IsZero() && !next.After(now) {
+		ticks = append(ticks, next)
+		if len(ticks) > max {
+			ticks = ticks[1:]
+		}
+		next = sc.Next(next)
+	}
+	return ticks, next
+}
+
+// fireDue starts the runs of every cron job whose tick has come, and of the
+// ticks missed during downtime according to the job's catchup policy.
 func (o *Orchestrator) fireDue(ctx context.Context) {
 	now := o.now()
-	for _, name := range o.names {
-		sc, ok := o.scheds[name]
+	cat := o.cat.Load()
+	for _, name := range cat.names {
+		sc, ok := cat.scheds[name]
 		if !ok {
 			continue
 		}
+		job := cat.jobs[name]
 		o.mu.Lock()
-		tick, next, due := advance(sc, o.cursor[name], now)
-		o.cursor[name] = next
+		cur := o.cursor[name]
 		o.mu.Unlock()
+		if cur.IsZero() || cur.After(now) {
+			continue
+		}
+		active, err := o.st.activeRuns(ctx, name)
+		if err != nil {
+			o.log.Warn("cron", "job", name, "err", err)
+			continue
+		}
+		if policyOf(job) == CatchupAll {
+			if active > 0 {
+				continue // one at a time: the backlog waits
+			}
+			ticks, _ := dueTicks(sc, cur, now, MaxCatchup)
+			if len(ticks) == 0 {
+				continue
+			}
+			if dropped := o.skipped(cur, ticks[0], sc); dropped > 0 {
+				o.log.Warn("cron catch-up: ticks dropped (too many or too old)", "job", name, "dropped", dropped)
+			}
+			o.advanceTo(ctx, name, ticks[0], sc.Next(ticks[0]))
+			o.fireTick(ctx, job, ticks[0], len(ticks) > 1 || now.Sub(ticks[0]) > time.Minute)
+			continue
+		}
+		tick, next, due := advance(sc, cur, now)
 		if !due {
 			continue
 		}
-		if n, err := o.st.activeRuns(ctx, name); err != nil {
-			o.log.Warn("cron", "job", name, "err", err)
-			continue
-		} else if n > 0 {
+		o.advanceTo(ctx, name, tick, next)
+		if active > 0 {
 			o.log.Info("cron tick skipped: previous run still active", "job", name, "tick", tick)
 			continue
 		}
-		if _, err := o.fire(ctx, o.jobs[name], TriggerCron, "cron:"+name+":"+strconv.FormatInt(tick.Unix(), 10), tick, ""); err != nil && ctx.Err() == nil {
-			o.log.Warn("cron fire", "job", name, "err", err)
-		}
+		o.fireTick(ctx, job, tick, now.Sub(tick) > time.Minute)
+	}
+}
+
+// skipped counts the ticks between cursor and first that catch-up dropped.
+func (o *Orchestrator) skipped(cursor, first time.Time, sc Schedule) int {
+	n := 0
+	for c := cursor; !c.IsZero() && c.Before(first) && n < 1_000_000; c = sc.Next(c) {
+		n++
+	}
+	return n
+}
+
+// advanceTo moves the in-memory cursor and records the last handled tick.
+func (o *Orchestrator) advanceTo(ctx context.Context, job string, handled, next time.Time) {
+	o.mu.Lock()
+	o.cursor[job] = next
+	o.mu.Unlock()
+	if err := o.st.setState(ctx, cronKey(job), strconv.FormatInt(handled.Unix(), 10), o.now()); err != nil && ctx.Err() == nil {
+		o.log.Warn("cron cursor not saved", "job", job, "err", err)
+	}
+}
+
+func (o *Orchestrator) fireTick(ctx context.Context, job Job, tick time.Time, late bool) {
+	detail := ""
+	if late {
+		detail = "catch-up"
+	}
+	if created, err := o.fire(ctx, job, TriggerCron, "cron:"+job.Name+":"+strconv.FormatInt(tick.Unix(), 10), tick, detail); err != nil && ctx.Err() == nil {
+		o.log.Warn("cron fire", "job", job.Name, "err", err)
+	} else if created && late {
+		o.log.Info("cron catch-up", "job", job.Name, "tick", tick)
 	}
 }
 
@@ -197,9 +340,14 @@ func (o *Orchestrator) nextWake() time.Duration {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, n := range o.cursor {
-		if !n.IsZero() && n.Sub(now) < d {
-			d = n.Sub(now)
+		if n.IsZero() {
+			continue
 		}
+		w := n.Sub(now)
+		if w <= 0 {
+			w = 500 * time.Millisecond // a catch-up backlog waiting for the active run
+		}
+		d = min(d, w)
 	}
 	return max(d, 10*time.Millisecond)
 }
@@ -218,25 +366,26 @@ func sleep(ctx context.Context, d time.Duration) {
 // recorded as cancelled and Run returns once they stopped.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	now := o.now()
-	o.mu.Lock()
-	for name, sc := range o.scheds {
-		o.cursor[name] = sc.Next(now)
+	cat := o.cat.Load()
+	for _, name := range cat.names {
+		if sc, ok := cat.scheds[name]; ok {
+			o.initCursor(ctx, cat.jobs[name], sc, now)
+		}
 	}
-	o.mu.Unlock()
+	o.prune(ctx)
 	o.pollTriggers(ctx) // baselines
 	close(o.ready)
 
 	var loops sync.WaitGroup
-	if len(o.scheds) > 0 {
-		loops.Add(1)
-		go func() {
-			defer loops.Done()
-			for ctx.Err() == nil {
-				o.fireDue(ctx)
-				sleep(ctx, o.nextWake())
-			}
-		}()
-	}
+	// The cron loop always runs: Reload may bring the first schedule later.
+	loops.Add(1)
+	go func() {
+		defer loops.Done()
+		for ctx.Err() == nil {
+			o.fireDue(ctx)
+			sleep(ctx, o.nextWake())
+		}
+	}()
 	loops.Add(1)
 	go func() {
 		defer loops.Done()
@@ -248,7 +397,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 			if time.Since(last) > time.Hour {
 				last = time.Now()
-				_ = o.st.pruneFires(ctx, o.now().Add(-7*24*time.Hour))
+				o.prune(ctx)
 			}
 		}
 	}()
@@ -372,7 +521,7 @@ func (o *Orchestrator) reload(ctx context.Context, only int64) ([]TaskRow, error
 // process, whatever else is running, and returns the final run and tasks.
 // Cancelling ctx cancels the running tasks; the run ends as cancelled.
 func (o *Orchestrator) RunJob(ctx context.Context, name string) (RunRow, []TaskRow, error) {
-	job, ok := o.jobs[name]
+	job, ok := o.cat.Load().jobs[name]
 	if !ok {
 		return RunRow{}, nil, fmt.Errorf("no job %q in %s/", name, Dir)
 	}
@@ -418,3 +567,69 @@ func (o *Orchestrator) RunJob(ctx context.Context, name string) (RunRow, []TaskR
 	}
 	return run, tasks, ctx.Err()
 }
+
+// prune deletes what is old: the fire keys (7 days) and, with a retention
+// configured, finished runs and their attempts.
+func (o *Orchestrator) prune(ctx context.Context) {
+	if err := o.st.pruneFires(ctx, o.now().Add(-fireKeepFor)); err != nil && ctx.Err() == nil {
+		o.log.Warn("prune fires", "err", err)
+	}
+	if o.opt.HistoryRetention > 0 {
+		n, err := project.PruneJobsHistory(ctx, o.eng, o.now().Add(-o.opt.HistoryRetention))
+		switch {
+		case err != nil && ctx.Err() == nil:
+			o.log.Warn("jobs history retention", "err", err)
+		case n > 0:
+			o.log.Info("jobs history pruned", "runs", n, "older_than", o.opt.HistoryRetention)
+		}
+	}
+}
+
+// fireKeepFor is how long fire keys are kept (CatchupHorizon must stay below).
+const fireKeepFor = 7 * 24 * time.Hour
+
+// Reload swaps in a new set of jobs while running (hot reload of jobs/*.yaml).
+// The whole set is validated first; on error nothing changes. Runs in flight
+// finish (a removed job's runs with its last known definition; an edited job's
+// remaining tasks take the new parameters). A new job, or one whose schedule
+// changed, starts its cron from now; a job whose schedule did not change keeps
+// its cursor. Triggers of a new job take their baseline on the next poll, so
+// existing snapshots or files never start a run.
+func (o *Orchestrator) Reload(ctx context.Context, jobs []Job) error {
+	c, err := newCatalog(jobs)
+	if err != nil {
+		return err
+	}
+	old := o.cat.Load()
+	now := o.now()
+	o.remember(c)
+	o.cat.Store(c)
+	o.mu.Lock()
+	for name := range o.cursor {
+		if _, ok := c.scheds[name]; !ok {
+			delete(o.cursor, name)
+		}
+	}
+	o.mu.Unlock()
+	for _, name := range c.names {
+		sc, ok := c.scheds[name]
+		if !ok {
+			continue
+		}
+		j := c.jobs[name]
+		if prev, had := old.jobs[name]; had && prev.Schedule == j.Schedule && prev.Timezone == j.Timezone {
+			continue
+		}
+		next := sc.Next(now)
+		o.mu.Lock()
+		o.cursor[name] = next
+		o.mu.Unlock()
+		// Handled up to now: a restart does not replay ticks of the old schedule.
+		_ = o.st.setState(ctx, cronKey(name), strconv.FormatInt(now.Unix(), 10), now)
+	}
+	o.wake()
+	return nil
+}
+
+// JobNames lists the jobs currently loaded.
+func (o *Orchestrator) JobNames() []string { return append([]string(nil), o.cat.Load().names...) }

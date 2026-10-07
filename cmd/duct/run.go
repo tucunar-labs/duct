@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/alonsoburon/duct/core/contracts"
 	"github.com/alonsoburon/duct/core/pipeline"
@@ -48,6 +49,9 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	if _, err := project.Migrate(ctx, eng); err != nil {
 		return err
 	}
+	ca := newCLIAudit(p, eng)
+	defer ca.close()
+	start := time.Now()
 	ref, err := contracts.RunPipeline(ctx, eng, p.Root, tables, pipeline.Options{Targets: targets, Only: *only})
 	rep := ref.Report
 	if rep != nil {
@@ -59,12 +63,29 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	for _, w := range ref.Warnings {
 		_, _ = fmt.Fprintf(stderr, "warning: %s\n", w)
 	}
-	if err != nil {
+	desc := "duct run"
+	if *only {
+		desc += " --only"
+	}
+	if len(targets) > 0 {
+		desc += " " + strings.Join(targets, " ")
+	}
+	var rows int64
+	if rep != nil {
+		for _, r := range rep.Results {
+			rows += int64(r.Rows)
+		}
+	}
+	switch {
+	case err != nil:
+		ca.record(desc, start, rows, err)
+		return err
+	case rep.Failed():
+		err = errors.New("run finished with failures")
+		ca.record(desc, start, rows, err)
 		return err
 	}
-	if rep.Failed() {
-		return errors.New("run finished with failures")
-	}
+	ca.record(desc, start, rows, nil)
 	return nil
 }
 

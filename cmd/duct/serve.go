@@ -164,12 +164,12 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	defer func() { _ = handler.Close() }()
 	auth := governance.NewStore(eng)
 	// The semantic model also serves dashboards (web) through the handler.
-	switch m, err := semantic.LoadDir(filepath.Join(p.Root, semanticDirName)); {
-	case err == nil:
-		handler.SetSemanticModel(m)
-	case errors.Is(err, semantic.ErrNoModel):
-	default:
+	live, err := semantic.NewLive(filepath.Join(p.Root, semanticDirName))
+	if err != nil {
 		return fmt.Errorf("semantic model: %w", err)
+	}
+	if m := live.Model(); m != nil {
+		handler.SetSemanticModel(m)
 	}
 
 	modCfg := func(name string) contract.Config {
@@ -185,6 +185,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 			if _, ok := cfg["semantic_dir"]; !ok {
 				cfg["semantic_dir"] = filepath.Join(p.Root, semanticDirName)
 			}
+			cfg["semantic_live"] = live // reloaded in place by startSemantic
 		}
 		if name == "web" { // dashboards/*.yaml live in the project
 			if _, ok := cfg["dashboards_dir"]; !ok {
@@ -248,10 +249,14 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	if err != nil {
 		return fmt.Errorf("jobs: %w", err)
 	}
+	semanticDone := startSemantic(sctx, p, live, handler)
 	streamingDone := func() error { return nil }
 	if !opt.NoStream {
 		streamingDone = startStreaming(sctx, cancel, p) // [stream] / [alerts] in duct.toml
 	}
+	// Audit retention and export outlive the protocols: they stop after the
+	// last audit record is flushed (below), so the final export is complete.
+	auditStop, auditDone := startAuditMaintenance(ctx, p, eng)
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -274,6 +279,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	}
 	wg.Wait()
 	cancel()
+	semanticDone()
 	<-jobsDone // running tasks are cancelled and recorded before the engine closes
 	if err := streamingDone(); err != nil && firstErr == nil {
 		firstErr = err
@@ -282,5 +288,24 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer fcancel()
 	_ = handler.FlushAudit(fctx)
+	auditStop()
+	<-auditDone
 	return firstErr
+}
+
+// startAuditMaintenance runs [audit] retention (hourly) and export (every
+// minute) inside `duct serve`. The returned stop ends it after one last export.
+func startAuditMaintenance(ctx context.Context, p *project.Project, eng contract.Engine) (stop func(), done <-chan struct{}) {
+	ch := make(chan struct{})
+	ret, err := p.Config.Audit.RetentionDuration()
+	if err != nil || (ret <= 0 && !p.Config.Audit.Export) {
+		close(ch)
+		return func() {}, ch
+	}
+	mctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	go func() {
+		defer close(ch)
+		governance.RunAuditMaintenance(mctx, eng, governance.MaintenanceOptions{Retention: ret, Export: p.Config.Audit.Export})
+	}()
+	return cancel, ch
 }

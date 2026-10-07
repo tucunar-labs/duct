@@ -39,10 +39,23 @@ alerta activa se carga del estado y no se repite mientras siga disparada; si el 
 el aviso y el guardado, se repite una vez), pero no perderlo. Un canal caído no bloquea a los
 demás ni al registro: queda `delivered = false` con el error.
 
+## Histéresis, recordatorios, silencios (2026-10-07)
+`-- FOR`, `-- RESOLVE_FOR`, `-- REPEAT` viven en el `Tracker` (relojes en memoria). Los silencios
+(`duct_alert_silences`) se consultan al entregar (`deliver`): no se envía a los canales, el estado
+avanza y Bronze guarda `silenced #id`. CLI: `duct alerts status|silences|silence|unsilence`.
+
+## Activo/activo (`coord.go`)
+Un lease por (regla, clave) en `duct_alert_state` (status `firing_pending|firing|resolving`, titular,
+`lease_until_us`, `seen_by/seen_at_us`, `notified_at_us`, `claim`). Las reclamaciones corren **dentro de
+la cola serial de la alerta** (`handle`), así un `resolved` en vuelo no se confunde con "ya disparada".
+Reglas: disparar = `INSERT` (PK); recordatorio = `UPDATE` + token; resolver = `UPDATE` a `resolving` +
+token, bloqueado si otra instancia confirmó después de mi última lectura; `Confirm` cada `ttl/3`;
+barrido de huérfanas cada `ttl` (sin confirmar por `max(4·ttl, 60 s)`); lápida `duct_alert_resolved`. Las columnas de tiempo nuevas son
+`BIGINT` (el scanner SQLite de DuckDB no hace `UPDATE` de `TIMESTAMP` agregados con `ALTER`).
+
 ## Límites conocidos
-Sin `FOR`/histéresis (una lectura ruidosa alterna firing/resolved: usar una ventana en la regla),
-sin recordatorios periódicos, sin silencios. Varias instancias comparten el estado de
-`duct.duct_alert_state` sin coordinación: no hay failover activo/activo probado.
+Los relojes de `FOR`/`RESOLVE_FOR`/`REPEAT` no se persisten (un reinicio los reinicia). Con nombre de
+instancia aleatorio, resolver una alerta despejada durante una caída espera hasta un lease.
 
 Tests: `core/alerts/alerts_test.go` (reglas, máquina de estados), `cmd/duct/alerts_test.go`
 (Runner con consumidor falso), `test/integration/stream_kafka_test.go` (Kafka real).

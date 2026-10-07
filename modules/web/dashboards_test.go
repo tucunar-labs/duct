@@ -34,6 +34,14 @@ type fakeSem struct {
 	deny     bool
 	reqs     []contract.SemanticRequest
 	who      []contract.Identity
+	audits   []contract.AuditRecord
+}
+
+// Audit makes fakeSem a contract.Auditor, to see what the cache reports.
+func (f *fakeSem) Audit(_ context.Context, rec contract.AuditRecord) {
+	f.smu.Lock()
+	f.audits = append(f.audits, rec)
+	f.smu.Unlock()
 }
 
 func (f *fakeSem) LakeSnapshot(context.Context) (string, error) {
@@ -439,6 +447,18 @@ func TestDashboardCacheBySnapshot(t *testing.T) {
 	e.data("ventas", sig, tok)
 	if n2 := len(e.sem.calls()); n2 != n1 {
 		t.Fatalf("same snapshot, same request: %d new queries (want cache hits)", n2-n1)
+	}
+	// Every hit is reported to the audit log as a cached, successful statement.
+	e.sem.smu.Lock()
+	hits := append([]contract.AuditRecord(nil), e.sem.audits...)
+	e.sem.smu.Unlock()
+	if len(hits) != 3 {
+		t.Fatalf("audit records for cache hits: %d, want 3 (one per chart)", len(hits))
+	}
+	for _, h := range hits {
+		if !h.Cached || h.Err != "" || h.User == "" || h.Role == "" || !strings.HasPrefix(h.SQL, "-- semantic query (cache hit)") || h.Duration < 0 {
+			t.Errorf("bad cache-hit audit record: %+v", h)
+		}
 	}
 	// A different request is a different key.
 	sig2 := map[string]any{"f_region": "CL", "f_periodo_from": "", "f_periodo_to": "", "cross": "{}", "ev": ""}

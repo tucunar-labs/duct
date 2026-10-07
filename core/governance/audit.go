@@ -2,6 +2,8 @@ package governance
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/metrics"
+	"github.com/alonsoburon/duct/core/project"
 )
 
 // AuditTable is the Duct-owned table with one row per audited statement.
@@ -25,6 +28,8 @@ type auditLog struct {
 	done chan struct{}
 	mu   sync.Mutex
 	shut bool
+	// quiet logs write failures at debug level (local CLI rows).
+	quiet bool
 }
 
 type auditItem struct {
@@ -69,6 +74,8 @@ func observe(rec contract.AuditRecord) {
 
 func (a *auditLog) add(rec contract.AuditRecord) {
 	observe(rec)
+	rec.SQL = RedactSQL(rec.SQL)
+	rec.Err = RedactSQL(rec.Err)
 	if len(rec.SQL) > maxAuditSQL {
 		rec.SQL = rec.SQL[:maxAuditSQL] + "…"
 	}
@@ -84,31 +91,108 @@ func (a *auditLog) add(rec contract.AuditRecord) {
 	}
 }
 
+// cacheAuditWindow is how long cache-hit records with the same user, role,
+// protocol and statement are coalesced into one row (hits = how many). A
+// dashboard that refreshes every few seconds therefore writes at most one row
+// per widget and viewer per window instead of one per refresh.
+var cacheAuditWindow = time.Minute
+
+// maxPendingCached bounds the coalescing map; beyond it everything is written.
+const maxPendingCached = 10000
+
+type cachedAgg struct {
+	rec  contract.AuditRecord
+	hits int64
+	dur  time.Duration
+}
+
 func (a *auditLog) run() {
 	defer close(a.done)
-	for it := range a.in {
-		if it.flush != nil {
-			close(it.flush)
-			continue
-		}
-		r := it.rec
-		status := "ok"
-		if r.Err != "" {
-			status = "error"
-			if len(r.Err) >= 17 && r.Err[:17] == "permission denied" {
-				status = "denied"
+	pending := map[string]*cachedAgg{}
+	writePending := func(all bool) {
+		now := time.Now()
+		for k, c := range pending {
+			if !all && now.Sub(c.rec.At) < cacheAuditWindow {
+				continue
 			}
+			c.rec.Hits = c.hits
+			c.rec.Duration = c.dur / time.Duration(c.hits)
+			a.write(c.rec)
+			delete(pending, k)
 		}
-		var errText any
-		if r.Err != "" {
-			errText = r.Err
+	}
+	tick := cacheAuditWindow / 4
+	if tick < 10*time.Millisecond {
+		tick = 10 * time.Millisecond
+	}
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	for {
+		select {
+		case it, ok := <-a.in:
+			if !ok {
+				writePending(true)
+				return
+			}
+			switch {
+			case it.flush != nil:
+				writePending(true)
+				close(it.flush)
+			case it.rec.Cached:
+				r := it.rec
+				h := max(r.Hits, 1)
+				key := r.User + "\x00" + r.Role + "\x00" + r.Protocol + "\x00" + r.SQL
+				if c, ok := pending[key]; ok {
+					c.hits += h
+					c.dur += r.Duration * time.Duration(h)
+				} else {
+					pending[key] = &cachedAgg{rec: r, hits: h, dur: r.Duration * time.Duration(h)}
+				}
+				if len(pending) >= maxPendingCached {
+					writePending(true)
+				}
+			default:
+				a.write(it.rec)
+			}
+		case <-ticker.C:
+			writePending(false)
 		}
-		err := retryLocked(func() error {
-			return a.eng.Exec(context.Background(),
-				`INSERT INTO `+AuditTable+` (occurred_at, user_name, role, protocol, sql_text, duration_ms, rows_returned, status, error) VALUES (CAST(? AS TIMESTAMP), ?, ?, ?, ?, ?, ?, ?, ?)`,
-				r.At.UTC().Format("2006-01-02 15:04:05.000000"), r.User, r.Role, r.Protocol, r.SQL, r.Duration.Milliseconds(), r.Rows, status, errText)
-		})
-		if err != nil {
+	}
+}
+
+func newAuditID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// write stores one record. occurred_at goes in as fixed-width text (see
+// project.AuditTimeLayout): a TIMESTAMP on Postgres, text on SQLite.
+func (a *auditLog) write(r contract.AuditRecord) {
+	status := "ok"
+	if r.Err != "" {
+		status = "error"
+		if strings.HasPrefix(r.Err, "permission denied") {
+			status = "denied"
+		}
+	}
+	var errText any
+	if r.Err != "" {
+		errText = r.Err
+	}
+	hits := r.Hits
+	if hits < 1 {
+		hits = 1
+	}
+	err := retryLocked(func() error {
+		return a.eng.Exec(context.Background(),
+			`INSERT INTO `+AuditTable+` (occurred_at, user_name, role, protocol, sql_text, duration_ms, rows_returned, status, error, audit_id, cached, hits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.At.UTC().Format(project.AuditTimeLayout), r.User, r.Role, r.Protocol, r.SQL, r.Duration.Milliseconds(), r.Rows, status, errText, newAuditID(), r.Cached, hits)
+	})
+	if err != nil {
+		if a.quiet {
+			slog.Debug("audit write failed", "error", err)
+		} else {
 			slog.Error("audit write failed", "error", err)
 		}
 	}

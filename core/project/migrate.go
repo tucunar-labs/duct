@@ -17,6 +17,10 @@ type Migration struct {
 	Version int
 	Name    string
 	SQL     []string
+	// Before, if set, runs before SQL (outside its transaction) for work that
+	// is engine specific. It must be idempotent: when it fails the migration
+	// is not recorded and the whole thing runs again.
+	Before func(ctx context.Context, eng contract.Engine, alias string) error
 }
 
 // Migrations is the ordered list of Duct-owned schema changes.
@@ -260,6 +264,79 @@ var Migrations = []Migration{
 			)`,
 		},
 	},
+	{
+		// Audit log v2 (ADR 0007): audit_id (stable key for the export to the
+		// lake), cached/hits (dashboard cache hits, coalesced), a state table
+		// for the export watermark, and fixed-width occurred_at text on SQLite
+		// plus indexes (see auditBefore). NULL cached/hits mean false/1.
+		Version: 9,
+		Name:    "audit_v2",
+		Before:  auditBefore,
+		SQL: []string{
+			`ALTER TABLE duct.duct_audit ADD COLUMN audit_id VARCHAR`,
+			`ALTER TABLE duct.duct_audit ADD COLUMN cached BOOLEAN`,
+			`ALTER TABLE duct.duct_audit ADD COLUMN hits BIGINT`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_audit_state (
+				state_key VARCHAR PRIMARY KEY,
+				state_value VARCHAR NOT NULL,
+				updated_at TIMESTAMP NOT NULL
+			)`,
+		},
+	},
+	{
+		// Semantic preaggregates (ADR 0011): what is built in the lake schema
+		// semantic_cache for each role, and under which model, role views and
+		// lake snapshot, so a table is only used while all three still hold.
+		Version: 10,
+		Name:    "semantic_preagg",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_semantic_preagg (
+				role VARCHAR NOT NULL,
+				preagg VARCHAR NOT NULL,
+				table_name VARCHAR NOT NULL,
+				definition_hash VARCHAR NOT NULL,
+				views_hash VARCHAR NOT NULL,
+				source_snapshot BIGINT NOT NULL,
+				num_rows BIGINT NOT NULL,
+				built_at TIMESTAMP NOT NULL,
+				PRIMARY KEY (role, preagg)
+			)`,
+		},
+	},
+	{
+		// Alerts v2 (ADR 0009): coordination between several `duct alerts`
+		// instances (status/holder/lease/seen/notified/claim on the firing row),
+		// and silences. A NULL status is an alert persisted by an older version:
+		// firing and already notified. The instants are epoch microseconds in
+		// BIGINT columns: the SQLite scanner of DuckDB cannot UPDATE a TIMESTAMP
+		// column added by ALTER TABLE.
+		Version: 11,
+		Name:    "alerts_v2",
+		SQL: []string{
+			`ALTER TABLE duct.duct_alert_state ADD COLUMN status VARCHAR`,
+			`ALTER TABLE duct.duct_alert_state ADD COLUMN holder VARCHAR`,
+			`ALTER TABLE duct.duct_alert_state ADD COLUMN lease_until_us BIGINT`,
+			`ALTER TABLE duct.duct_alert_state ADD COLUMN seen_by VARCHAR`,
+			`ALTER TABLE duct.duct_alert_state ADD COLUMN seen_at_us BIGINT`,
+			`ALTER TABLE duct.duct_alert_state ADD COLUMN notified_at_us BIGINT`,
+			`ALTER TABLE duct.duct_alert_state ADD COLUMN claim VARCHAR`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_alert_resolved (
+				rule VARCHAR NOT NULL,
+				alert_key VARCHAR NOT NULL,
+				resolved_at_us BIGINT NOT NULL,
+				PRIMARY KEY (rule, alert_key)
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_alert_silences (
+				id BIGINT PRIMARY KEY,
+				rule VARCHAR NOT NULL,
+				alert_key VARCHAR NOT NULL,
+				reason VARCHAR NOT NULL,
+				created_by VARCHAR NOT NULL,
+				created_at TIMESTAMP NOT NULL,
+				expires_at TIMESTAMP NOT NULL
+			)`,
+		},
+	},
 }
 
 const createMigrations = `CREATE TABLE IF NOT EXISTS duct.duct_migrations (
@@ -298,6 +375,11 @@ func migrate(ctx context.Context, eng contract.Engine, list []Migration, alias s
 	for _, m := range list {
 		if done[m.Version] {
 			continue
+		}
+		if m.Before != nil {
+			if err := m.Before(ctx, eng, alias); err != nil {
+				return applied, fmt.Errorf("migration %d (%s): %w", m.Version, m.Name, err)
+			}
 		}
 		stmts := make([]string, 0, len(m.SQL)+1)
 		for _, s := range m.SQL {

@@ -13,10 +13,14 @@ var ErrNoSemanticModel = errors.New("no semantic model")
 // of = != < <= > >= in not_in like not_like between is_null is_not_null; Value
 // is a scalar, a []any for in/not_in or a [low, high] []any for between. It is
 // never SQL.
+//
+// Set Field to filter rows (WHERE) or Metric to filter groups by the value of
+// a metric (HAVING; like/not_like do not apply); never both.
 type SemanticFilter struct {
-	Field string
-	Op    string
-	Value any
+	Field  string
+	Op     string
+	Value  any
+	Metric string
 }
 
 // SemanticOrder sorts by a requested dimension or measure.

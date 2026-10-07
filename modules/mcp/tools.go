@@ -38,7 +38,7 @@ type tools struct {
 func newTools(s *Server, h contract.QueryHandler) *sdk.Server {
 	t := &tools{s: s, h: h}
 	srv := sdk.NewServer(&sdk.Implementation{Name: "duct", Version: "0.1"}, &sdk.ServerOptions{Instructions: instructions})
-	if s.model != nil {
+	if s.model() != nil {
 		sdk.AddTool(srv, &sdk.Tool{
 			Name:        "list_metrics",
 			Description: "List the metrics the caller can compute, with description, ai_context and the dimensions (dataset.field) each can be grouped or filtered by.",
@@ -134,7 +134,12 @@ func (t *tools) listMetrics(ctx context.Context, req *sdk.CallToolRequest, _ emp
 		t.audit(ctx, id, "mcp list_metrics", start, 0, err)
 		return nil, listOut{}, err
 	}
-	out := listOut{Metrics: t.s.model.ListMetrics(sc)}
+	m, err := t.model()
+	if err != nil {
+		t.audit(ctx, id, "mcp list_metrics", start, 0, err)
+		return nil, listOut{}, err
+	}
+	out := listOut{Metrics: m.ListMetrics(sc)}
 	t.audit(ctx, id, "mcp list_metrics", start, int64(len(out.Metrics)), nil)
 	return nil, out, nil
 }
@@ -158,7 +163,12 @@ func (t *tools) describe(ctx context.Context, req *sdk.CallToolRequest, in descr
 		t.audit(ctx, id, desc, start, 0, err)
 		return nil, semantic.ModelInfo{}, err
 	}
-	info := t.s.model.Describe(sc)
+	m, err := t.model()
+	if err != nil {
+		t.audit(ctx, id, desc, start, 0, err)
+		return nil, semantic.ModelInfo{}, err
+	}
+	info := m.Describe(sc)
 	if in.Name != "" {
 		if info, err = narrow(info, in.Name); err != nil {
 			t.audit(ctx, id, desc, start, 0, err)
@@ -198,9 +208,10 @@ func narrow(info semantic.ModelInfo, name string) (semantic.ModelInfo, error) {
 }
 
 type filterIn struct {
-	Field string `json:"field" jsonschema:"dimension as dataset.field, or the bare field name when unambiguous"`
-	Op    string `json:"op" jsonschema:"one of = != < <= > >= in not_in like not_like between is_null is_not_null"`
-	Value any    `json:"value,omitempty" jsonschema:"string, number or boolean; a list for in/not_in; [low, high] for between; omit for is_null/is_not_null"`
+	Field  string `json:"field,omitempty" jsonschema:"dimension as dataset.field, or the bare field name when unambiguous (filters rows, before aggregating)"`
+	Metric string `json:"metric,omitempty" jsonschema:"instead of field: a metric name; keeps the groups whose metric satisfies the condition (HAVING; like/not_like do not apply)"`
+	Op     string `json:"op" jsonschema:"one of = != < <= > >= in not_in like not_like between is_null is_not_null"`
+	Value  any    `json:"value,omitempty" jsonschema:"string, number or boolean; a list for in/not_in; [low, high] for between; omit for is_null/is_not_null"`
 }
 
 type orderIn struct {
@@ -239,7 +250,7 @@ func (t *tools) queryMetrics(ctx context.Context, req *sdk.CallToolRequest, in q
 	desc := "mcp query_metrics " + string(raw)
 	sr := semantic.Request{Dims: in.Dims, Measures: in.Measures, Limit: in.Limit}
 	for _, f := range in.Filters {
-		sr.Filters = append(sr.Filters, semantic.Filter{Field: f.Field, Op: f.Op, Value: f.Value})
+		sr.Filters = append(sr.Filters, semantic.Filter{Field: f.Field, Metric: f.Metric, Op: f.Op, Value: f.Value})
 	}
 	for _, o := range in.Order {
 		sr.Order = append(sr.Order, semantic.Order{By: o.By, Desc: o.Desc})
@@ -249,7 +260,17 @@ func (t *tools) queryMetrics(ctx context.Context, req *sdk.CallToolRequest, in q
 		t.audit(ctx, id, desc, start, 0, err)
 		return nil, queryOut{}, err
 	}
-	c, err := t.s.model.Query(sc, sr)
+	// The handler compiles and runs it when it can (preaggregates, audit);
+	// otherwise compile here and run the SQL through the guard.
+	if sq, ok := t.h.(contract.SemanticQuerier); ok {
+		return t.viaQuerier(ctx, sq, id, in, desc, start)
+	}
+	m, err := t.model()
+	if err != nil {
+		t.audit(ctx, id, desc, start, 0, err)
+		return nil, queryOut{}, err
+	}
+	c, err := m.Query(sc, sr)
 	if err != nil {
 		t.audit(ctx, id, desc, start, 0, err)
 		return nil, queryOut{}, err
@@ -261,6 +282,38 @@ func (t *tools) queryMetrics(ctx context.Context, req *sdk.CallToolRequest, in q
 	}
 	out := queryOut{Rows: rows, RowCount: len(rows), SQL: c.SQL}
 	for _, col := range c.Columns {
+		out.Columns = append(out.Columns, columnOut{Name: col.Name, Kind: col.Kind, Datatype: col.Datatype})
+	}
+	return nil, out, nil
+}
+
+// model is the current semantic model, or an error when it was removed.
+func (t *tools) model() (*semantic.Model, error) {
+	if m := t.s.model(); m != nil {
+		return m, nil
+	}
+	return nil, errors.New("no semantic model: semantic/*.ossie.yaml was removed")
+}
+
+func (t *tools) viaQuerier(ctx context.Context, sq contract.SemanticQuerier, id contract.Identity, in queryIn, desc string, start time.Time) (*sdk.CallToolResult, queryOut, error) {
+	req := contract.SemanticRequest{Dims: in.Dims, Measures: in.Measures, Limit: in.Limit}
+	for _, f := range in.Filters {
+		req.Filters = append(req.Filters, contract.SemanticFilter{Field: f.Field, Metric: f.Metric, Op: f.Op, Value: f.Value})
+	}
+	for _, o := range in.Order {
+		req.Order = append(req.Order, contract.SemanticOrder{By: o.By, Desc: o.Desc})
+	}
+	res, err := sq.SemanticQuery(ctx, id, req)
+	if err != nil {
+		t.audit(ctx, id, desc, start, 0, err)
+		return nil, queryOut{}, err
+	}
+	rows, _, err := collect(res.Stream, 0)
+	if err != nil {
+		return nil, queryOut{}, err
+	}
+	out := queryOut{Rows: rows, RowCount: len(rows), SQL: res.SQL}
+	for _, col := range res.Columns {
 		out.Columns = append(out.Columns, columnOut{Name: col.Name, Kind: col.Kind, Datatype: col.Datatype})
 	}
 	return nil, out, nil
@@ -300,6 +353,11 @@ func runQuery(ctx context.Context, h contract.QueryHandler, id contract.Identity
 	if err != nil {
 		return nil, nil, err
 	}
+	return collect(st, max)
+}
+
+// collect reads up to max rows (0 = all) of st and releases it.
+func collect(st contract.Stream, max int) ([][]any, []string, error) {
 	defer st.Release()
 	var cols []string
 	for _, f := range st.Schema().Fields() {

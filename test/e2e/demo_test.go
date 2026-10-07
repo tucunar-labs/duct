@@ -5,7 +5,6 @@
 package e2e
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -74,6 +73,7 @@ type cli struct {
 	bin  string
 	root string
 	env  []string
+	srv  *server // set once serveWeb started one (failure messages carry its log)
 }
 
 // run executes `duct <args> --project root` (or without it for init) and returns
@@ -335,58 +335,18 @@ func TestDemo(t *testing.T) {
 		}
 		token := strings.TrimSpace(c.must("token", "create", "--user", user, "--ttl", "1h"))
 
-		ctx, cancel := context.WithCancel(context.Background())
-		srv := exec.CommandContext(ctx, bin, "serve", "--project", demo, //nolint:gosec // test
-			"--listen", "pg=127.0.0.1:0", "--listen", "http=127.0.0.1:0", "--listen", "web=127.0.0.1:0")
-		srv.Dir = demo
-		pipe, err := srv.StdoutPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var srvErr bytes.Buffer
-		srv.Stderr = &srvErr
-		if err := srv.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			cancel()
-			done := make(chan struct{})
-			go func() { _ = srv.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(20 * time.Second):
-				_ = srv.Process.Kill()
-			}
-		})
-		addrs := map[string]string{}
-		ready := make(chan struct{})
-		go func() {
-			sc := bufio.NewScanner(pipe)
-			for sc.Scan() {
-				f := strings.Fields(sc.Text())
-				if len(f) == 4 && f[0] == "serving" {
-					addrs[f[1]] = f[3]
-					if len(addrs) == 3 {
-						close(ready)
-						break
-					}
-				}
-			}
-			_, _ = io.Copy(io.Discard, pipe)
-		}()
-		select {
-		case <-ready:
-		case <-time.After(90 * time.Second):
-			t.Fatalf("serve did not report 3 protocols (got %v)\nstderr: %s", addrs, srvErr.String())
-		}
-		t.Logf("serving: %v", addrs)
+		srv := startServer(t, bin, demo, 3, "--listen", "pg=127.0.0.1:0", "--listen", "http=127.0.0.1:0", "--listen", "web=127.0.0.1:0")
+		addrs := srv.addrs
 
 		t.Run("pg", func(t *testing.T) {
-			cctx, ccancel := context.WithTimeout(context.Background(), 60*time.Second)
+			cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer ccancel()
-			conn, err := pgx.Connect(cctx, fmt.Sprintf("postgres://%s:%s@%s/duct?sslmode=disable", user, demoPassword, addrs["pg"]))
-			if err != nil {
-				t.Fatal(err)
+			var conn *pgx.Conn
+			if err := retry(func() (err error) {
+				conn, err = pgx.Connect(cctx, fmt.Sprintf("postgres://%s:%s@%s/duct?sslmode=disable", user, demoPassword, addrs["pg"]))
+				return err
+			}); err != nil {
+				srv.failTf(t, "pg connect as %s: %v", user, err)
 			}
 			defer func() { _ = conn.Close(cctx) }()
 			q := func(sql string) ([][]any, error) {
@@ -423,11 +383,16 @@ func TestDemo(t *testing.T) {
 		t.Run("http", func(t *testing.T) {
 			do := func(sql, tok string) (int, string) {
 				req, _ := http.NewRequest("POST", "http://"+addrs["http"]+"/query", strings.NewReader(sql))
+				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(sql)), nil }
 				req.Header.Set("Authorization", "Bearer "+tok)
 				cl := http.Client{Timeout: 60 * time.Second}
-				resp, err := cl.Do(req)
-				if err != nil {
-					t.Fatal(err)
+				var resp *http.Response
+				if err := retry(func() (err error) {
+					req.Body, _ = req.GetBody()
+					resp, err = cl.Do(req)
+					return err
+				}); err != nil {
+					srv.failTf(t, "POST /query: %v", err)
 				}
 				defer func() { _ = resp.Body.Close() }()
 				b, _ := io.ReadAll(resp.Body)
