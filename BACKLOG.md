@@ -27,8 +27,9 @@ Hecho = los cinco pasos corren en `examples/demo/` como test e2e en CI.
       `channel-webhook`. Evidencia: `just check` verde.
 - [x] SDK Python `duct-data`. Evidencia: ruff, pyright strict, 12 tests.
 - [x] Herramientas con mise, depguard probado, hook de lefthook. Podman rootless + socket.
-- [ ] Primer commit (pendiente de revisión del usuario).
-- [ ] Repo en GitHub y CI corriendo (pendiente de autorización para publicar).
+- [x] Primer commit (`e498071`).
+- [x] Repos privados `alonsoburon/duct` y `alonsoburon/duckgres` (rama `duct`); CI verde
+      (`check` + `e2e`, con deploy key de solo lectura al fork y Postgres como servicio).
 - [ ] Probar los supuestos de riesgo antes de construir encima:
   - [x] `duckdb-go` + DuckLake con catálogo SQLite. Evidencia: e2e en `cmd/duct`.
     Base: **DuckDB 1.5.6**; la línea 2.0 de duckdb-go aún no carga `ducklake` (ADR 0002).
@@ -106,7 +107,6 @@ Pendientes conocidos para v0.2:
   procesos refrescan la misma tabla.
 - Sintaxis SQL para gobierno (`GRANT …`, `SET ROW FILTER`, `SET MASK` como sentencias).
 - Subir a DuckDB 2.0; `data_path` remoto en serve-pg; publicar el fork de duckgres.
-- Primer commit y repo en GitHub (pendiente del usuario).
 
 ## Después de v0.1 (sin orden aún)
 
