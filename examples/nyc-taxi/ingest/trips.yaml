@@ -1,0 +1,6 @@
+# Bronze: todos los Parquet mensuales de data/ (las columnas se unen por nombre).
+name: trips
+source: files
+options:
+  path: data/yellow_tripdata_*.parquet
+  format: parquet

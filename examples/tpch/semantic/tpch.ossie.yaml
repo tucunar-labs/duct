@@ -1,0 +1,51 @@
+version: 0.2.0.dev0
+name: tpch
+description: Ingresos de TPC-H (datos sintéticos de DuckDB tpch, sf=0.1), 1992-1998.
+ai_context:
+  instructions: Ingreso neto = precio extendido x (1 - descuento), en dólares ficticios. Los meses van de 1992-01 a 1998-08.
+datasets:
+  - name: sales
+    source: gold.revenue_by_nation
+    description: Ingresos por mes, segmento, región y nación.
+    fields:
+      - {name: month, expression: {dialects: [{dialect: ANSI_SQL, expression: "strftime(order_month, '%Y-%m')"}]}, dimension: {is_time: true}, description: Mes del pedido}
+      - {name: year, expression: {dialects: [{dialect: ANSI_SQL, expression: "strftime(order_month, '%Y')"}]}, dimension: {is_time: true}, description: Año del pedido, ai_context: {synonyms: [año]}}
+      - {name: segment, expression: {dialects: [{dialect: ANSI_SQL, expression: segment}]}, description: Segmento de mercado del cliente, ai_context: {synonyms: [segmento]}}
+      - {name: region, expression: {dialects: [{dialect: ANSI_SQL, expression: region}]}, description: Región del cliente, ai_context: {synonyms: [región]}}
+      - {name: nation, expression: {dialects: [{dialect: ANSI_SQL, expression: nation}]}, description: Nación del cliente, ai_context: {synonyms: [país, nación]}}
+      - {name: revenue_net, expression: {dialects: [{dialect: ANSI_SQL, expression: "revenue"}]}}
+      - {name: orders, expression: {dialects: [{dialect: ANSI_SQL, expression: orders}]}}
+      - {name: lines, expression: {dialects: [{dialect: ANSI_SQL, expression: lines}]}}
+  - name: customers
+    source: gold.top_customers
+    primary_key: [customer]
+    description: Los 100 clientes con más ingresos.
+    fields:
+      - {name: customer, expression: {dialects: [{dialect: ANSI_SQL, expression: customer}]}, description: Nombre del cliente (Customer#000000001)}
+      - {name: customer_segment, expression: {dialects: [{dialect: ANSI_SQL, expression: segment}]}}
+      - {name: customer_nation, expression: {dialects: [{dialect: ANSI_SQL, expression: nation}]}}
+      - {name: customer_region, expression: {dialects: [{dialect: ANSI_SQL, expression: region}]}}
+      - {name: customer_orders, expression: {dialects: [{dialect: ANSI_SQL, expression: orders}]}}
+      - {name: customer_revenue_raw, expression: {dialects: [{dialect: ANSI_SQL, expression: revenue}]}}
+metrics:
+  - name: revenue
+    description: Ingreso neto
+    datatype: Decimal
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(sales.revenue_net)"}]}
+    ai_context: {synonyms: [ingresos, ventas]}
+  - name: orders
+    description: Pedidos (suma de los pedidos de cada mes y nación)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(sales.orders)"}]}
+    ai_context: {synonyms: [pedidos]}
+  - name: lines
+    description: Líneas de pedido
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(sales.lines)"}]}
+  - name: revenue_per_order
+    description: Ingreso medio por pedido
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "revenue / orders"}]}
+  - name: top_customer_revenue
+    description: Ingreso neto de los 100 mejores clientes
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(customers.customer_revenue_raw)"}]}
+  - name: top_customer_orders
+    description: Pedidos de los 100 mejores clientes
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(customers.customer_orders)"}]}

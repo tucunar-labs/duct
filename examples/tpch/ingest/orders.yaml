@@ -1,0 +1,5 @@
+name: orders
+source: files
+options:
+  path: data/orders.parquet
+  format: parquet

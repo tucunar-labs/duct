@@ -1,0 +1,13 @@
+title: Pingüinos de Palmer
+description: Pico largo contra profundo, una especie por gráfico (cada punto es un pingüino), y promedios por isla.
+filters:
+  - {id: isla, label: Isla, type: multiselect, dimension: island}
+  - {id: sexo, label: Sexo, type: select, dimension: sex}
+charts:
+  - {id: total, title: Pingüinos, type: kpi, measures: [penguin_count], layout: {x: 0, y: 0, w: 3, h: 2}}
+  - {id: masa, title: Masa media (g), type: kpi, measures: [avg_body_mass], layout: {x: 3, y: 0, w: 3, h: 2}, options: {format: integer}}
+  - {id: por_isla, title: Pingüinos por isla y especie, type: bar, dims: [island, species], measures: [penguin_count], layout: {x: 6, y: 0, w: 6, h: 4}, options: {stack: true, legend: true}}
+  - {id: adelie, title: Adelie, type: scatter, dims: [id], measures: [avg_bill_length, avg_bill_depth], where: [{field: species, op: "=", value: Adelie}], limit: 500, layout: {x: 0, y: 4, w: 4, h: 4}, options: {x_title: Largo del pico (mm), y_title: Profundidad (mm), colors: ["#1b9e77"]}}
+  - {id: chinstrap, title: Chinstrap, type: scatter, dims: [id], measures: [avg_bill_length, avg_bill_depth], where: [{field: species, op: "=", value: Chinstrap}], limit: 500, layout: {x: 4, y: 4, w: 4, h: 4}, options: {x_title: Largo del pico (mm), y_title: Profundidad (mm), colors: ["#d95f02"]}}
+  - {id: gentoo, title: Gentoo, type: scatter, dims: [id], measures: [avg_bill_length, avg_bill_depth], where: [{field: species, op: "=", value: Gentoo}], limit: 500, layout: {x: 8, y: 4, w: 4, h: 4}, options: {x_title: Largo del pico (mm), y_title: Profundidad (mm), colors: ["#7570b3"]}}
+  - {id: masa_isla, title: Masa media por isla y sexo, type: bar, dims: [island, sex], measures: [avg_body_mass], layout: {x: 0, y: 8, w: 12, h: 4}, options: {format: integer, legend: true}}

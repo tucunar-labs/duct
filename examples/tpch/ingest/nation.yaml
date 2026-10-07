@@ -1,0 +1,5 @@
+name: nation
+source: files
+options:
+  path: data/nation.parquet
+  format: parquet

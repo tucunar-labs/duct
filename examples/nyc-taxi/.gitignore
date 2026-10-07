@@ -1,0 +1,3 @@
+# Descargado por download.sh (datos públicos de la TLC, no se versionan)
+data/*.parquet
+data/*.csv

@@ -1,0 +1,10 @@
+# Recarga diaria: ingesta del CSV y luego todos los pipelines.
+name: refresh
+schedule: "@daily"
+tasks:
+  - id: load
+    type: ingest
+    retries: 1
+  - id: build
+    type: pipeline
+    depends_on: [load]

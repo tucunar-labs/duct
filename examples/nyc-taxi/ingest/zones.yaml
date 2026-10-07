@@ -1,0 +1,8 @@
+# Bronze: catálogo de zonas de taxi (LocationID -> borough, zona).
+name: zones
+source: files
+options:
+  path: data/taxi_zone_lookup.csv
+  format: csv
+  reader:
+    header: true

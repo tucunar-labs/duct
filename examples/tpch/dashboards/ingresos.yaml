@@ -1,0 +1,12 @@
+title: TPC-H, tendencia de ingresos
+description: Ingreso neto por año, región y nación (TPC-H sf=0.1, datos sintéticos).
+filters:
+  - {id: region, label: Región, type: multiselect, dimension: region}
+  - {id: segmento, label: Segmento, type: select, dimension: segment}
+charts:
+  - {id: total, title: Ingreso neto, type: kpi, measures: [revenue], layout: {x: 0, y: 0, w: 3, h: 2}, options: {format: compact, prefix: "$"}}
+  - {id: pedidos, title: Pedidos, type: kpi, measures: [orders], layout: {x: 3, y: 0, w: 3, h: 2}, options: {format: compact}}
+  - {id: ticket, title: Ingreso por pedido, type: kpi, measures: [revenue_per_order], layout: {x: 6, y: 0, w: 3, h: 2}, options: {format: integer, prefix: "$"}}
+  - {id: por_anio, title: Ingreso por año y región, type: line, dims: [year, region], measures: [revenue], sort: [{by: year}], layout: {x: 0, y: 2, w: 12, h: 5}, options: {legend: true, format: compact, x_title: Año}}
+  - {id: por_mes, title: Ingreso mensual, type: area, dims: [month], measures: [revenue], sort: [{by: month}], layout: {x: 0, y: 7, w: 12, h: 4}, options: {format: compact, smooth: true}}
+  - {id: por_nacion, title: Ingreso por nación, type: bar, dims: [nation], measures: [revenue], sort: [{by: revenue, desc: true}], limit: 25, layout: {x: 0, y: 11, w: 12, h: 6}, options: {horizontal: true, format: compact}}

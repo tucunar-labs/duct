@@ -1,0 +1,5 @@
+name: region
+source: files
+options:
+  path: data/region.parquet
+  format: parquet

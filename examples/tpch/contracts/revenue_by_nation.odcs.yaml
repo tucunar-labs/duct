@@ -1,0 +1,49 @@
+# Contrato de gold.revenue_by_nation (ADR 0004).
+apiVersion: v3.2.0
+kind: DataContract
+id: 4b0c9e7a-1d52-4c0e-8a55-7e2f1d0b0002
+name: revenue_by_nation
+version: 1.0.0
+status: active
+description:
+  purpose: Ingresos netos TPC-H por mes, segmento de mercado, región y nación.
+servers:
+  - server: lake
+    type: custom
+    customProperties:
+      - property: ducklake_table
+        value: gold.revenue_by_nation
+schema:
+  - name: revenue_by_nation
+    physicalType: table
+    properties:
+      - {name: order_month, logicalType: date, required: true}
+      - {name: segment, logicalType: string, required: true}
+      - {name: region, logicalType: string, required: true}
+      - {name: nation, logicalType: string, required: true}
+      - {name: orders, logicalType: integer, required: true}
+      - {name: lines, logicalType: integer, required: true}
+      - {name: revenue, logicalType: number, required: true}
+    quality:
+      - metric: rowCount
+        mustBeGreaterThan: 0
+        severity: critical
+      - type: sql
+        name: llave_unica
+        query: SELECT count(*) - count(DISTINCT (order_month, segment, nation)) FROM {table}
+        mustBe: 0
+        severity: critical
+      - type: sql
+        name: ingresos_positivos
+        query: SELECT count(*) FROM {table} WHERE revenue <= 0
+        mustBe: 0
+        severity: critical
+      - type: sql
+        name: cinco_regiones
+        query: SELECT count(DISTINCT region) FROM {table}
+        mustBe: 5
+        severity: error
+slaProperties:
+  - property: latency
+    value: 1
+    unit: d

@@ -1,0 +1,5 @@
+name: customer
+source: files
+options:
+  path: data/customer.parquet
+  format: parquet

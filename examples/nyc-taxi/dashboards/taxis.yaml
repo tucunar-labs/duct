@@ -1,0 +1,16 @@
+title: Taxis amarillos de Nueva York
+description: Cuándo y dónde se mueve la ciudad (TLC, enero 2024 por defecto).
+filters:
+  - {id: borough, label: Borough, type: multiselect, dimension: borough, charts: [total, tarifa, distancia, propina, calor, por_borough, ingresos_borough, por_pago, diario]}
+  - {id: pago, label: Forma de pago, type: select, dimension: payment_type, charts: [total, tarifa, distancia, propina, calor, por_borough, ingresos_borough, por_pago, diario]}
+charts:
+  - {id: total, title: Viajes, type: kpi, measures: [trips], layout: {x: 0, y: 0, w: 3, h: 2}, options: {format: compact}}
+  - {id: tarifa, title: Tarifa media, type: kpi, measures: [avg_fare], layout: {x: 3, y: 0, w: 3, h: 2}, options: {format: decimal, prefix: "$"}}
+  - {id: distancia, title: Distancia media (mi), type: kpi, measures: [avg_distance], layout: {x: 6, y: 0, w: 3, h: 2}, options: {format: decimal}}
+  - {id: propina, title: Propina media, type: kpi, measures: [avg_tip], layout: {x: 9, y: 0, w: 3, h: 2}, options: {format: decimal, prefix: "$"}}
+  - {id: calor, title: Viajes por día de la semana y hora, type: heatmap, dims: [hour, weekday], measures: [trips], sort: [{by: hour}, {by: weekday}], layout: {x: 0, y: 2, w: 12, h: 5}, cross_filter: false}
+  - {id: por_borough, title: Viajes por borough, type: bar, dims: [borough], measures: [trips], sort: [{by: trips, desc: true}], layout: {x: 0, y: 7, w: 6, h: 4}, options: {format: compact}}
+  - {id: ingresos_borough, title: Tarifa media por borough, type: bar, dims: [borough], measures: [avg_fare], sort: [{by: avg_fare, desc: true}], layout: {x: 6, y: 7, w: 6, h: 4}, options: {format: decimal, prefix: "$"}}
+  - {id: por_pago, title: Forma de pago, type: pie, dims: [payment_type], measures: [trips], layout: {x: 0, y: 11, w: 4, h: 4}, options: {donut: true, legend: true}}
+  - {id: diario, title: Viajes por día, type: line, dims: [date], measures: [trips], sort: [{by: date}], layout: {x: 4, y: 11, w: 8, h: 4}, options: {format: compact}}
+  - {id: zonas, title: Zonas de salida más activas, type: table, dims: [zone, zone_borough], measures: [zone_trip_count, zone_avg_fare], sort: [{by: zone_trip_count, desc: true}], limit: 15, layout: {x: 0, y: 15, w: 12, h: 5}, cross_filter: false}

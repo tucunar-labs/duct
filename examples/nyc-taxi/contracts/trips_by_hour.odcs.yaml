@@ -1,0 +1,57 @@
+# Contrato de gold.trips_by_hour (ADR 0004): esquema, calidad y frescura.
+apiVersion: v3.2.0
+kind: DataContract
+id: 9c3d5e21-6a40-4d8b-b1f7-2e0a4c7d0003
+name: trips_by_hour
+version: 1.0.0
+status: active
+description:
+  purpose: Viajes de taxi amarillo de Nueva York por día, hora, borough de salida y forma de pago.
+servers:
+  - server: lake
+    type: custom
+    customProperties:
+      - property: ducklake_table
+        value: gold.trips_by_hour
+schema:
+  - name: trips_by_hour
+    physicalType: table
+    properties:
+      - {name: pickup_date, logicalType: date, required: true}
+      - {name: pickup_hour, logicalType: integer, required: true}
+      - {name: borough, logicalType: string, required: true}
+      - {name: payment_type, logicalType: string, required: true}
+      - {name: trips, logicalType: integer, required: true}
+      - {name: revenue, logicalType: number, required: true}
+      - {name: fare_sum, logicalType: number, required: true}
+      - {name: distance_sum, logicalType: number, required: true}
+      - {name: tip_sum, logicalType: number, required: true}
+    quality:
+      - metric: rowCount
+        mustBeGreaterThan: 1000
+        severity: critical
+      - type: sql
+        name: llave_unica
+        query: SELECT count(*) - count(DISTINCT (pickup_date, pickup_hour, borough, payment_type)) FROM {table}
+        mustBe: 0
+        severity: critical
+      - type: sql
+        name: sin_tarifas_negativas
+        description: Silver descarta fare < 0; ninguna suma puede ser negativa.
+        query: SELECT count(*) FROM {table} WHERE fare_sum < 0 OR revenue < 0 OR tip_sum < 0 OR distance_sum < 0
+        mustBe: 0
+        severity: critical
+      - type: sql
+        name: horas_validas
+        query: SELECT count(*) FROM {table} WHERE pickup_hour NOT BETWEEN 0 AND 23
+        mustBe: 0
+        severity: critical
+      - type: sql
+        name: fechas_en_2024
+        query: SELECT count(*) FROM {table} WHERE year(pickup_date) <> 2024
+        mustBe: 0
+        severity: error
+slaProperties:
+  - property: latency
+    value: 31
+    unit: d

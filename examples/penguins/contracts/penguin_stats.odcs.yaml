@@ -1,0 +1,58 @@
+# Contrato de gold.penguin_stats (ADR 0004): `duct run` lo hace cumplir antes de escribir.
+apiVersion: v3.2.0
+kind: DataContract
+id: 7a1e0c52-3f0d-4c55-9a39-0f6e5b1d0001
+name: penguin_stats
+version: 1.0.0
+status: active
+description:
+  purpose: Medidas promedio de los pingüinos de Palmer por especie, isla y sexo.
+servers:
+  - server: lake
+    type: custom
+    customProperties:
+      - property: ducklake_table
+        value: gold.penguin_stats
+schema:
+  - name: penguin_stats
+    physicalType: table
+    properties:
+      - name: species
+        logicalType: string
+        required: true
+      - name: island
+        logicalType: string
+        required: true
+      - name: sex
+        logicalType: string
+        required: true
+      - name: n
+        logicalType: integer
+        required: true
+      - name: avg_bill_length_mm
+        logicalType: number
+      - name: avg_bill_depth_mm
+        logicalType: number
+      - name: avg_flipper_length_mm
+        logicalType: number
+      - name: avg_body_mass_g
+        logicalType: number
+    quality:
+      - metric: rowCount
+        mustBeGreaterThan: 0
+        severity: critical
+      - type: sql
+        name: llave_unica
+        query: SELECT count(*) - count(DISTINCT (species, island, sex)) FROM {table}
+        mustBe: 0
+        severity: critical
+      - type: sql
+        name: masa_plausible
+        description: Ningún promedio de masa fuera de 2 a 7 kg.
+        query: SELECT count(*) FROM {table} WHERE avg_body_mass_g NOT BETWEEN 2000 AND 7000
+        mustBe: 0
+        severity: critical
+slaProperties:
+  - property: latency
+    value: 1
+    unit: d

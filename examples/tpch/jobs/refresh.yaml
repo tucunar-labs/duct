@@ -1,0 +1,11 @@
+# Recarga semanal: vuelve a leer los Parquet de data/ y reconstruye Silver y Gold.
+name: refresh
+schedule: "0 3 * * 1"
+timezone: America/Santiago
+tasks:
+  - id: load
+    type: ingest
+    retries: 1
+  - id: build
+    type: pipeline
+    depends_on: [load]

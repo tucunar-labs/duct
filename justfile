@@ -54,10 +54,10 @@ test:
 test-integration:
     go test -tags "integration duckdb_arrow" ./test/integration/... -count=1 -timeout 45m
 
-# examples/demo as an e2e test with the real binary (ODBC step needs podman, unixODBC
+# examples/ (demo, penguins, tpch, nyc-taxi lint) as e2e tests with the real binary (ODBC step needs podman, unixODBC
 # and psqlODBC; it is skipped when missing or with DUCT_E2E_NO_ODBC=1).
 e2e:
-    go test -tags "e2e duckdb_arrow" ./test/e2e/... -run TestDemo -v -count=1 -timeout 20m
+    go test -tags "e2e duckdb_arrow" ./test/e2e/... -run "TestDemo|TestExample" -v -count=1 -timeout 20m
 
 python-check:
     @if [ -d python ] && command -v uv >/dev/null; then cd python && uv run ruff check; else echo "no python/ or uv, skipping"; fi

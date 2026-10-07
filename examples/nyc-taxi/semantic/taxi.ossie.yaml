@@ -1,0 +1,71 @@
+version: 0.2.0.dev0
+name: nyc_taxi
+description: Viajes de taxi amarillo de Nueva York (TLC), por día, hora, borough de salida y forma de pago.
+ai_context:
+  instructions: Dólares y millas. Las propinas en efectivo no se registran, así que la propina media se subestima salvo en tarjeta. Borough es el de salida del viaje.
+datasets:
+  - name: trips
+    source: gold.trips_by_hour
+    description: Viajes agregados por día, hora, borough y forma de pago.
+    fields:
+      - {name: date, datatype: Date, expression: {dialects: [{dialect: ANSI_SQL, expression: pickup_date}]}, dimension: {is_time: true}, description: Día de salida}
+      - {name: weekday, expression: {dialects: [{dialect: ANSI_SQL, expression: "strftime(pickup_date, '%u-%a')"}]}, description: "Día de la semana (1-Mon a 7-Sun)", ai_context: {synonyms: [día de la semana]}}
+      - {name: hour, expression: {dialects: [{dialect: ANSI_SQL, expression: "lpad(CAST(pickup_hour AS VARCHAR), 2, '0')"}]}, description: Hora de salida (00 a 23), ai_context: {synonyms: [hora]}}
+      - {name: borough, expression: {dialects: [{dialect: ANSI_SQL, expression: borough}]}, description: Borough de salida, ai_context: {synonyms: [barrio, distrito]}}
+      - {name: payment_type, expression: {dialects: [{dialect: ANSI_SQL, expression: payment_type}]}, description: Forma de pago, ai_context: {synonyms: [pago, medio de pago]}}
+      - {name: n_trips, expression: {dialects: [{dialect: ANSI_SQL, expression: trips}]}}
+      - {name: revenue_sum, expression: {dialects: [{dialect: ANSI_SQL, expression: revenue}]}}
+      - {name: fare_sum, expression: {dialects: [{dialect: ANSI_SQL, expression: fare_sum}]}}
+      - {name: distance_sum, expression: {dialects: [{dialect: ANSI_SQL, expression: distance_sum}]}}
+      - {name: tip_sum, expression: {dialects: [{dialect: ANSI_SQL, expression: tip_sum}]}}
+  - name: zones
+    source: gold.top_zones
+    primary_key: [zone]
+    description: Las 50 zonas de salida con más viajes.
+    fields:
+      - {name: zone, expression: {dialects: [{dialect: ANSI_SQL, expression: zone}]}, description: Zona de taxi de salida}
+      - {name: zone_borough, expression: {dialects: [{dialect: ANSI_SQL, expression: borough}]}}
+      - {name: zone_trips, expression: {dialects: [{dialect: ANSI_SQL, expression: trips}]}}
+      - {name: zone_fare_sum, expression: {dialects: [{dialect: ANSI_SQL, expression: fare_sum}]}}
+metrics:
+  - name: trips
+    description: Viajes
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(trips.n_trips)"}]}
+    ai_context: {synonyms: [viajes, carreras]}
+  - name: revenue
+    description: Ingresos totales cobrados (tarifa, extras, peajes y propina)
+    datatype: Decimal
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(trips.revenue_sum)"}]}
+    ai_context: {synonyms: [ingresos, recaudación]}
+  - name: total_fare
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(trips.fare_sum)"}]}
+    custom_extensions:
+      - {vendor_name: DUCT, data: '{"hidden": true}'}
+  - name: total_distance
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(trips.distance_sum)"}]}
+    custom_extensions:
+      - {vendor_name: DUCT, data: '{"hidden": true}'}
+  - name: total_tip
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(trips.tip_sum)"}]}
+    custom_extensions:
+      - {vendor_name: DUCT, data: '{"hidden": true}'}
+  - name: avg_fare
+    description: Tarifa media por viaje (USD)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "total_fare / trips"}]}
+    ai_context: {synonyms: [tarifa media, precio medio]}
+  - name: avg_distance
+    description: Distancia media por viaje (millas)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "total_distance / trips"}]}
+  - name: avg_tip
+    description: Propina media por viaje (USD)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "total_tip / trips"}]}
+  - name: zone_trip_count
+    description: Viajes de las 50 zonas más activas
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(zones.zone_trips)"}]}
+  - name: zone_total_fare
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "SUM(zones.zone_fare_sum)"}]}
+    custom_extensions:
+      - {vendor_name: DUCT, data: '{"hidden": true}'}
+  - name: zone_avg_fare
+    description: Tarifa media de las 50 zonas más activas
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "zone_total_fare / zone_trip_count"}]}

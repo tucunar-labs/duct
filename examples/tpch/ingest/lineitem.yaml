@@ -1,0 +1,5 @@
+name: lineitem
+source: files
+options:
+  path: data/lineitem.parquet
+  format: parquet

@@ -1,0 +1,10 @@
+title: TPC-H, participación de mercado por región
+description: Qué parte del ingreso aporta cada región y segmento, y quiénes son los mejores clientes.
+filters:
+  - {id: anio, label: Año, type: select, dimension: year, charts: [region, region_anio, segmento, nacion]}
+charts:
+  - {id: region, title: Participación por región, type: pie, dims: [region], measures: [revenue], layout: {x: 0, y: 0, w: 5, h: 5}, options: {donut: true, legend: true, labels: true}}
+  - {id: region_anio, title: Ingreso por año y región, type: bar, dims: [year, region], measures: [revenue], sort: [{by: year}], layout: {x: 5, y: 0, w: 7, h: 5}, options: {stack: true, legend: true, format: compact}}
+  - {id: segmento, title: Participación por segmento, type: pie, dims: [segment], measures: [revenue], layout: {x: 0, y: 5, w: 5, h: 4}, options: {legend: true, labels: true}}
+  - {id: nacion, title: Ingreso por región y nación, type: heatmap, dims: [region, nation], measures: [revenue], layout: {x: 5, y: 5, w: 7, h: 4}, cross_filter: false}
+  - {id: clientes, title: Los mejores clientes, type: table, dims: [customer, customer_segment, customer_nation], measures: [top_customer_revenue, top_customer_orders], sort: [{by: top_customer_revenue, desc: true}], limit: 15, layout: {x: 0, y: 9, w: 12, h: 5}, cross_filter: false}

@@ -1,0 +1,40 @@
+version: 0.2.0.dev0
+name: penguins
+description: Medidas de pingüinos de Palmer (Adelie, Chinstrap, Gentoo) en tres islas, 2007-2009.
+ai_context:
+  instructions: Longitudes en milímetros, masa en gramos. El sexo es "unknown" cuando no se pudo determinar.
+datasets:
+  - name: penguins
+    source: gold.penguins
+    primary_key: [id]
+    description: Un pingüino observado por fila.
+    fields:
+      - {name: id, expression: {dialects: [{dialect: ANSI_SQL, expression: id}]}, description: Identificador de la observación}
+      - {name: species, expression: {dialects: [{dialect: ANSI_SQL, expression: species}]}, description: Especie, ai_context: {synonyms: [especie]}}
+      - {name: island, expression: {dialects: [{dialect: ANSI_SQL, expression: island}]}, description: "Isla (Biscoe, Dream, Torgersen)", ai_context: {synonyms: [isla]}}
+      - {name: sex, expression: {dialects: [{dialect: ANSI_SQL, expression: sex}]}, description: "Sexo (female, male, unknown)", ai_context: {synonyms: [sexo]}}
+      - {name: study_year, expression: {dialects: [{dialect: ANSI_SQL, expression: "CAST(year AS VARCHAR)"}]}, description: Año del estudio}
+      - {name: bill_length_mm, expression: {dialects: [{dialect: ANSI_SQL, expression: bill_length_mm}]}}
+      - {name: bill_depth_mm, expression: {dialects: [{dialect: ANSI_SQL, expression: bill_depth_mm}]}}
+      - {name: flipper_length_mm, expression: {dialects: [{dialect: ANSI_SQL, expression: flipper_length_mm}]}}
+      - {name: body_mass_g, expression: {dialects: [{dialect: ANSI_SQL, expression: body_mass_g}]}}
+metrics:
+  - name: penguin_count
+    description: Pingüinos observados
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "COUNT(penguins.id)"}]}
+    ai_context: {synonyms: [cantidad, conteo, observaciones]}
+  - name: avg_bill_length
+    description: Largo medio del pico (mm)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "AVG(penguins.bill_length_mm)"}]}
+    ai_context: {synonyms: [largo del pico]}
+  - name: avg_bill_depth
+    description: Profundidad media del pico (mm)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "AVG(penguins.bill_depth_mm)"}]}
+    ai_context: {synonyms: [profundidad del pico]}
+  - name: avg_flipper_length
+    description: Largo medio de la aleta (mm)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "AVG(penguins.flipper_length_mm)"}]}
+  - name: avg_body_mass
+    description: Masa corporal media (g)
+    expression: {dialects: [{dialect: ANSI_SQL, expression: "AVG(penguins.body_mass_g)"}]}
+    ai_context: {synonyms: [peso, masa]}

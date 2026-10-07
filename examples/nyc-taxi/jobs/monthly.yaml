@@ -1,0 +1,18 @@
+# Cada día 5 de madrugada: baja lo nuevo de la TLC (publica con ~2 meses de atraso),
+# recarga Bronze y reconstruye Silver y Gold. Cambia MONTHS en download.sh para más meses.
+name: monthly
+schedule: "0 4 5 * *"
+timezone: America/New_York
+tasks:
+  - id: download
+    type: shell
+    params: {command: [bash, download.sh]}
+    retries: 2
+    backoff: 1m
+    timeout: 30m
+  - id: load
+    type: ingest
+    depends_on: [download]
+  - id: build
+    type: pipeline
+    depends_on: [load]

@@ -1,0 +1,9 @@
+# Bronze: el CSV tal cual (el original marca los faltantes con "NA").
+name: penguins
+source: files
+options:
+  path: data/penguins.csv
+  format: csv
+  reader:
+    header: true
+    nullstr: NA
