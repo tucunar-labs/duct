@@ -2,9 +2,11 @@
 @source "../*.templ";
 
 /* Brand palette (assets/brand/README.md): orange #F26B1D, steel #2B3440,
-   flange #161B22, bolt #8A96A3, bone #E6EAEE. Light/dark follow the OS. */
+   flange #161B22, bolt #8A96A3, bone #E6EAEE. Theme: the toggle stores
+   "light"/"dark" in localStorage and sets html[data-theme]; empty = follow
+   the OS (prefers-color-scheme). shell.js applies it before first paint. */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --duct-orange: #f26b1d;
   --duct-orange-strong: #c8500c;
   --duct-bg: #f4f6f8;
@@ -14,15 +16,27 @@
   --duct-text: #2b3440;
   --duct-muted: #647080;
   --duct-hover: #eef1f5;
+  --duct-active: #e3e8ee;
   --duct-selection: #f26b1d33;
   --duct-danger: #b42318;
   --duct-danger-bg: #fef0ee;
+  --duct-success: #1b7f4b;
+  --duct-success-bg: #e8f6ee;
+  --duct-warn: #8a5a00;
+  --duct-warn-bg: #fdf3e0;
+  --duct-info: #1f6fa8;
+  --duct-info-bg: #e8f2f9;
+  --duct-accent-bg: #fdeee4;
+  --duct-shadow: 0 1px 2px rgb(16 24 40 / 0.06), 0 1px 3px rgb(16 24 40 / 0.08);
+  --duct-shadow-lg: 0 8px 24px rgb(16 24 40 / 0.12);
   --duct-tok-string: #1b7f4b;
   --duct-tok-number: #7a4bd6;
   --duct-tok-type: #1f6fa8;
 }
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --duct-orange-strong: #f26b1d;
     --duct-bg: #161b22;
     --duct-surface: #1e252e;
@@ -31,13 +45,51 @@
     --duct-text: #e6eaee;
     --duct-muted: #8a96a3;
     --duct-hover: #27303b;
+    --duct-active: #313b48;
     --duct-selection: #f26b1d55;
     --duct-danger: #ffb4a9;
     --duct-danger-bg: #3b1f1c;
+    --duct-success: #7fd6a2;
+    --duct-success-bg: #1c2f26;
+    --duct-warn: #f0c674;
+    --duct-warn-bg: #322818;
+    --duct-info: #7cc0f0;
+    --duct-info-bg: #1b2836;
+    --duct-accent-bg: #3a2418;
+    --duct-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px rgb(0 0 0 / 0.35);
+    --duct-shadow-lg: 0 8px 24px rgb(0 0 0 / 0.45);
     --duct-tok-string: #7fd6a2;
     --duct-tok-number: #c2a4ff;
     --duct-tok-type: #7cc0f0;
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --duct-orange-strong: #f26b1d;
+  --duct-bg: #161b22;
+  --duct-surface: #1e252e;
+  --duct-surface-2: #2b3440;
+  --duct-border: #3a4552;
+  --duct-text: #e6eaee;
+  --duct-muted: #8a96a3;
+  --duct-hover: #27303b;
+  --duct-active: #313b48;
+  --duct-selection: #f26b1d55;
+  --duct-danger: #ffb4a9;
+  --duct-danger-bg: #3b1f1c;
+  --duct-success: #7fd6a2;
+  --duct-success-bg: #1c2f26;
+  --duct-warn: #f0c674;
+  --duct-warn-bg: #322818;
+  --duct-info: #7cc0f0;
+  --duct-info-bg: #1b2836;
+  --duct-accent-bg: #3a2418;
+  --duct-shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px rgb(0 0 0 / 0.35);
+  --duct-shadow-lg: 0 8px 24px rgb(0 0 0 / 0.45);
+  --duct-tok-string: #7fd6a2;
+  --duct-tok-number: #c2a4ff;
+  --duct-tok-type: #7cc0f0;
 }
 
 @theme inline {
@@ -48,27 +100,579 @@
   --color-ink: var(--duct-text);
   --color-muted: var(--duct-muted);
   --color-hover: var(--duct-hover);
+  --color-active: var(--duct-active);
   --color-brand: var(--duct-orange);
   --color-brand-strong: var(--duct-orange-strong);
   --color-danger: var(--duct-danger);
   --color-danger-bg: var(--duct-danger-bg);
+  --color-success: var(--duct-success);
+  --color-success-bg: var(--duct-success-bg);
+  --color-warn: var(--duct-warn);
+  --color-warn-bg: var(--duct-warn-bg);
+  --color-info: var(--duct-info);
+  --color-info-bg: var(--duct-info-bg);
   --font-mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 @layer base {
+  html {
+    font-size: 15px;
+  }
   body {
     background: var(--duct-bg);
     color: var(--duct-text);
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   }
   :focus-visible {
     outline: 2px solid var(--duct-orange);
     outline-offset: 2px;
+    border-radius: 0.25rem;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--duct-border);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--duct-muted);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
-/* Dashboards: one column on small screens, the 12-column grid above. Each cell
-   reads --x/--y/--w/--h (set from the YAML layout, validated integers). */
+/* ---- design system ---- */
 @layer components {
+  /* Buttons. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    border-radius: 0.5rem;
+    border: 1px solid transparent;
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    line-height: 1.25rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, filter 0.12s ease;
+    user-select: none;
+  }
+  .btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .btn-primary {
+    background: var(--duct-orange);
+    color: #161b22;
+  }
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(0.95);
+  }
+  .btn-secondary {
+    background: var(--duct-surface);
+    border-color: var(--duct-border);
+    color: var(--duct-text);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--duct-hover);
+  }
+  .btn-ghost {
+    background: transparent;
+    color: var(--duct-muted);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--duct-hover);
+    color: var(--duct-text);
+  }
+  .btn-danger {
+    background: transparent;
+    border-color: color-mix(in srgb, var(--duct-danger) 45%, transparent);
+    color: var(--duct-danger);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--duct-danger-bg);
+  }
+  .btn-icon {
+    padding: 0.375rem;
+    border-radius: 0.5rem;
+    color: var(--duct-muted);
+  }
+  .btn-icon:hover:not(:disabled) {
+    background: var(--duct-hover);
+    color: var(--duct-text);
+  }
+  .btn-sm {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    line-height: 1rem;
+  }
+
+  /* Forms. */
+  .input {
+    width: 100%;
+    border-radius: 0.5rem;
+    border: 1px solid var(--duct-border);
+    background: var(--duct-bg);
+    padding: 0.375rem 0.625rem;
+    font-size: 0.8125rem;
+    color: var(--duct-text);
+  }
+  .input::placeholder {
+    color: var(--duct-muted);
+  }
+  .select {
+    border-radius: 0.5rem;
+    border: 1px solid var(--duct-border);
+    background: var(--duct-bg);
+    padding: 0.375rem 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--duct-text);
+  }
+  .label {
+    display: block;
+    font-size: 0.8125rem;
+    color: var(--duct-muted);
+    margin-bottom: 0.25rem;
+  }
+
+  /* Surfaces. */
+  .card {
+    background: var(--duct-surface);
+    border: 1px solid var(--duct-border);
+    border-radius: 0.75rem;
+    box-shadow: var(--duct-shadow);
+  }
+  .card-flat {
+    background: var(--duct-surface);
+    border: 1px solid var(--duct-border);
+    border-radius: 0.75rem;
+  }
+  .divider {
+    border-color: var(--duct-border);
+  }
+
+  /* Badges and chips. */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    border-radius: 999px;
+    padding: 0.0625rem 0.5rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    line-height: 1.125rem;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .badge-muted {
+    background: var(--duct-surface-2);
+    color: var(--duct-muted);
+  }
+  .badge-brand {
+    background: var(--duct-accent-bg);
+    color: var(--duct-orange-strong);
+  }
+  .badge-num {
+    background: var(--duct-info-bg);
+    color: var(--duct-info);
+  }
+  .badge-str {
+    background: var(--duct-success-bg);
+    color: var(--duct-success);
+  }
+  .badge-bool {
+    background: var(--duct-warn-bg);
+    color: var(--duct-warn);
+  }
+  .badge-time {
+    background: color-mix(in srgb, var(--duct-tok-number) 14%, transparent);
+    color: var(--duct-tok-number);
+  }
+  .badge-danger {
+    background: var(--duct-danger-bg);
+    color: var(--duct-danger);
+  }
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 0.375rem;
+    border: 1px solid var(--duct-border);
+    background: var(--duct-surface-2);
+    padding: 0 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    line-height: 1.25rem;
+    color: var(--duct-muted);
+  }
+
+  /* Tabs (underline style). */
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--duct-border);
+  }
+  .tab {
+    position: relative;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--duct-muted);
+    cursor: pointer;
+    border-radius: 0.375rem 0.375rem 0 0;
+    background: transparent;
+    border: none;
+  }
+  .tab:hover {
+    color: var(--duct-text);
+    background: var(--duct-hover);
+  }
+  .tab[aria-selected="true"] {
+    color: var(--duct-text);
+  }
+  .tab[aria-selected="true"]::after {
+    content: "";
+    position: absolute;
+    left: 0.5rem;
+    right: 0.5rem;
+    bottom: -1px;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--duct-orange);
+  }
+
+  /* Data tables. */
+  .data-table {
+    width: 100%;
+    font-size: 0.8125rem;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+  .data-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--duct-surface-2);
+    color: var(--duct-muted);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--duct-border);
+  }
+  .data-table tbody td {
+    padding: 0.375rem 0.75rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--duct-border) 55%, transparent);
+    white-space: nowrap;
+  }
+  .data-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .data-table tbody tr:hover td {
+    background: var(--duct-hover);
+  }
+
+  /* Empty states. */
+  .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 1px dashed var(--duct-border);
+    border-radius: 0.75rem;
+    padding: 2.5rem 1.5rem;
+    text-align: center;
+    color: var(--duct-muted);
+    background: color-mix(in srgb, var(--duct-surface) 55%, transparent);
+  }
+  .empty-title {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--duct-text);
+  }
+
+  /* Skeletons: .skeleton until an ancestor gets [data-loaded]. */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--duct-surface-2) 25%,
+      var(--duct-hover) 37%,
+      var(--duct-surface-2) 63%
+    );
+    background-size: 400% 100%;
+    animation: duct-shimmer 1.4s ease infinite;
+    border-radius: 0.5rem;
+  }
+  @keyframes duct-shimmer {
+    0% {
+      background-position: 100% 0;
+    }
+    100% {
+      background-position: 0 0;
+    }
+  }
+
+  /* Toasts (shell.js). */
+  .toast {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--duct-border);
+    background: var(--duct-surface);
+    box-shadow: var(--duct-shadow-lg);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+    color: var(--duct-text);
+    animation: duct-toast-in 0.18s ease;
+  }
+  @keyframes duct-toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(0.5rem);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* App shell: sidebar + top bar. */
+  .shell {
+    display: flex;
+    min-height: 100vh;
+  }
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 15rem;
+    flex: none;
+    border-right: 1px solid var(--duct-border);
+    background: var(--duct-surface);
+    transition: width 0.15s ease;
+  }
+  :root[data-sidebar="collapsed"] .sidebar {
+    width: 3.5rem;
+  }
+  :root[data-sidebar="collapsed"] .sidebar-label,
+  :root[data-sidebar="collapsed"] .sidebar-section,
+  :root[data-sidebar="collapsed"] .sidebar-brand-text {
+    display: none;
+  }
+  :root[data-sidebar="collapsed"] .sidebar-link {
+    justify-content: center;
+  }
+  .sidebar-link {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    margin: 0 0.5rem;
+    padding: 0.5rem 0.625rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--duct-muted);
+    white-space: nowrap;
+  }
+  .sidebar-link:hover {
+    background: var(--duct-hover);
+    color: var(--duct-text);
+  }
+  .sidebar-link[aria-current="page"] {
+    background: var(--duct-accent-bg);
+    color: var(--duct-orange-strong);
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    height: 3.25rem;
+    flex: none;
+    padding: 0 1rem;
+    border-bottom: 1px solid var(--duct-border);
+    background: color-mix(in srgb, var(--duct-surface) 88%, transparent);
+    backdrop-filter: blur(6px);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.375rem);
+    min-width: 12rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--duct-border);
+    background: var(--duct-surface);
+    box-shadow: var(--duct-shadow-lg);
+    padding: 0.375rem;
+    z-index: 40;
+  }
+  .menu-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 0.5rem;
+    padding: 0.375rem 0.625rem;
+    font-size: 0.8125rem;
+    color: var(--duct-text);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+  }
+  .menu-item:hover {
+    background: var(--duct-hover);
+  }
+
+  /* Schema tree (catalog + SQL editor browser). */
+  .tree {
+    font-size: 0.8125rem;
+  }
+  .tree details > summary {
+    list-style: none;
+  }
+  .tree details > summary::-webkit-details-marker {
+    display: none;
+  }
+  .tree-row {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    width: 100%;
+    border-radius: 0.375rem;
+    padding: 0.1875rem 0.375rem;
+    cursor: pointer;
+    color: var(--duct-text);
+    background: transparent;
+    border: none;
+    text-align: left;
+  }
+  .tree-row:hover {
+    background: var(--duct-hover);
+  }
+  .tree-row[data-active="true"] {
+    background: var(--duct-accent-bg);
+    color: var(--duct-orange-strong);
+    font-weight: 600;
+  }
+  .tree-type {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    color: var(--duct-muted);
+  }
+
+  /* Split panes and drag handle. */
+  .splitter {
+    flex: none;
+    height: 0.5rem;
+    margin: 0.125rem 0;
+    cursor: row-resize;
+    position: relative;
+    border: none;
+    background: transparent;
+    width: 100%;
+  }
+  .splitter::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 2.25rem;
+    height: 0.1875rem;
+    border-radius: 999px;
+    background: var(--duct-border);
+  }
+  .splitter:hover::after,
+  .splitter[data-dragging="true"]::after {
+    background: var(--duct-orange);
+  }
+
+  /* Results grid. */
+  .results-cell {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    cursor: copy;
+    max-width: 24rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .results-cell[data-copied="true"] {
+    background: var(--duct-accent-bg);
+    outline: 1px solid var(--duct-orange);
+    outline-offset: -1px;
+  }
+  .results-null {
+    font-style: italic;
+    color: var(--duct-muted);
+    cursor: default;
+  }
+  .row-copy {
+    opacity: 0;
+  }
+  tr:hover .row-copy,
+  .row-copy:focus-visible {
+    opacity: 1;
+  }
+
+  /* Charts (dashboards): skeleton until the island sets data-loaded. */
+  .chart-skeleton {
+    position: absolute;
+    inset: 0.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    pointer-events: none;
+  }
+  [data-loaded="1"] .chart-skeleton {
+    display: none;
+  }
+
+  /* Worksheet tabs (SQL editor). */
+  .ws-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    border-radius: 0.5rem 0.5rem 0 0;
+    border: 1px solid transparent;
+    border-bottom: none;
+    padding: 0.375rem 0.5rem 0.375rem 0.75rem;
+    font-size: 0.75rem;
+    color: var(--duct-muted);
+    cursor: pointer;
+    background: transparent;
+    max-width: 12rem;
+  }
+  .ws-tab:hover {
+    background: var(--duct-hover);
+    color: var(--duct-text);
+  }
+  .ws-tab[aria-selected="true"] {
+    background: var(--duct-surface);
+    border-color: var(--duct-border);
+    color: var(--duct-text);
+    font-weight: 600;
+  }
+
+  /* Dashboards grid: one column on small screens, the 12-column grid above.
+     Each cell reads --x/--y/--w/--h (set from the YAML layout). */
   .dash-grid {
     display: grid;
     grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -84,6 +688,29 @@
     .dash-cell {
       grid-column: var(--x, auto) / span var(--w, 6);
       grid-row: var(--y, auto) / span var(--h, 4);
+    }
+  }
+
+  /* Responsive: below md the sidebar overlays (tablet portrait), the tree
+     pane stacks above the detail. */
+  @media (max-width: 48rem) {
+    .shell {
+      flex-direction: column;
+    }
+    .sidebar {
+      width: 100%;
+      flex-direction: row;
+      align-items: center;
+      overflow-x: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--duct-border);
+    }
+    :root[data-sidebar="collapsed"] .sidebar {
+      width: 100%;
+    }
+    .sidebar-nav {
+      display: flex;
+      flex-direction: row;
     }
   }
 }

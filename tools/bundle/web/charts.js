@@ -75,7 +75,22 @@ td { padding: .3rem .6rem; border-top: 1px solid var(--duct-border, #d5dbe2); wh
 td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 `;
 
-const dark = matchMedia('(prefers-color-scheme: dark)');
+// Theme follows the page (html[data-theme] from the shell toggle, else the OS).
+const media = matchMedia('(prefers-color-scheme: dark)');
+const dark = {
+  get matches() {
+    const t = document.documentElement.getAttribute('data-theme');
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    return media.matches;
+  },
+  listeners: new Set(),
+  addEventListener(type, fn) { if (type === 'change') this.listeners.add(fn); },
+  removeEventListener(type, fn) { this.listeners.delete(fn); },
+};
+const syncDark = () => dark.listeners.forEach((fn) => fn());
+media.addEventListener('change', syncDark);
+new MutationObserver(syncDark).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 function numFmt(o) {
   const loc = 'es-CL';
@@ -97,7 +112,7 @@ class DuctChart extends HTMLElement {
   constructor() {
     super();
     this.root = this.attachShadow({ mode: 'open' });
-    this.root.innerHTML = `<style>${STYLE}</style><div class="wrap"><div class="msg">Cargando…</div></div>`;
+    this.root.innerHTML = `<style>${STYLE}</style><div class="wrap"></div>`;
     this.wrap = this.root.querySelector('.wrap');
     this.chart = null;
     this.onTheme = () => this.render();
@@ -144,6 +159,7 @@ class DuctChart extends HTMLElement {
     if (!raw) return;
     let spec;
     try { spec = JSON.parse(raw); } catch { return this.message('Respuesta inválida', true); }
+    this.dataset.loaded = '1'; // hides the panel skeleton (ui/input.css)
     if (spec.error) return this.message(spec.error, true);
     if (!spec.rows || spec.rows.length === 0) return this.message('Sin datos', false);
     const o = spec.options || {};

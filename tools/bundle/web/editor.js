@@ -24,10 +24,7 @@ const theme = EditorView.theme({
   "&": {
     backgroundColor: "var(--duct-surface)",
     color: "var(--duct-text)",
-    border: "1px solid var(--duct-border)",
-    borderRadius: "0.5rem",
-    minHeight: "11rem",
-    maxHeight: "28rem",
+    height: "100%",
     fontSize: "0.875rem",
   },
   "&.cm-focused": { outline: "2px solid var(--duct-orange)", outlineOffset: "1px" },
@@ -64,7 +61,7 @@ function mount(host) {
     if (btn) btn.click();
     return true;
   };
-  new EditorView({
+  const view = new EditorView({
     parent: host,
     state: EditorState.create({
       doc: area.value,
@@ -74,11 +71,35 @@ function mount(host) {
         sql({ dialect: StandardSQL, upperCaseKeywords: true }),
         theme,
         syntaxHighlighting(highlight),
-        EditorView.updateListener.of((u) => u.docChanged && sync(u.state.doc.toString())),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) sync(u.state.doc.toString());
+          if (u.docChanged || u.selectionSet) {
+            document.dispatchEvent(new CustomEvent("duct:sql-selection"));
+          }
+        }),
       ],
     }),
   });
   area.hidden = true;
+
+  // Contract with shell.js: set/insert SQL and read the current selection
+  // (run selection or all is decided from it).
+  window.ductEditorSelection = () => {
+    const { main } = view.state.selection;
+    return main.empty ? "" : view.state.sliceDoc(main.from, main.to);
+  };
+  document.addEventListener("duct:sql-set", (e) => {
+    const text = String(e.detail ?? "");
+    if (view.state.doc.toString() === text) return;
+    view.dispatch({ changes: { from: 0, to: view.state.length, insert: text }, selection: { anchor: 0 } });
+    view.focus();
+  });
+  document.addEventListener("duct:sql-insert", (e) => {
+    const text = String(e.detail ?? "");
+    const { from, to } = view.state.selection.main;
+    view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length } });
+    view.focus();
+  });
 }
 
 document.querySelectorAll("[data-sql-editor]").forEach(mount);
