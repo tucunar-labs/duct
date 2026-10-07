@@ -1,0 +1,89 @@
+package web
+
+// ---- Editor SQL ----
+
+type editorSignals struct {
+	SQL  string `json:"sql"`
+	Sel  string `json:"sel"`
+	CSRF string `json:"_csrf"`
+}
+
+templ sqlPage(p pageData, initial string, schemas []schema) {
+	@layout(p) {
+		<div class="flex h-full min-h-0 flex-col gap-3">
+			<div class="card-flat flex-none">
+				<div class="flex items-end gap-1 overflow-x-auto border-b border-line px-2 pt-1.5" data-worksheets role="tablist" aria-label="Consultas guardadas"></div>
+				<div class="flex flex-wrap items-center gap-2 p-2">
+					<button
+						id="run-btn"
+						type="button"
+						data-indicator:running
+						data-attr:disabled="$running"
+						data-on:click="@post('/sql/run', {headers: {'X-CSRF-Token': $_csrf}})"
+						class="btn btn-primary"
+					>
+						@icon("play", "h-3.5 w-3.5")
+						Ejecutar
+					</button>
+					<span data-show="$running" class="text-sm text-muted" style="display:none">Ejecutando…</span>
+					<span class="text-xs text-muted">
+						@kbd("Ctrl", "Enter")
+						ejecuta la selección o toda la consulta
+					</span>
+					<span class="ml-auto flex items-center gap-2">
+						<button type="button" class="btn btn-secondary btn-sm" data-export-csv="#results">
+							@icon("download", "h-3.5 w-3.5")
+							Exportar CSV
+						</button>
+					</span>
+				</div>
+			</div>
+			<div class="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+				@treePane(schemas, "", "", "sql-tree", "Esquema", true)
+				<div class="flex min-h-0 flex-1 flex-col" data-signals={ templ.JSONString(editorSignals{SQL: initial, CSRF: p.CSRF}) }>
+					<div
+						id="sql-editor-pane"
+						class="card-flat relative flex min-h-[10rem] flex-1 flex-col overflow-hidden"
+						data-split-default="260"
+					>
+						<div class="flex min-h-0 flex-1 flex-col">
+							<div data-sql-editor data-run="#run-btn" class="min-h-0 flex-1"></div>
+							<textarea data-bind:sql name="sql" rows="8" aria-label="Consulta SQL" class="w-full rounded border border-line bg-surface p-3 font-mono text-sm">{ initial }</textarea>
+						</div>
+					</div>
+					<div
+						class="splitter"
+						data-splitter
+						data-split="#sql-editor-pane"
+						role="separator"
+						aria-orientation="horizontal"
+						aria-label="Redimensionar editor y resultados"
+						tabindex="0"
+					></div>
+					<div class="flex min-h-0 flex-1 flex-col" data-results-host>
+						<div class="tabs flex-none" role="tablist" aria-label="Salida">
+							<button type="button" role="tab" id="tab-result" aria-controls="panel-result" aria-selected="true" class="tab">Resultado</button>
+							<button type="button" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1" class="tab">
+								<span class="flex items-center gap-1.5">
+									@icon("history", "h-3.5 w-3.5")
+									Historial
+								</span>
+							</button>
+							<span class="ml-auto flex items-center gap-1 pr-1">
+								<button type="button" class="btn btn-ghost btn-sm" data-history-clear title="Borrar el historial local">Limpiar</button>
+							</span>
+						</div>
+						<section id="panel-result" role="tabpanel" aria-labelledby="tab-result" tabindex="0" class="min-h-0 flex-1 overflow-y-auto rounded-b-lg border border-t-0 border-line bg-bg p-2">
+							@resultsView(nil)
+						</section>
+						<section id="panel-history" role="tabpanel" aria-labelledby="tab-history" tabindex="0" hidden class="min-h-0 flex-1 overflow-y-auto rounded-b-lg border border-t-0 border-line bg-bg p-2">
+							<div data-history class="space-y-2"></div>
+						</section>
+					</div>
+					<input type="hidden" data-bind:sel value=""/>
+				</div>
+			</div>
+		</div>
+		<script type="module" src={ p.Assets.URL("editor.js") }></script>
+	}
+}

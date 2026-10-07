@@ -1,0 +1,177 @@
+package web
+
+import (
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ---- results grid (SQL editor + catalog preview) ----
+
+// typeKind classifies a column type for its badge.
+func typeKind(t string) string {
+	u := strings.ToUpper(t)
+	switch {
+	case strings.Contains(u, "INT"), strings.Contains(u, "DEC"), strings.Contains(u, "NUM"),
+		strings.Contains(u, "FLOAT"), strings.Contains(u, "DOUBLE"), strings.Contains(u, "REAL"),
+		strings.Contains(u, "MONEY"):
+		return "num"
+	case strings.Contains(u, "CHAR"), strings.Contains(u, "TEXT"), strings.Contains(u, "STRING"),
+		strings.Contains(u, "BLOB"), strings.Contains(u, "UUID"), strings.Contains(u, "JSON"),
+		strings.Contains(u, "ENUM"), strings.Contains(u, "LIST"), strings.Contains(u, "STRUCT"),
+		strings.Contains(u, "MAP"), strings.Contains(u, "UNION"):
+		return "str"
+	case strings.Contains(u, "BOOL"):
+		return "bool"
+	case strings.Contains(u, "DATE"), strings.Contains(u, "TIME"), strings.Contains(u, "INTERVAL"),
+		strings.Contains(u, "YEAR"):
+		return "time"
+	default:
+		return "other"
+	}
+}
+
+var (
+	errLineRe = regexp.MustCompile(`(?i)\bline\s+(\d+)\b`)
+	errColRe  = regexp.MustCompile(`(?i)\bcolumn\s+(\d+)\b`)
+)
+
+// errPos finds a LINE/COLUMN hint in an engine error message (best effort:
+// DuckDB reports positions in some parser errors only).
+func errPos(msg string) (int, int) {
+	line, col := 0, 0
+	if m := errLineRe.FindStringSubmatch(msg); m != nil {
+		line, _ = strconv.Atoi(m[1])
+	}
+	if m := errColRe.FindStringSubmatch(msg); m != nil {
+		col, _ = strconv.Atoi(m[1])
+	}
+	return line, col
+}
+
+func msString(d time.Duration) string {
+	ms := float64(d) / float64(time.Millisecond)
+	if ms < 1 {
+		return "<1 ms"
+	}
+	if ms < 1000 {
+		return strconv.Itoa(int(ms+0.5)) + " ms"
+	}
+	return strconv.FormatFloat(ms/1000, 'f', 2, 64) + " s"
+}
+
+// resultsView is the patch target of the SQL editor: always rendered with
+// id="results" so Datastar can morph it in place. The data-* attributes are
+// read by shell.js to record the local query history.
+templ resultsView(r *queryResult) {
+	<div id="results" aria-live="polite">
+		if r == nil {
+			@emptyState("sparkle", "Sin resultados todavía", "Escribe una consulta y pulsa Ejecutar.")
+		} else {
+			@resultsGrid(r, true)
+		}
+	</div>
+}
+
+templ resultsGrid(r *queryResult, meta bool) {
+	if r != nil {
+		<div
+			data-results
+			data-rows={ strconv.Itoa(len(r.Rows)) }
+			data-ms={ strconv.FormatFloat(float64(r.Elapsed)/float64(time.Millisecond), 'f', 1, 64) }
+			data-error={ r.Err }
+			data-nonce={ strconv.FormatInt(r.Nonce, 10) }
+		>
+			if r.Err != "" {
+				@errorPanel(r.Err)
+			} else {
+				if meta {
+					@resultMeta(r)
+				}
+				if len(r.Columns) == 0 {
+					<p class="text-sm text-muted">La consulta no devolvió columnas.</p>
+				} else {
+					<div
+						class="max-h-[inherit] overflow-auto rounded-lg border border-line bg-surface"
+						tabindex="0"
+						role="region"
+						aria-label="Resultados de la consulta"
+					>
+						<table class="data-table min-w-full">
+							<thead>
+								<tr>
+									<th scope="col" class="w-10 text-right">#</th>
+									for _, c := range r.Columns {
+										<th scope="col">
+											<span class="flex items-center gap-1.5">
+												<span data-col={ c.Name } class="font-mono text-xs font-semibold normal-case tracking-normal text-ink">{ c.Name }</span>
+												@typeBadge(c.Type)
+											</span>
+										</th>
+									}
+								</tr>
+							</thead>
+							<tbody>
+								for i, row := range r.Rows {
+									<tr class="group">
+										<td class="w-10 text-right font-mono text-xs text-muted">
+											<span class="inline-flex items-center gap-1">
+												{ strconv.Itoa(i + 1) }
+												<button type="button" data-copy-row class="row-copy btn btn-ghost btn-icon h-5 w-5" title="Copiar fila (TSV)" aria-label={ "Copiar fila " + strconv.Itoa(i+1) }>
+													@icon("copy", "h-3 w-3")
+												</button>
+											</span>
+										</td>
+										for _, cell := range row {
+											if cell.Null {
+												<td data-col="" class="results-cell results-null" title="NULL">NULL</td>
+											} else {
+												<td data-col="" class="results-cell" title="Clic para copiar">{ cell.Text }</td>
+											}
+										}
+									</tr>
+								}
+							</tbody>
+						</table>
+					</div>
+				}
+			}
+		</div>
+	}
+}
+
+templ resultMeta(r *queryResult) {
+	<div class="mb-2 flex flex-wrap items-center gap-2 text-sm text-muted">
+		<span class="badge badge-muted">{ strconv.Itoa(len(r.Rows)) } filas</span>
+		if r.Truncated {
+			<span class="badge badge-warn">truncado al límite de { strconv.Itoa(r.Limit) }</span>
+		}
+		<span class="badge badge-muted" title="Duración de la consulta">{ msString(r.Elapsed) }</span>
+		<button type="button" data-export-csv="#results" class="btn btn-ghost btn-sm ml-auto">
+			@icon("download", "h-3.5 w-3.5")
+			Exportar CSV
+		</button>
+	</div>
+}
+
+templ errorPanel(msg string) {
+	<div role="alert" class="rounded-lg border border-danger/40 bg-danger-bg p-3">
+		<div class="flex items-start gap-2">
+			@icon("alert", "mt-0.5 h-4 w-4 flex-none text-danger")
+			<div class="min-w-0 flex-1">
+				<p class="mb-1 text-xs font-semibold uppercase tracking-wide text-danger">Error en la consulta</p>
+				<pre class="whitespace-pre-wrap font-mono text-xs text-danger">{ msg }</pre>
+				if line, col := errPos(msg); line > 0 {
+					<p class="mt-2">
+						if col > 0 {
+							<span class="badge badge-danger">L{ strconv.Itoa(line) }:C{ strconv.Itoa(col) }</span>
+						} else {
+							<span class="badge badge-danger">L{ strconv.Itoa(line) }</span>
+						}
+					</p>
+				}
+			</div>
+		</div>
+	</div>
+}

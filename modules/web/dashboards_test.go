@@ -277,8 +277,9 @@ func TestDashboardRender(t *testing.T) {
 	if len(reqs) != 1 || reqs[0].Dims[0] != "region" || reqs[0].Measures[0] != "ingresos" || e.sem.who[0].Role != "analyst" {
 		t.Errorf("value queries: %+v %+v", reqs, e.sem.who)
 	}
-	// An inline <script> would break the CSP: only the module scripts.
-	if n := strings.Count(body, "<script"); n != strings.Count(body, `<script type="module" src=`) {
+	// An inline <script> would break the CSP: only external scripts (module or
+	// the classic shell.js, which must run before first paint).
+	if n := strings.Count(body, "<script"); n != strings.Count(body, `<script src=`)+strings.Count(body, `<script type="module" src=`) {
 		t.Errorf("inline script in the page (%d)", n)
 	}
 }

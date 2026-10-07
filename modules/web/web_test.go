@@ -23,7 +23,10 @@ import (
 
 // ---- fakes ----
 
-type fakeAuth struct{ fail bool }
+type fakeAuth struct {
+	fail bool
+	role string // "" = "analyst"
+}
 
 func (*fakeAuth) Name() string                                { return "fake" }
 func (*fakeAuth) Init(context.Context, contract.Config) error { return nil }
@@ -33,7 +36,11 @@ func (f *fakeAuth) Authenticate(_ context.Context, c contract.Credentials) (cont
 		return contract.Identity{}, errors.New("backend down")
 	}
 	if c.Scheme == "password" && c.User == "ana" && c.Secret == "pw" {
-		return contract.Identity{User: "ana", Role: "analyst"}, nil
+		role := f.role
+		if role == "" {
+			role = "analyst"
+		}
+		return contract.Identity{User: "ana", Role: role}, nil
 	}
 	return contract.Identity{}, fmt.Errorf("bad login: %w", contract.ErrUnauthenticated)
 }
@@ -74,13 +81,17 @@ func (q *fakeQ) Query(_ context.Context, id contract.Identity, sql string) (cont
 	var names []string
 	var cols []arrow.Array
 	if strings.Contains(sql, "information_schema.columns") {
-		names = []string{"table_schema", "table_name", "column_name", "data_type"}
+		names = []string{"table_schema", "table_name", "column_name", "data_type", "is_nullable"}
 		cols = []arrow.Array{
 			str("gold", "gold", "gold", "silver"),
 			str("sales", "sales", "sales", "orders"),
 			str("id", "<b>name</b>", "amount", "id"),
 			str("BIGINT", "VARCHAR", "DOUBLE", "BIGINT"),
+			str("NO", "YES", "YES", "NO"),
 		}
+	} else if strings.Contains(sql, "count(*)") {
+		names = []string{"count_star()"}
+		cols = []arrow.Array{str("42")}
 	} else {
 		n := q.rows
 		if n == 0 {
@@ -534,5 +545,130 @@ func TestCatalogErrorIsShown(t *testing.T) {
 	resp, body := e.get("/catalog")
 	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(body, "No se pudo leer el catálogo") {
 		t.Errorf("catalog error: %d", resp.StatusCode)
+	}
+}
+
+// ---- redesigned UI: shell, table detail, SQL selection, admin nav ----
+
+func TestAppShellMarkers(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	_, body := e.get("/catalog")
+	for _, want := range []string{
+		"shell.js", "data-theme-toggle", "data-sidebar-toggle", "data-menu-toggle",
+		"Migas de pan", "data-menu-panel", "Salir", "Catálogo", "Editor SQL", "Dashboards",
+		"Trabajos",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell missing %q", want)
+		}
+	}
+	// The classic shell script must not be inline (CSP).
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<script >") {
+		t.Error("inline script in the page")
+	}
+}
+
+func TestAdminNavOnlyForAdmin(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	if _, body := e.get("/catalog"); strings.Contains(body, ">Admin<") {
+		t.Error("Admin placeholder shown to a non-admin role")
+	}
+	e2 := newEnv(t, appConfig{}, &fakeAuth{role: "duct_admin"})
+	e2.login()
+	_, body := e2.get("/catalog")
+	if !strings.Contains(body, ">Admin<") || !strings.Contains(body, "duct_admin") {
+		t.Errorf("Admin placeholder missing for duct_admin: %s", body)
+	}
+}
+
+func TestCatalogTableDetail(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	resp, body := e.get("/catalog/gold/sales")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	for _, want := range []string{
+		"Vista previa", "Detalles", "Abrir en editor SQL", // tabs + action
+		"&lt;b&gt;name&lt;/b&gt;", // columns tab, escaped
+		">No<", ">Sí<",            // nullable badges
+		"42",            // row count through QueryHandler
+		"2 filas",       // preview
+		"/sql?q=SELECT", // open in editor
+		"data-copy-text",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("table detail missing %q", want)
+		}
+	}
+	// The preview and the count run as the session identity.
+	for _, c := range e.q.calls {
+		if c.who.User != "ana" {
+			t.Errorf("detail query ran as %+v", c)
+		}
+	}
+	if !strings.Contains(body, `href="/catalog"`) {
+		t.Error("no breadcrumb to /catalog")
+	}
+}
+
+func TestCatalogTableNotFound(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	resp, body := e.get("/catalog/gold/nope")
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(body, "No existe la tabla") {
+		t.Errorf("unknown table: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestSQLRunSelection(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	tok := e.csrfToken()
+	body := fmt.Sprintf(`{"sql":"SELECT 1","sel":"SELECT 2","_csrf":"%s"}`, tok)
+	req, _ := http.NewRequest("POST", e.srv.URL+"/sql/run", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("X-CSRF-Token", tok)
+	resp, out := e.do(req)
+	if resp.StatusCode != 200 || !strings.Contains(out, "id=\"results\"") {
+		t.Fatalf("run selection: %d %s", resp.StatusCode, out)
+	}
+	last := e.q.calls[len(e.q.calls)-1]
+	if last.sql != "SELECT 2" {
+		t.Errorf("ran %q, want the selection", last.sql)
+	}
+}
+
+func TestSQLEditorHasSchemaBrowser(t *testing.T) {
+	e := newEnv(t, appConfig{}, &fakeAuth{})
+	e.login()
+	_, body := e.get("/sql")
+	for _, want := range []string{
+		"data-sql-editor", "data-bind:sql", "data-bind:sel", "/sql/run",
+		"data-worksheets", "data-history", "data-splitter", "data-insert",
+		"editor.js", "wordmark", "gold",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("editor page missing %q", want)
+		}
+	}
+}
+
+func TestErrPos(t *testing.T) {
+	for _, tc := range []struct {
+		msg       string
+		line, col int
+	}{
+		{`Parser Error: syntax error at or near "SELCT"`, 0, 0},
+		{"LINE 3: SELCT 1", 3, 0},
+		{"Binder Error: at line 2, column 9", 2, 9},
+	} {
+		l, c := errPos(tc.msg)
+		if l != tc.line || c != tc.col {
+			t.Errorf("errPos(%q) = %d,%d want %d,%d", tc.msg, l, c, tc.line, tc.col)
+		}
 	}
 }

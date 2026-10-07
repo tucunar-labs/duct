@@ -15,14 +15,6 @@ import (
 // ECharts island, static/charts.js) as its query finishes. Filters and
 // cross-filter selections are Datastar signals; the server is stateless.
 
-type dashLink struct {
-	Name        string
-	Title       string
-	Description string
-	Charts      int
-	Err         string // file that does not parse: shown, not served
-}
-
 templ dashboardsPage(p pageData, links []dashLink, errMsg string) {
 	@layout(p) {
 		<div class="mb-4 flex items-baseline justify-between">

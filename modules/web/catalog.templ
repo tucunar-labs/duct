@@ -1,0 +1,389 @@
+package web
+
+import (
+	"net/url"
+	"strconv"
+)
+
+// ---- Catálogo ----
+
+type column struct {
+	Name     string
+	Type     string
+	Nullable string // "YES" | "NO" | "" (unknown)
+}
+
+type table struct {
+	Name    string
+	Columns []column
+}
+
+type schema struct {
+	Name   string
+	Tables []table
+}
+
+func colCount(n int) string {
+	if n == 1 {
+		return "1 columna"
+	}
+	return strconv.Itoa(n) + " columnas"
+}
+
+func tableCount(n int) string {
+	if n == 1 {
+		return "1 tabla"
+	}
+	return strconv.Itoa(n) + " tablas"
+}
+
+func previewURL(schemaName, tableName string) templ.SafeURL {
+	q := "SELECT * FROM " + quoteIdent(schemaName) + "." + quoteIdent(tableName) + " LIMIT 100"
+	return templ.URL("/sql?" + url.Values{"q": {q}}.Encode())
+}
+
+func tableURL(schemaName, tableName string) templ.SafeURL {
+	return templ.URL("/catalog/" + url.PathEscape(schemaName) + "/" + url.PathEscape(tableName))
+}
+
+// nullableLabel renders the nullable column of the Columns tab.
+func nullableLabel(v string) string {
+	switch v {
+	case "YES":
+		return "Sí"
+	case "NO":
+		return "No"
+	default:
+		return "—"
+	}
+}
+
+// treeSearchText is what the client-side search matches against.
+func treeSearchText(s schema, t *table, c *column) string {
+	out := s.Name
+	if t != nil {
+		out += " " + t.Name
+		if c != nil {
+			out += " " + c.Name + " " + c.Type
+		}
+	}
+	return out
+}
+
+// catalogTree is the schema → table → columns tree. forEditor turns rows into
+// insert-into-SQL buttons; otherwise tables link to their detail page.
+templ catalogTree(schemas []schema, activeSchema, activeTable, treeID string, forEditor bool) {
+	<div class="tree" id={ treeID }>
+		if len(schemas) == 0 {
+			<p data-tree-empty class="px-2 py-4 text-sm text-muted">No hay tablas visibles para este rol.</p>
+		}
+		for _, s := range schemas {
+			<details data-tree-node data-search={ treeSearchText(s, nil, nil) } data-open open>
+				<summary class="tree-row" title={ s.Name }>
+					@icon("schema", "h-3.5 w-3.5 flex-none text-muted")
+					<span class="truncate font-mono text-xs font-semibold">{ s.Name }</span>
+					<span class="tree-type">{ tableCount(len(s.Tables)) }</span>
+				</summary>
+				<div class="ml-3 border-l border-line pl-1">
+					for _, t := range s.Tables {
+						<details
+							data-tree-node
+							data-search={ treeSearchText(s, &t, nil) }
+							if s.Name == activeSchema && t.Name == activeTable {
+								data-active-node="true"
+							}
+						>
+						<summary
+							class="tree-row"
+							if s.Name == activeSchema && t.Name == activeTable {
+								data-active="true"
+							}
+						>
+							if forEditor {
+								<button
+									type="button"
+									data-insert={ quoteIdent(s.Name) + "." + quoteIdent(t.Name) }
+									class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+									title="Insertar en el editor"
+								>
+									@icon("table", "h-3.5 w-3.5 flex-none text-muted")
+									<span class="truncate font-mono text-xs">{ t.Name }</span>
+								</button>
+							} else {
+								<a href={ tableURL(s.Name, t.Name) } class="flex min-w-0 flex-1 items-center gap-1.5" title={ "Ver " + s.Name + "." + t.Name }>
+									@icon("table", "h-3.5 w-3.5 flex-none text-muted")
+									<span class="truncate font-mono text-xs">{ t.Name }</span>
+								</a>
+							}
+							<span class="tree-type">{ colCount(len(t.Columns)) }</span>
+							if !forEditor {
+								<a
+									href={ previewURL(s.Name, t.Name) }
+									class="btn btn-ghost btn-icon h-5 w-5 flex-none"
+									title="Consultar 100 filas en el editor SQL"
+									aria-label={ "Consultar " + s.Name + "." + t.Name }
+								>
+									@icon("play", "h-3 w-3")
+								</a>
+							}
+						</summary>
+							<div class="ml-4 border-l border-line pl-2">
+								for _, c := range t.Columns {
+									<div class="tree-row cursor-default" data-tree-node data-search={ treeSearchText(s, &t, &c) }>
+										if forEditor {
+											<button
+												type="button"
+												data-insert={ quoteIdent(c.Name) }
+												class="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+												title="Insertar columna"
+											>
+												<span class="truncate font-mono text-xs">{ c.Name }</span>
+												<span class="tree-type">{ c.Type }</span>
+											</button>
+										} else {
+											<span class="truncate font-mono text-xs">{ c.Name }</span>
+											<span class="tree-type">{ c.Type }</span>
+										}
+									</div>
+								}
+							</div>
+						</details>
+					}
+				</div>
+			</details>
+		}
+	</div>
+}
+
+// treePane wraps the tree with its search box (shared by catalog and SQL).
+templ treePane(schemas []schema, activeSchema, activeTable, treeID, title string, forEditor bool) {
+	<div class="card-flat flex h-full min-h-0 w-full flex-col lg:w-72 lg:flex-none">
+		<div class="border-b border-line p-2">
+			<p class="mb-1.5 px-1 text-xs font-semibold uppercase tracking-wide text-muted">{ title }</p>
+			<label class="relative block">
+				<span class="sr-only">Buscar tablas o columnas</span>
+				@icon("search", "pointer-events-none absolute left-2 top-1.5 h-4 w-4 text-muted")
+				<input type="search" data-tree-search={ "#" + treeID } placeholder="Buscar tablas o columnas…" class="input pl-7"/>
+			</label>
+		</div>
+		<div class="min-h-0 flex-1 overflow-y-auto p-2">
+			@catalogTree(schemas, activeSchema, activeTable, treeID, forEditor)
+		</div>
+	</div>
+}
+
+type dashLink struct {
+	Name        string
+	Title       string
+	Description string
+	Charts      int
+	Err         string // file that does not parse: shown, not served
+}
+
+templ catalogPage(p pageData, schemas []schema, errMsg string, dashes []dashLink) {
+	@layout(p) {
+		<div class="flex h-full min-h-0 flex-col gap-4 lg:flex-row">
+			@treePane(schemas, "", "", "catalog-tree", "Esquemas", false)
+			<div class="min-w-0 flex-1 overflow-y-auto">
+				<div class="mx-auto max-w-5xl space-y-5">
+					<div class="flex flex-wrap items-baseline justify-between gap-2">
+						<div>
+							<h1 class="text-xl font-semibold">Catálogo</h1>
+							<p class="text-sm text-muted">Explora lo que tu rol puede ver y consulta tablas al instante</p>
+						</div>
+						<a href="/sql" class="btn btn-primary">
+							@icon("sql", "h-4 w-4")
+							Nueva consulta
+						</a>
+					</div>
+					if errMsg != "" {
+						<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
+					} else {
+						@statCards(catalogStats(schemas))
+						<section class="card p-4" aria-labelledby="cat-quick">
+							<h2 id="cat-quick" class="mb-2 text-sm font-semibold">Cómo empezar</h2>
+							<ul class="space-y-1.5 text-sm text-muted">
+								<li class="flex items-start gap-2">
+									@icon("search", "mt-0.5 h-4 w-4 flex-none")
+									Busca una tabla o columna en el árbol de la izquierda y ábrela para ver sus columnas, datos y detalles.
+								</li>
+								<li class="flex items-start gap-2">
+									@icon("play", "mt-0.5 h-4 w-4 flex-none")
+									Desde una tabla, usa <span class="font-medium text-ink">Abrir en editor SQL</span> para ajustar la consulta y ejecutarla.
+								</li>
+								<li class="flex items-start gap-2">
+									@icon("history", "mt-0.5 h-4 w-4 flex-none")
+									El editor guarda tus consultas y tu historial en este navegador (localStorage).
+								</li>
+							</ul>
+						</section>
+					}
+					if len(dashes) > 0 {
+						<section aria-labelledby="cat-dashes">
+							<h2 id="cat-dashes" class="mb-2 text-sm font-semibold">Dashboards</h2>
+							<ul class="grid gap-3 sm:grid-cols-2">
+								for _, l := range dashes {
+									if l.Err == "" {
+										<li>
+											<a href={ templ.URL("/dashboards/" + l.Name) } class="card-flat flex items-center gap-3 p-3 hover:bg-hover">
+												<span class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-surface2 text-muted">
+													@icon("dashboards", "h-4.5 w-4.5")
+												</span>
+												<span class="min-w-0">
+													<span class="block truncate text-sm font-medium text-brand-strong">{ l.Title }</span>
+													<span class="block truncate text-xs text-muted">{ strconv.Itoa(l.Charts) } gráficos</span>
+												</span>
+											</a>
+										</li>
+									}
+								}
+							</ul>
+						</section>
+					}
+				</div>
+			</div>
+		</div>
+	}
+}
+
+func catalogStats(schemas []schema) []pageStat {
+	tables, cols := 0, 0
+	for _, s := range schemas {
+		tables += len(s.Tables)
+		for _, t := range s.Tables {
+			cols += len(t.Columns)
+		}
+	}
+	return []pageStat{
+		{Label: "Esquemas", Value: strconv.Itoa(len(schemas)), Icon: "schema"},
+		{Label: "Tablas", Value: strconv.Itoa(tables), Icon: "table"},
+		{Label: "Columnas", Value: strconv.Itoa(cols), Icon: "columns"},
+		{Label: "Rol", Value: "", Icon: "admin"},
+	}
+}
+
+// ---- table detail ----
+
+// tableDetail is one table of the catalog plus best-effort metadata gathered
+// through the QueryHandler (row count) and the optional SemanticQuerier
+// (last DuckLake snapshot); anything denied by governance shows as "—".
+type tableDetail struct {
+	Schema      string
+	Name        string
+	Columns     []column
+	RowCount    string // "" = unknown
+	Snapshot    string // "" = unknown
+	CountErr    string
+	SnapshotErr string
+}
+
+templ tablePage(p pageData, schemas []schema, d tableDetail, preview *queryResult) {
+	@layout(p) {
+		<div class="flex h-full min-h-0 flex-col gap-4 lg:flex-row">
+			@treePane(schemas, d.Schema, d.Name, "catalog-tree", "Esquemas", false)
+			<div class="min-w-0 flex-1 overflow-y-auto">
+				<div class="mx-auto max-w-5xl space-y-4">
+					<header class="flex flex-wrap items-start justify-between gap-3">
+						<div class="min-w-0">
+							<p class="flex items-center gap-1.5 text-xs text-muted">
+								@icon("schema", "h-3.5 w-3.5")
+								{ d.Schema }
+							</p>
+							<h1 class="flex items-center gap-2 text-xl font-semibold">
+								@icon("table", "h-5 w-5 text-muted")
+								<span class="font-mono">{ d.Name }</span>
+								<span class="badge badge-muted">{ colCount(len(d.Columns)) }</span>
+							</h1>
+						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<button
+								type="button"
+								class="btn btn-secondary btn-sm"
+								data-copy-text={ d.Schema + "." + d.Name }
+								title="Copiar nombre cualificado"
+							>
+								@icon("copy", "h-3.5 w-3.5")
+								Copiar nombre
+							</button>
+							<a href={ previewURL(d.Schema, d.Name) } class="btn btn-primary btn-sm">
+								@icon("play", "h-3.5 w-3.5")
+								Abrir en editor SQL
+							</a>
+						</div>
+					</header>
+					<div class="tabs" role="tablist" aria-label="Detalle de la tabla">
+						<button type="button" role="tab" id="tab-columns" aria-controls="panel-columns" aria-selected="true" class="tab">Columnas</button>
+						<button type="button" role="tab" id="tab-preview" aria-controls="panel-preview" aria-selected="false" tabindex="-1" class="tab">Vista previa</button>
+						<button type="button" role="tab" id="tab-details" aria-controls="panel-details" aria-selected="false" tabindex="-1" class="tab">Detalles</button>
+					</div>
+					<section id="panel-columns" role="tabpanel" aria-labelledby="tab-columns" tabindex="0">
+						<div class="card overflow-hidden">
+							<table class="data-table">
+								<thead>
+									<tr>
+										<th scope="col" class="w-10 text-right">#</th>
+										<th scope="col">Columna</th>
+										<th scope="col">Tipo</th>
+										<th scope="col">Nula</th>
+									</tr>
+								</thead>
+								<tbody>
+									for i, c := range d.Columns {
+										<tr>
+											<td class="text-right font-mono text-xs text-muted">{ strconv.Itoa(i + 1) }</td>
+											<td class="font-mono">{ c.Name }</td>
+											<td>@typeBadge(c.Type)</td>
+											<td class="text-muted">
+												if c.Nullable == "YES" {
+													<span class="badge badge-muted">Sí</span>
+												} else if c.Nullable == "NO" {
+													<span class="badge badge-bool">No</span>
+												} else {
+													—
+												}
+											</td>
+										</tr>
+									}
+								</tbody>
+							</table>
+						</div>
+					</section>
+					<section id="panel-preview" role="tabpanel" aria-labelledby="tab-preview" tabindex="0" hidden>
+						<p class="mb-2 text-sm text-muted">Primeras 100 filas · <a href={ previewURL(d.Schema, d.Name) } class="text-brand-strong hover:underline">abrir en el editor SQL</a></p>
+						@resultsGrid(preview, true)
+					</section>
+					<section id="panel-details" role="tabpanel" aria-labelledby="tab-details" tabindex="0" hidden>
+						<dl class="card divide-y divide-line">
+							@detailRow("Esquema", d.Schema, "schema")
+							@detailRow("Tabla", d.Name, "table")
+							@detailRow("Columnas", colCount(len(d.Columns)), "columns")
+							@detailRow("Filas", orDash(d.RowCount, d.CountErr), "dashboards")
+							@detailRow("Último snapshot (DuckLake)", orDash(d.Snapshot, d.SnapshotErr), "history")
+						</dl>
+						<p class="mt-2 text-xs text-muted">Las cifras pasan por el manejador consultado con tu sesión: lo que tu rol no puede ver aparece como “—”.</p>
+					</section>
+				</div>
+			</div>
+		</div>
+	}
+}
+
+func orDash(v, errMsg string) string {
+	if v != "" {
+		return v
+	}
+	if errMsg != "" {
+		return "—"
+	}
+	return "—"
+}
+
+templ detailRow(label, value, iconName string) {
+	<div class="flex items-center gap-3 px-4 py-2.5">
+		<span class="flex h-8 w-8 flex-none items-center justify-center rounded-lg bg-surface2 text-muted">
+			@icon(iconName, "h-4 w-4")
+		</span>
+		<dt class="w-56 flex-none text-sm text-muted">{ label }</dt>
+		<dd class="min-w-0 flex-1 truncate font-mono text-sm">{ value }</dd>
+	</div>
+}
