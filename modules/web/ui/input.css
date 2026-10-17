@@ -301,6 +301,39 @@
     background: var(--duct-danger-bg);
     color: var(--duct-danger);
   }
+  .badge-success {
+    background: var(--duct-success-bg);
+    color: var(--duct-success);
+  }
+  .badge-info {
+    background: var(--duct-info-bg);
+    color: var(--duct-info);
+  }
+  .badge-warn {
+    background: var(--duct-warn-bg);
+    color: var(--duct-warn);
+  }
+  .run-dot {
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 999px;
+    background: currentColor;
+    animation: duct-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes duct-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.25;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .run-dot {
+      animation: none;
+    }
+  }
   .kbd {
     display: inline-flex;
     align-items: center;
@@ -382,6 +415,101 @@
   }
   .data-table tbody tr:hover td {
     background: var(--duct-hover);
+  }
+
+  /* DAG of a job (server-rendered SVG): colours follow the run status. */
+  .dag {
+    overflow: auto;
+    padding: 0.5rem;
+  }
+  .dag svg {
+    display: block;
+    min-width: min-content;
+    font-family: inherit;
+  }
+  .dag-edge {
+    fill: none;
+    stroke: var(--duct-border);
+    stroke-width: 1.5;
+  }
+  .dag-arrow {
+    fill: var(--duct-muted);
+  }
+  .dag-edge[data-status="success"] {
+    stroke: var(--duct-success);
+  }
+  .dag-node rect {
+    fill: var(--duct-surface);
+    stroke: var(--duct-border);
+    stroke-width: 1.25;
+  }
+  .dag-node .dag-id {
+    fill: var(--duct-text);
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .dag-node .dag-type {
+    fill: var(--duct-muted);
+    font-size: 10.5px;
+  }
+  .dag-node .dag-mark {
+    fill: var(--duct-muted);
+  }
+  .dag-node[data-status="success"] rect {
+    stroke: var(--duct-success);
+    fill: var(--duct-success-bg);
+  }
+  .dag-node[data-status="success"] .dag-mark {
+    fill: var(--duct-success);
+  }
+  .dag-node[data-status="failed"] rect {
+    stroke: var(--duct-danger);
+    fill: var(--duct-danger-bg);
+  }
+  .dag-node[data-status="failed"] .dag-mark {
+    fill: var(--duct-danger);
+  }
+  .dag-node[data-status="running"] rect {
+    stroke: var(--duct-info);
+    fill: var(--duct-info-bg);
+    stroke-width: 2;
+  }
+  .dag-node[data-status="running"] .dag-mark {
+    fill: var(--duct-info);
+    animation: duct-pulse 1.2s ease-in-out infinite;
+  }
+  .dag-node[data-status="cancelled"] rect {
+    stroke: var(--duct-warn);
+    fill: var(--duct-warn-bg);
+  }
+  .dag-node[data-status="cancelled"] .dag-mark {
+    fill: var(--duct-warn);
+  }
+  .dag-node[data-status="skipped"] rect {
+    stroke-dasharray: 4 3;
+  }
+  .dag-node a:focus-visible {
+    outline: none;
+  }
+  .dag-node a:focus-visible rect {
+    stroke: var(--duct-orange);
+    stroke-width: 3;
+  }
+  .dag-node a:hover rect {
+    stroke: var(--duct-orange);
+  }
+  .task-out {
+    max-height: 16rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-radius: 0.5rem;
+    background: var(--duct-bg);
+    border: 1px solid var(--duct-border);
+    padding: 0.5rem 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.1rem;
   }
 
   /* Empty states. */

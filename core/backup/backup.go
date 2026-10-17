@@ -42,6 +42,8 @@ type Options struct {
 	// Keep, if > 0, deletes the oldest complete backups under To beyond the
 	// newest Keep (this one included) once the new one is complete.
 	Keep int
+	// Crypto, if not nil, encrypts every object but the manifest (age).
+	Crypto *Crypto
 	// Version is the duct version recorded in the manifest.
 	Version string
 	// Log receives progress lines (may be nil). Never receives secrets.
@@ -156,6 +158,9 @@ func Run(ctx context.Context, p *project.Project, eng contract.Engine, opt Optio
 	}
 	if p.CatalogIsPostgres() {
 		b.m.CatalogType = "postgres"
+	}
+	if opt.Crypto != nil {
+		b.m.Format, b.m.Encrypted, b.m.Recipients = FormatEncrypted, true, opt.Crypto.RecipientSpecs
 	}
 	if p.StorageIsS3() {
 		b.m.StorageKind = "s3"
@@ -339,7 +344,12 @@ func (b *backup) snapshotInfo(ctx context.Context, _ metaTables) error {
 		return err
 	}
 	if len(enc) > 0 && strings.EqualFold(enc[0], "true") {
-		return errors.New("backup: encrypted lakes are not supported yet")
+		// The per-file keys are columns of ducklake_data_file / ducklake_delete_file,
+		// so the catalog copy carries them and the data files are copied as they are.
+		b.m.LakeEncrypted = true
+		if b.opt.Crypto == nil {
+			b.opt.logf("warning: this lake is ENCRYPTED but the backup is not: the file keys are in the catalog copy next to the data; use --encrypt")
+		}
 	}
 	if v, err := b.s.names(ctx, "SELECT version()"); err == nil && len(v) > 0 {
 		b.m.DuckDBVersion = v[0]
@@ -413,6 +423,23 @@ WHERE t.begin_snapshot <= %d AND (t.end_snapshot IS NULL OR t.end_snapshot > %d)
 	return nil
 }
 
+// putLocal stores a local file under key (encrypted when the backup is) and
+// returns its manifest entry.
+func (b *backup) putLocal(ctx context.Context, kind, key, local string) (File, error) {
+	if b.opt.Crypto != nil {
+		fh, err := os.Open(local) //nolint:gosec // path built by this package
+		if err != nil {
+			return File{}, err
+		}
+		defer func() { _ = fh.Close() }()
+		f, err := b.opt.Crypto.encryptPut(ctx, b.dst, b.key(key+EncryptedSuffix), fh)
+		f.Path, f.Kind = key, kind
+		return f, err
+	}
+	size, sha, err := putFile(ctx, b.dst, b.key(key), local)
+	return File{Path: key, Kind: kind, Size: size, SHA256: sha}, err
+}
+
 func (b *backup) addFile(f File) {
 	b.mu.Lock()
 	b.m.Files = append(b.m.Files, f)
@@ -426,11 +453,11 @@ func (b *backup) uploadStaged(ctx context.Context, kind, dir string) error {
 	}
 	for _, e := range ents {
 		key := dir + "/" + e.Name()
-		size, sha, err := putFile(ctx, b.dst, b.key(key), filepath.Join(b.stage, dir, e.Name()))
+		f, err := b.putLocal(ctx, kind, key, filepath.Join(b.stage, dir, e.Name()))
 		if err != nil {
 			return fmt.Errorf("upload %s: %w", key, err)
 		}
-		b.addFile(File{Path: key, Kind: kind, Size: size, SHA256: sha})
+		b.addFile(f)
 	}
 	return nil
 }
@@ -470,11 +497,11 @@ func (b *backup) uploadProject(ctx context.Context) error {
 			b.m.Skipped = append(b.m.Skipped, filepath.ToSlash(rel))
 			return nil
 		}
-		size, sha, err := putFile(ctx, b.dst, b.key(key), full)
+		f, err := b.putLocal(ctx, "project", key, full)
 		if err != nil {
 			return fmt.Errorf("upload %s: %w", key, err)
 		}
-		b.addFile(File{Path: key, Kind: "project", Size: size, SHA256: sha})
+		b.addFile(f)
 		return nil
 	})
 	return err
@@ -490,16 +517,33 @@ func (b *backup) copyData(ctx context.Context) error {
 	var mu sync.Mutex
 	err := parallel(ctx, workers, len(b.m.LakeFiles), func(ctx context.Context, i int) error {
 		lf := b.m.LakeFiles[i]
-		size, sha, err := copyObject(ctx, b.src, lf.Path, b.dst, b.key("data", lf.Path))
-		if err != nil {
-			return fmt.Errorf("copy lake file %s: %w", lf.Path, err)
+		var file File
+		if b.opt.Crypto != nil {
+			rc, _, err := b.src.Get(ctx, lf.Path)
+			if err != nil {
+				return fmt.Errorf("copy lake file %s: %w", lf.Path, err)
+			}
+			file, err = b.opt.Crypto.encryptPut(ctx, b.dst, b.key("data", lf.Path+EncryptedSuffix), rc)
+			_ = rc.Close()
+			if err != nil {
+				return fmt.Errorf("copy lake file %s: %w", lf.Path, err)
+			}
+			file.Path, file.Kind = "data/"+lf.Path, "data"
+		} else {
+			size, sha, err := copyObject(ctx, b.src, lf.Path, b.dst, b.key("data", lf.Path), lf.Size)
+			if err != nil {
+				return fmt.Errorf("copy lake file %s: %w", lf.Path, err)
+			}
+			if size < 0 { // server-side copy: trust the catalog's size
+				size = lf.Size
+			}
+			file = File{Path: "data/" + lf.Path, Kind: "data", Size: size, SHA256: sha}
 		}
-		if size < 0 { // server-side copy: trust the catalog's size
-			size = lf.Size
-		} else if lf.Size > 0 && size != lf.Size {
-			return fmt.Errorf("lake file %s has %d bytes, the catalog says %d", lf.Path, size, lf.Size)
+		if lf.Size > 0 && file.Size != lf.Size {
+			return fmt.Errorf("lake file %s has %d bytes, the catalog says %d", lf.Path, file.Size, lf.Size)
 		}
-		b.addFile(File{Path: "data/" + lf.Path, Kind: "data", Size: size, SHA256: sha})
+		size := file.Size
+		b.addFile(file)
 		mu.Lock()
 		done++
 		doneBytes += size

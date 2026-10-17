@@ -41,6 +41,7 @@ func backupIDs(t *testing.T, root string) []string {
 // travel), deletes, inlined rows, governance state and project files; backup,
 // restore into an empty folder and compare everything.
 func TestE2EBackupRestoreSQLite(t *testing.T) {
+	t.Parallel()
 	root := governedProject(t)
 	// More shapes: types, a table with deletes, inlined rows, history.
 	q := func(sql string) { mustDuct(t, "query", "--project", root, sql) }

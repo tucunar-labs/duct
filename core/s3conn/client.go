@@ -20,8 +20,8 @@ import (
 
 // Client is a minimal S3 client (SigV4 over net/http) for the few operations
 // Duct needs outside DuckDB: backup and restore, readiness probes. It uses the
-// static credentials of the Config (never the STS prefix-scoped ones), no
-// multipart (objects up to 5 GiB) and no retries beyond the caller's.
+// static credentials of the Config (never the STS prefix-scoped ones), multipart
+// for objects above 5 GiB (multipart.go) and no retries beyond the caller's.
 type Client struct {
 	cfg    Config
 	http   *http.Client
@@ -189,8 +189,12 @@ func (c *Client) Get(ctx context.Context, bucket, key string) (body io.ReadClose
 }
 
 // Put stores size bytes from body. sha256hex is the hex SHA-256 of the whole
-// payload (required: it is signed).
+// payload (required: it is signed). Above 5 GiB it uploads in parts, each signed
+// with its own hash (a body that is an io.ReaderAt, like a file, is re-read).
 func (c *Client) Put(ctx context.Context, bucket, key string, body io.Reader, size int64, sha256hex string) error {
+	if size > multipartThreshold() {
+		return c.putMultipart(ctx, bucket, key, body, size)
+	}
 	resp, err := c.do(ctx, "put "+key, http.MethodPut, c.endpointURL(bucket, key, nil), body, size, sha256hex, nil)
 	if err != nil {
 		return err
@@ -217,8 +221,8 @@ func (c *Client) Delete(ctx context.Context, bucket, key string) error {
 	return resp.Body.Close()
 }
 
-// Copy copies an object inside the server (source and destination buckets may
-// differ, objects up to 5 GiB).
+// Copy copies an object inside the server with one CopyObject (source and
+// destination buckets may differ, objects up to 5 GiB; see CopySized).
 func (c *Client) Copy(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) error {
 	src := "/" + srcBucket + "/" + escapePath(srcKey)
 	resp, err := c.do(ctx, "copy "+srcKey, http.MethodPut, c.endpointURL(dstBucket, dstKey, nil), nil, 0, emptyHash,

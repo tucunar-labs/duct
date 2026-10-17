@@ -61,6 +61,7 @@ func setQuota(t *testing.T, root, role string, conc *int, rows *int64) {
 // TestE2EServePGQuotas: max_rows and max_concurrent also bind the Postgres
 // protocol, with SQLSTATE 53400 and the same counters as HTTP/MCP/web.
 func TestE2EServePGQuotas(t *testing.T) {
+	t.Parallel()
 	root := governedProject(t)
 	srv := startServe(t, root, nil)
 	one, rows1 := 1, int64(1)

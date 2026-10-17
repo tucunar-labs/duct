@@ -17,6 +17,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	contract "github.com/alonsoburon/duct/core/contract/v1"
 )
 
 // execSpec is functions/<name>.toml:
@@ -32,7 +34,10 @@ import (
 // without pool), receives one row per line on stdin and must write exactly
 // one result per line on stdout, in order. tsv: values separated by a tab
 // (\t, \n, \r and \ escaped); json: one JSON array per row in, one JSON value
-// per line out.
+// per line out. Besides the scalars, DATE ("2026-01-31"), TIMESTAMP
+// ("2026-01-31 12:30:00.123456"), DECIMAL(p,s) (exact text in tsv, a JSON number in
+// json) work in both formats; lists (JSON arrays) and STRUCT (JSON objects) only
+// with format = "json".
 type execSpec struct {
 	Name    string   `toml:"name"`
 	Command []string `toml:"command"`
@@ -40,6 +45,9 @@ type execSpec struct {
 	Returns string   `toml:"returns"`
 	Format  string   `toml:"format"`
 	Timeout string   `toml:"timeout"`
+
+	argT []*contract.SQLType
+	retT *contract.SQLType
 }
 
 func loadExecSpec(path string) (Spec, error) {
@@ -72,15 +80,27 @@ func loadExecSpec(path string) (Spec, error) {
 			return Spec{}, fmt.Errorf("udf: %s: timeout: %w", filepath.Base(path), err)
 		}
 	}
-	return Spec{Name: e.Name, ArgTypes: upper(e.Args), ReturnType: strings.ToUpper(e.Returns), Kind: "exec", exec: &e}, nil
-}
-
-func upper(s []string) []string {
-	out := make([]string, len(s))
-	for i, v := range s {
-		out[i] = strings.ToUpper(v)
+	spec := Spec{Name: e.Name, Kind: "exec", exec: &e}
+	for i, a := range e.Args {
+		t, err := contract.ParseSQLType(a)
+		if err != nil {
+			return Spec{}, fmt.Errorf("udf: %s: args[%d]: %w", filepath.Base(path), i, err)
+		}
+		if e.Format == "tsv" && !t.IsScalar() {
+			return Spec{}, fmt.Errorf("udf: %s: %s needs format = \"json\" (tsv only carries scalars)", filepath.Base(path), t)
+		}
+		e.argT = append(e.argT, t)
+		spec.ArgTypes = append(spec.ArgTypes, t.String())
 	}
-	return out
+	t, err := contract.ParseSQLType(e.Returns)
+	if err != nil {
+		return Spec{}, fmt.Errorf("udf: %s: returns: %w", filepath.Base(path), err)
+	}
+	if e.Format == "tsv" && !t.IsScalar() {
+		return Spec{}, fmt.Errorf("udf: %s: returns %s needs format = \"json\" (tsv only carries scalars)", filepath.Base(path), t)
+	}
+	e.retT, spec.ReturnType = t, t.String()
+	return spec, nil
 }
 
 func (e *execSpec) caller(opt Options, s Spec) func(context.Context, []arrow.Array) (arrow.Array, error) {
@@ -102,7 +122,7 @@ func (e *execSpec) caller(opt Options, s Spec) func(context.Context, []arrow.Arr
 		if err := cmd.Run(); err != nil {
 			return nil, fmt.Errorf("%s: %w: %s", e.Command[0], err, tail(errb.String()))
 		}
-		return e.decode(&out, n, s.ReturnType)
+		return e.decode(&out, n)
 	}
 }
 
@@ -120,7 +140,7 @@ func (e *execSpec) encode(args []arrow.Array, n int) []byte {
 		if e.Format == "json" {
 			row := make([]any, len(args))
 			for c, a := range args {
-				row[c] = value(a, i)
+				row[c] = jsonValue(a, i)
 			}
 			enc, _ := json.Marshal(row)
 			b.Write(enc)
@@ -129,7 +149,7 @@ func (e *execSpec) encode(args []arrow.Array, n int) []byte {
 				if c > 0 {
 					b.WriteByte('\t')
 				}
-				b.WriteString(escapeTSV(fmt.Sprint(value(a, i))))
+				b.WriteString(escapeTSV(fmt.Sprint(jsonValue(a, i))))
 			}
 		}
 		b.WriteByte('\n')
@@ -143,7 +163,12 @@ var tsvUnescaper = strings.NewReplacer(`\\`, `\`, `\t`, "\t", `\n`, "\n", `\r`, 
 func escapeTSV(s string) string   { return tsvEscaper.Replace(s) }
 func unescapeTSV(s string) string { return tsvUnescaper.Replace(s) }
 
-func value(a arrow.Array, i int) any {
+// jsonValue is element i of a as a value that marshals to the exec wire form (and
+// prints as the tsv text): DATE and TIMESTAMP as strings, DECIMAL as an exact number.
+func jsonValue(a arrow.Array, i int) any {
+	if a.IsNull(i) {
+		return nil
+	}
 	switch x := a.(type) {
 	case *array.Boolean:
 		return x.Value(i)
@@ -161,13 +186,39 @@ func value(a arrow.Array, i int) any {
 		return x.Value(i)
 	case *array.String:
 		return x.Value(i)
+	case *array.Date32:
+		return x.Value(i).ToTime().Format("2006-01-02")
+	case *array.Timestamp:
+		return x.Value(i).ToTime(arrow.Microsecond).Format("2006-01-02 15:04:05.999999")
+	case *array.Decimal128:
+		return json.Number(x.Value(i).ToString(x.DataType().(*arrow.Decimal128Type).Scale))
+	case *array.List:
+		start, end := x.ValueOffsets(i)
+		out := make([]any, 0, end-start)
+		for j := start; j < end; j++ {
+			out = append(out, jsonValue(x.ListValues(), int(j)))
+		}
+		return out
+	case *array.Struct:
+		st := x.DataType().(*arrow.StructType)
+		out := make(map[string]any, len(st.Fields()))
+		for k, f := range st.Fields() {
+			out[f.Name] = jsonValue(x.Field(k), i)
+		}
+		return out
 	}
 	return nil
 }
 
-func (e *execSpec) decode(out *bytes.Buffer, n int, ret string) (arrow.Array, error) {
-	bld := array.NewBuilder(memory.DefaultAllocator, arrowOf(ret))
-	defer bld.Release()
+func (e *execSpec) decode(out *bytes.Buffer, n int) (arrow.Array, error) {
+	ret := e.retT
+	viaJSON := arrowJSON(ret)
+	var bld array.Builder
+	var texts []string
+	if !viaJSON {
+		bld = array.NewBuilder(memory.DefaultAllocator, ret.Arrow())
+		defer bld.Release()
+	}
 	sc := bufio.NewScanner(out)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	got := 0
@@ -177,17 +228,18 @@ func (e *execSpec) decode(out *bytes.Buffer, n int, ret string) (arrow.Array, er
 			return nil, fmt.Errorf("%s wrote more than %d lines", e.Command[0], n)
 		}
 		line := sc.Text()
-		var v any = line
-		if e.Format == "json" {
-			dec := json.NewDecoder(strings.NewReader(line))
-			dec.UseNumber()
-			if err := dec.Decode(&v); err != nil {
-				return nil, fmt.Errorf("%s line %d: not JSON: %w", e.Command[0], got, err)
+		if viaJSON {
+			text := line
+			if e.Format == "tsv" { // a scalar: quote it so Arrow's JSON reader sees a string
+				text = strconv.Quote(unescapeTSV(line))
 			}
-		} else {
-			v = unescapeTSV(line)
+			if !json.Valid([]byte(text)) {
+				return nil, fmt.Errorf("%s line %d: not a valid %s: %q", e.Command[0], got, ret, line)
+			}
+			texts = append(texts, text)
+			continue
 		}
-		if err := appendParsed(bld, ret, v); err != nil {
+		if err := e.appendLine(bld, ret, line); err != nil {
 			return nil, fmt.Errorf("%s line %d: %w", e.Command[0], got, err)
 		}
 	}
@@ -197,27 +249,40 @@ func (e *execSpec) decode(out *bytes.Buffer, n int, ret string) (arrow.Array, er
 	if got != n {
 		return nil, fmt.Errorf("%s wrote %d lines for %d rows (it must answer one line per row)", e.Command[0], got, n)
 	}
+	if viaJSON {
+		arr, _, err := array.FromJSON(memory.DefaultAllocator, ret.Arrow(), strings.NewReader("["+strings.Join(texts, ",")+"]"))
+		if err != nil {
+			return nil, fmt.Errorf("%s: not a valid %s: %w", e.Command[0], ret, err)
+		}
+		return arr, nil
+	}
 	return bld.NewArray(), nil
 }
 
-func arrowOf(t string) arrow.DataType {
-	switch t {
-	case "BOOLEAN":
-		return arrow.FixedWidthTypes.Boolean
-	case "TINYINT":
-		return arrow.PrimitiveTypes.Int8
-	case "SMALLINT":
-		return arrow.PrimitiveTypes.Int16
-	case "INTEGER":
-		return arrow.PrimitiveTypes.Int32
-	case "BIGINT":
-		return arrow.PrimitiveTypes.Int64
-	case "FLOAT":
-		return arrow.PrimitiveTypes.Float32
-	case "DOUBLE":
-		return arrow.PrimitiveTypes.Float64
+// arrowJSON reports whether results of type t are parsed by Arrow's JSON reader
+// (the plain scalars keep the lenient parsing of appendParsed).
+func arrowJSON(t *contract.SQLType) bool {
+	switch t.Kind {
+	case "DATE", "TIMESTAMP", "DECIMAL", "LIST", "STRUCT":
+		return true
 	}
-	return arrow.BinaryTypes.String
+	return false
+}
+
+// appendLine parses one output line of a plain scalar type (a tsv "42" or a JSON
+// 42 or "42" are all fine).
+func (e *execSpec) appendLine(b array.Builder, t *contract.SQLType, line string) error {
+	var v any = line
+	if e.Format == "json" {
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
+		if err := dec.Decode(&v); err != nil {
+			return fmt.Errorf("not JSON: %w", err)
+		}
+	} else {
+		v = unescapeTSV(line)
+	}
+	return appendParsed(b, t.Kind, v)
 }
 
 // appendParsed appends v (a string in tsv, any JSON value in json) as type t.

@@ -23,3 +23,6 @@ lake/
 .idea/
 .vscode/
 .DS_Store
+
+# binario compilado en la raíz por error
+/duct

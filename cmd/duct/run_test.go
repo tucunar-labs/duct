@@ -38,6 +38,7 @@ func count(t *testing.T, root, table string) float64 {
 // TestE2EPipelines: bronze -> silver -> gold with a DROP ROW, a warn and a
 // FAIL UPDATE that triggers on the second run.
 func TestE2EPipelines(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "demo")
 	mustDuct(t, "init", root)
 	q := func(sql string) { mustDuct(t, "query", "--project", root, sql) }
@@ -134,6 +135,7 @@ CREATE STREAMING TABLE gold.stream_copy AS SELECT * FROM silver.orders;
 }
 
 func TestE2EPipelineCycleAndSyntax(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "demo")
 	mustDuct(t, "init", root)
 	writePipeline(t, root, "c.sql", `CREATE MATERIALIZED VIEW s.a AS SELECT * FROM s.b;
@@ -153,6 +155,7 @@ CREATE MATERIALIZED VIEW s.b AS SELECT * FROM s.a;`)
 }
 
 func TestE2EPipelineSkipsDownstream(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "demo")
 	mustDuct(t, "init", root)
 	writePipeline(t, root, "p.sql", `CREATE MATERIALIZED VIEW s.a (CONSTRAINT never EXPECT (false) ON VIOLATION FAIL UPDATE) AS SELECT 1 AS x;

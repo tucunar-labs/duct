@@ -1,0 +1,707 @@
+package web
+
+import (
+	"strconv"
+
+	contract "github.com/alonsoburon/duct/core/contract/v1"
+)
+
+// ---- frame: header, sections, flash with secret ----
+
+templ adminFrame(p pageData, section string, f *flash) {
+	@layout(p) {
+		<div class="mx-auto max-w-6xl space-y-4">
+			<div>
+				<h1 class="text-xl font-semibold">Administración</h1>
+				<p class="text-sm text-muted">Usuarios, permisos, tokens, cuotas y auditoría. Solo para el rol duct_admin; todo cambio queda en la auditoría.</p>
+			</div>
+			<nav class="tabs overflow-x-auto" aria-label="Secciones de administración">
+				@adminTab("/admin", "Estado", section == "status")
+				@adminTab("/admin/users", "Usuarios", section == "users")
+				@adminTab("/admin/roles", "Roles y permisos", section == "roles")
+				@adminTab("/admin/tokens", "Tokens", section == "tokens")
+				@adminTab("/admin/audit", "Auditoría", section == "audit")
+			</nav>
+			@flashWithSecret(f)
+			{ children... }
+		</div>
+	}
+}
+
+templ adminTab(href, label string, active bool) {
+	<a
+		href={ templ.URL(href) }
+		class="tab whitespace-nowrap"
+		if active {
+			aria-current="page"
+			aria-selected="true"
+		}
+	>{ label }</a>
+}
+
+templ flashWithSecret(f *flash) {
+	if f != nil {
+		@flashBanner(f)
+		if f.Secret != nil {
+			<section class="card border-brand/60 p-4" role="alert" aria-labelledby="secret-title">
+				<h2 id="secret-title" class="text-sm font-semibold">{ f.Secret.Label }</h2>
+				<div class="mt-2 flex flex-wrap items-center gap-2">
+					<code class="select-all break-all rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-sm" data-secret>{ f.Secret.Value }</code>
+					<button type="button" class="btn btn-secondary btn-sm" data-copy-text={ f.Secret.Value }>
+						@icon("copy", "h-3.5 w-3.5")
+						Copiar
+					</button>
+				</div>
+				<p class="mt-2 text-xs text-warn">{ f.Secret.Note } Si recargas esta página ya no podrás verlo.</p>
+			</section>
+		}
+	}
+}
+
+// ---- status ----
+
+templ adminStatusPage(p pageData, st statusView, errMsg string, f *flash) {
+	@adminFrame(p, "status", f) {
+		if errMsg != "" {
+			<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ errMsg }</p>
+		}
+		<div class="grid gap-3 md:grid-cols-2">
+			<section class="card p-4" aria-labelledby="st-ver">
+				<h2 id="st-ver" class="mb-2 text-sm font-semibold">Versiones</h2>
+				<dl class="grid grid-cols-[8rem_1fr] gap-y-1 text-sm">
+					<dt class="text-muted">Duct</dt>
+					<dd class="font-mono">{ st.Version }</dd>
+					<dt class="text-muted">DuckDB</dt>
+					<dd class="font-mono">{ dashIfEmpty(st.DuckDB) }</dd>
+					<dt class="text-muted">DuckLake</dt>
+					<dd class="font-mono">{ dashIfEmpty(st.DuckLake) }</dd>
+					<dt class="text-muted">Go</dt>
+					<dd class="font-mono">{ st.Go }</dd>
+					<dt class="text-muted">En marcha desde hace</dt>
+					<dd>{ uptimeText(st.UptimeSeconds) }</dd>
+				</dl>
+			</section>
+			<section class="card p-4" aria-labelledby="st-store">
+				<h2 id="st-store" class="mb-2 text-sm font-semibold">Catálogo y almacenamiento</h2>
+				<dl class="grid grid-cols-[8rem_1fr] gap-y-1 text-sm">
+					<dt class="text-muted">Catálogo</dt>
+					<dd><span class="badge badge-muted">{ st.Catalog.Type }</span> <span class="break-all font-mono text-xs">{ st.Catalog.Ref }</span></dd>
+					<dt class="text-muted">Datos</dt>
+					<dd><span class="badge badge-muted">{ st.Storage.Kind }</span> <span class="break-all font-mono text-xs">{ st.Storage.Path }</span></dd>
+					<dt class="text-muted">Último snapshot</dt>
+					<dd>
+						if st.Snapshot != nil {
+							<span class="font-mono">#{ strconv.FormatInt(st.Snapshot.ID, 10) }</span>
+							<span class="text-xs text-muted">{ st.Snapshot.Time }</span>
+						} else {
+							<span class="text-muted">—</span>
+						}
+					</dd>
+					<dt class="text-muted">Migraciones</dt>
+					<dd>
+						if len(st.Migrations.Pending) == 0 {
+							<span class="badge badge-success">al día</span>
+						} else {
+							<span class="badge badge-warn">pendientes: { intsText(st.Migrations.Pending) }</span>
+						}
+						<span class="text-xs text-muted">{ strconv.Itoa(len(st.Migrations.Applied)) } aplicadas · última { strconv.Itoa(st.Migrations.Latest) }</span>
+					</dd>
+					<dt class="text-muted">Retención de auditoría</dt>
+					<dd>
+						{ retentionText(st.Audit.RetentionSeconds) }
+						if st.Audit.Export {
+							<span class="badge badge-muted">exporta al lake</span>
+						}
+					</dd>
+				</dl>
+			</section>
+		</div>
+		<section class="card" aria-labelledby="st-comp">
+			<div class="border-b border-line px-4 py-2.5">
+				<h2 id="st-comp" class="text-sm font-semibold">Componentes</h2>
+			</div>
+			<div class="overflow-x-auto">
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th scope="col">Componente</th>
+							<th scope="col">Salud</th>
+							<th scope="col">Detalle</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, name := range []string{"jobs", "stream", "alerts"} {
+							if c, ok := st.Components[name]; ok {
+								<tr>
+									<td class="font-medium">{ componentNames[name] }</td>
+									<td>
+										<span class={ "badge", healthBadgeClass(compHealth(c)) }>{ healthLabel(compHealth(c)) }</span>
+									</td>
+									<td class="!whitespace-normal text-xs text-muted">
+										for i, d := range componentDetails(c) {
+											if i > 0 {
+												<span>·</span>
+											}
+											<span>{ d }</span>
+										}
+									</td>
+								</tr>
+							}
+						}
+					</tbody>
+				</table>
+			</div>
+		</section>
+	}
+}
+
+func compHealth(m map[string]any) string {
+	h, _ := m["health"].(string)
+	return h
+}
+
+// ---- users ----
+
+templ adminUsersPage(p pageData, v usersView) {
+	@adminFrame(p, "users", v.Flash) {
+		if v.Err != "" {
+			<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+		}
+		<section class="card p-4" aria-labelledby="u-new">
+			<h2 id="u-new" class="mb-3 text-sm font-semibold">Crear usuario</h2>
+			<form method="post" action="/admin/users" class="grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_12rem_1fr_auto]">
+				@hiddenCSRF(v.CSRF)
+				<label class="block">
+					<span class="label">Nombre</span>
+					<input name="name" required autocomplete="off" class="input" value={ draftVal(v.Flash, "user-create", "name", "") } pattern="[A-Za-z0-9][A-Za-z0-9_.@\-]{0,63}"/>
+				</label>
+				<label class="block">
+					<span class="label">Rol</span>
+					<select name="role" required class="select w-full">
+						for _, r := range v.Roles {
+							<option value={ r } selected?={ r == draftVal(v.Flash, "user-create", "role", "") }>{ r }</option>
+						}
+					</select>
+				</label>
+				<label class="block">
+					<span class="label">Contraseña (vacía: se genera una temporal)</span>
+					<input name="password" type="password" autocomplete="new-password" class="input"/>
+				</label>
+				<button type="submit" class="btn btn-primary">
+					@icon("plus", "h-3.5 w-3.5")
+					Crear
+				</button>
+			</form>
+		</section>
+		<section class="card" aria-labelledby="u-list">
+			<div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+				<h2 id="u-list" class="text-sm font-semibold">Usuarios</h2>
+				<span class="badge badge-muted">{ strconv.Itoa(len(v.Users)) }</span>
+			</div>
+			if len(v.Users) == 0 && v.Err == "" {
+				<div class="p-4">
+					@emptyState("admin", "No hay usuarios", "Crea el primero con el formulario de arriba.")
+				</div>
+			} else {
+				<div class="overflow-x-auto">
+					<table class="data-table">
+						<thead>
+							<tr>
+								<th scope="col">Usuario</th>
+								<th scope="col">Rol</th>
+								<th scope="col">Estado</th>
+								<th scope="col"><span class="sr-only">Acciones</span></th>
+							</tr>
+						</thead>
+						<tbody>
+							for _, u := range v.Users {
+								<tr>
+									<td class="font-mono">
+										{ u.Name }
+										if u.Name == v.Me {
+											<span class="badge badge-brand ml-1">tú</span>
+										}
+									</td>
+									<td>
+										<form method="post" action={ templ.URL("/admin/users/" + esc(u.Name) + "/role") } class="flex items-center gap-1.5">
+											@hiddenCSRF(v.CSRF)
+											<select name="role" class="select" aria-label={ "Rol de " + u.Name }>
+												for _, r := range v.Roles {
+													<option value={ r } selected?={ r == u.Role }>{ r }</option>
+												}
+											</select>
+											<button type="submit" class="btn btn-secondary btn-sm">Cambiar</button>
+										</form>
+									</td>
+									<td>
+										if u.Disabled {
+											<span class="badge badge-warn">Deshabilitado</span>
+										} else {
+											<span class="badge badge-success">Activo</span>
+										}
+									</td>
+									<td>
+										<div class="flex flex-wrap items-center justify-end gap-1.5">
+											<details class="relative">
+												<summary class="btn btn-ghost btn-sm cursor-pointer list-none">Restablecer contraseña</summary>
+												<form method="post" action={ templ.URL("/admin/users/" + esc(u.Name) + "/reset-password") } class="absolute right-0 z-10 mt-1 w-64 space-y-2 rounded-lg border border-line bg-surface p-3 shadow-lg">
+													@hiddenCSRF(v.CSRF)
+													<p class="whitespace-normal text-xs text-muted">Se generará una contraseña temporal y se mostrará una sola vez. Los tokens de { u.Name } siguen vigentes.</p>
+													<button type="submit" class="btn btn-danger btn-sm w-full">Confirmar restablecimiento</button>
+												</form>
+											</details>
+											if u.Disabled {
+												<form method="post" action={ templ.URL("/admin/users/" + esc(u.Name) + "/enable") }>
+													@hiddenCSRF(v.CSRF)
+													<button type="submit" class="btn btn-secondary btn-sm" aria-label={ "Habilitar " + u.Name }>Habilitar</button>
+												</form>
+											} else if u.Name != v.Me {
+												<form method="post" action={ templ.URL("/admin/users/" + esc(u.Name) + "/disable") }>
+													@hiddenCSRF(v.CSRF)
+													<button type="submit" class="btn btn-ghost btn-sm" aria-label={ "Deshabilitar " + u.Name }>Deshabilitar</button>
+												</form>
+											}
+										</div>
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			}
+		</section>
+	}
+}
+
+// ---- roles ----
+
+templ adminRolesPage(p pageData, v rolesView) {
+	@adminFrame(p, "roles", v.Flash) {
+		if v.Err != "" {
+			<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+		}
+		<section class="card p-4" aria-labelledby="r-new">
+			<h2 id="r-new" class="mb-3 text-sm font-semibold">Crear rol</h2>
+			<form method="post" action="/admin/roles" class="flex flex-wrap items-end gap-3">
+				@hiddenCSRF(v.CSRF)
+				<label class="block">
+					<span class="label">Nombre (minúsculas, números y _)</span>
+					<input name="name" required autocomplete="off" class="input" value={ draftVal(v.Flash, "role-create", "name", "") } pattern="[a-z][a-z0-9_]{0,39}"/>
+				</label>
+				<button type="submit" class="btn btn-primary">
+					@icon("plus", "h-3.5 w-3.5")
+					Crear
+				</button>
+			</form>
+		</section>
+		<section class="card" aria-labelledby="r-list">
+			<div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+				<h2 id="r-list" class="text-sm font-semibold">Roles</h2>
+				<span class="badge badge-muted">{ strconv.Itoa(len(v.Roles)) }</span>
+			</div>
+			<div class="overflow-x-auto">
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th scope="col">Rol</th>
+							<th scope="col">Usuarios</th>
+							<th scope="col">Tablas</th>
+							<th scope="col">Filtros</th>
+							<th scope="col">Máscaras</th>
+							<th scope="col">Cuota</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, r := range v.Roles {
+							<tr>
+								<td>
+									<a href={ templ.URL("/admin/roles/" + esc(r.Name)) } class="font-mono font-medium text-brand-strong hover:underline">{ r.Name }</a>
+								</td>
+								<td>{ strconv.Itoa(r.Users) }</td>
+								<td>{ strconv.Itoa(len(r.Grants)) }</td>
+								<td>{ strconv.Itoa(len(r.RowFilters)) }</td>
+								<td>{ strconv.Itoa(len(r.Masks)) }</td>
+								<td class="text-xs text-muted">{ quotaOf(v.Quotas, r.Name) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
+		</section>
+	}
+}
+
+func quotaOf(m map[string]adminQuota, role string) string {
+	q, ok := m[role]
+	return quotaText(q, ok)
+}
+
+templ adminRolePage(p pageData, v roleView) {
+	@adminFrame(p, "roles", v.Flash) {
+		if v.Err != "" {
+			<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+		}
+		<div class="flex flex-wrap items-baseline justify-between gap-2">
+			<h2 class="font-mono text-lg font-semibold">{ v.Role.Name }</h2>
+			<span class="badge badge-muted">{ strconv.Itoa(v.Role.Users) } usuarios</span>
+		</div>
+		<section class="card p-4" aria-labelledby="g-new">
+			<h2 id="g-new" class="mb-3 text-sm font-semibold">Otorgar lectura de una tabla</h2>
+			<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/grants") } class="flex flex-wrap items-end gap-3">
+				@hiddenCSRF(v.CSRF)
+				<label class="block">
+					<span class="label">Tabla (esquema.tabla)</span>
+					<input name="relation" required autocomplete="off" placeholder="gold.ventas" class="input font-mono" value={ draftVal(v.Flash, "grant", "relation", "") }/>
+				</label>
+				<button type="submit" class="btn btn-primary">
+					@icon("plus", "h-3.5 w-3.5")
+					Otorgar
+				</button>
+			</form>
+		</section>
+		if len(v.Grants) == 0 {
+			@emptyState("table", "Sin permisos", "Este rol aún no puede leer ninguna tabla.")
+		}
+		for _, g := range v.Grants {
+			<section class="card" aria-label={ "Permisos sobre " + g.Relation }>
+				<div class="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+					<h3 class="font-mono text-sm font-semibold">{ g.Relation }</h3>
+					<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/grants/revoke") }>
+						@hiddenCSRF(v.CSRF)
+						<input type="hidden" name="relation" value={ g.Relation }/>
+						<button type="submit" class="btn btn-danger btn-sm" aria-label={ "Quitar permiso sobre " + g.Relation }>Quitar permiso</button>
+					</form>
+				</div>
+				<div class="grid gap-4 p-4 lg:grid-cols-2">
+					<div>
+						<h4 class="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Filtro de filas</h4>
+						<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/row-filter") } class="space-y-2">
+							@hiddenCSRF(v.CSRF)
+							<input type="hidden" name="relation" value={ g.Relation }/>
+							<label class="block">
+								<span class="sr-only">Predicado SQL para { g.Relation }</span>
+								<textarea name="predicate" rows="2" spellcheck="false" placeholder="region = 'sur'" class="input font-mono">{ draftVal(v.Flash, "filter:"+g.Relation, "predicate", g.Filter) }</textarea>
+							</label>
+							<div class="flex items-center gap-2">
+								<button type="submit" class="btn btn-secondary btn-sm">Guardar filtro</button>
+								<span class="text-xs text-muted">El rol solo verá las filas que cumplan el predicado.</span>
+							</div>
+						</form>
+						if g.Filter != "" {
+							<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/row-filter/drop") } class="mt-1">
+								@hiddenCSRF(v.CSRF)
+								<input type="hidden" name="relation" value={ g.Relation }/>
+								<button type="submit" class="btn btn-ghost btn-sm">Quitar filtro</button>
+							</form>
+						}
+					</div>
+					<div>
+						<h4 class="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Máscaras de columna</h4>
+						if len(g.Masks) > 0 {
+							<ul class="mb-2 space-y-1">
+								for _, m := range g.Masks {
+									<li class="flex items-center gap-2 rounded-lg border border-line px-2 py-1 text-sm">
+										<span class="font-mono font-medium">{ m.Column }</span>
+										<span class="text-muted">→</span>
+										<code class="min-w-0 flex-1 truncate font-mono text-xs" title={ m.Expr }>{ m.Expr }</code>
+										<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/masks/drop") }>
+											@hiddenCSRF(v.CSRF)
+											<input type="hidden" name="relation" value={ g.Relation }/>
+											<input type="hidden" name="column" value={ m.Column }/>
+											<button type="submit" class="btn btn-ghost btn-sm" aria-label={ "Quitar máscara de " + m.Column }>Quitar</button>
+										</form>
+									</li>
+								}
+							</ul>
+						}
+						<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/masks") } class="grid gap-2 sm:grid-cols-[9rem_1fr_auto]">
+							@hiddenCSRF(v.CSRF)
+							<input type="hidden" name="relation" value={ g.Relation }/>
+							<label class="block">
+								<span class="sr-only">Columna</span>
+								<input name="column" required placeholder="columna" autocomplete="off" class="input font-mono" value={ draftVal(v.Flash, "mask:"+g.Relation, "column", "") }/>
+							</label>
+							<label class="block">
+								<span class="sr-only">Expresión SQL</span>
+								<input name="expr" required placeholder="'***'" autocomplete="off" spellcheck="false" class="input font-mono" value={ draftVal(v.Flash, "mask:"+g.Relation, "expr", "") }/>
+							</label>
+							<button type="submit" class="btn btn-secondary btn-sm">Guardar máscara</button>
+						</form>
+					</div>
+				</div>
+			</section>
+		}
+		<section class="card p-4" aria-labelledby="q-title">
+			<h2 id="q-title" class="mb-1 text-sm font-semibold">Cuota del rol</h2>
+			<p class="mb-3 text-xs text-muted">Límites por consulta y de concurrencia para todos los usuarios del rol. Vacío = sin límite.</p>
+			<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/quota") } class="flex flex-wrap items-end gap-3">
+				@hiddenCSRF(v.CSRF)
+				<label class="block">
+					<span class="label">Consultas simultáneas</span>
+					<input name="max_concurrent" inputmode="numeric" pattern="[0-9]*" class="input w-40" value={ draftVal(v.Flash, "quota", "max_concurrent", quotaConc(v.Quota)) }/>
+				</label>
+				<label class="block">
+					<span class="label">Filas máximas por consulta</span>
+					<input name="max_rows" inputmode="numeric" pattern="[0-9]*" class="input w-48" value={ draftVal(v.Flash, "quota", "max_rows", quotaRows(v.Quota)) }/>
+				</label>
+				<button type="submit" class="btn btn-secondary">Guardar cuota</button>
+			</form>
+			if v.Quota != nil {
+				<form method="post" action={ templ.URL("/admin/roles/" + esc(v.Role.Name) + "/quota/drop") } class="mt-2">
+					@hiddenCSRF(v.CSRF)
+					<button type="submit" class="btn btn-ghost btn-sm">Quitar cuota</button>
+				</form>
+			}
+		</section>
+	}
+}
+
+func quotaConc(q *adminQuota) string {
+	if q == nil {
+		return ""
+	}
+	return intPtrText(q.MaxConcurrent)
+}
+
+func quotaRows(q *adminQuota) string {
+	if q == nil {
+		return ""
+	}
+	return int64PtrText(q.MaxRows)
+}
+
+// ---- tokens ----
+
+templ adminTokensPage(p pageData, v tokensView) {
+	@adminFrame(p, "tokens", v.Flash) {
+		if v.Err != "" {
+			<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+		}
+		<section class="card p-4" aria-labelledby="t-new">
+			<h2 id="t-new" class="mb-3 text-sm font-semibold">Crear token</h2>
+			<form method="post" action="/admin/tokens" class="grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_12rem_auto]">
+				@hiddenCSRF(v.CSRF)
+				<label class="block">
+					<span class="label">Usuario</span>
+					<select name="user" required class="select w-full">
+						for _, u := range v.Users {
+							<option value={ u.Name } selected?={ u.Name == draftVal(v.Flash, "token-create", "user", "") }>{ u.Name } ({ u.Role })</option>
+						}
+					</select>
+				</label>
+				<label class="block">
+					<span class="label">Etiqueta (opcional)</span>
+					<input name="label" autocomplete="off" class="input" placeholder="ci, notebook…" value={ draftVal(v.Flash, "token-create", "label", "") }/>
+				</label>
+				<label class="block">
+					<span class="label">Vigencia</span>
+					<select name="ttl" class="select w-full">
+						for _, t := range tokenTTLs {
+							<option value={ strconv.Itoa(t.Seconds) } selected?={ strconv.Itoa(t.Seconds) == draftVal(v.Flash, "token-create", "ttl", "2592000") }>{ t.Label }</option>
+						}
+					</select>
+				</label>
+				<button type="submit" class="btn btn-primary">
+					@icon("plus", "h-3.5 w-3.5")
+					Crear
+				</button>
+			</form>
+		</section>
+		<section class="card" aria-labelledby="t-list">
+			<div class="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+				<h2 id="t-list" class="text-sm font-semibold">Tokens <span class="font-normal text-muted">(nunca se muestra su valor)</span></h2>
+				<form method="get" action="/admin/tokens" class="flex items-center gap-2">
+					<label class="flex items-center gap-1.5 text-xs text-muted">
+						Usuario
+						<select name="user" class="select">
+							<option value="">Todos</option>
+							for _, u := range v.Users {
+								<option value={ u.Name } selected?={ u.Name == v.Filter }>{ u.Name }</option>
+							}
+						</select>
+					</label>
+					<button type="submit" class="btn btn-secondary btn-sm">Filtrar</button>
+				</form>
+			</div>
+			if len(v.Tokens) == 0 && v.Err == "" {
+				<div class="p-4">
+					@emptyState("admin", "Sin tokens", "Los tokens dan acceso por API (Bearer) a un usuario sin compartir su contraseña.")
+				</div>
+			} else {
+				<div class="overflow-x-auto">
+					<table class="data-table">
+						<thead>
+							<tr>
+								<th scope="col">Id</th>
+								<th scope="col">Usuario</th>
+								<th scope="col">Etiqueta</th>
+								<th scope="col">Creado</th>
+								<th scope="col">Vence</th>
+								<th scope="col">Estado</th>
+								<th scope="col"><span class="sr-only">Acciones</span></th>
+							</tr>
+						</thead>
+						<tbody>
+							for _, t := range v.Tokens {
+								<tr>
+									<td class="font-mono text-xs">{ t.ID }</td>
+									<td class="font-mono">{ t.User }</td>
+									<td>{ t.Label }</td>
+									<td class="text-xs">{ t.CreatedAt }</td>
+									<td class="text-xs">
+										if t.ExpiresAt == "" {
+											<span class="text-muted">nunca</span>
+										} else {
+											{ t.ExpiresAt }
+										}
+									</td>
+									<td>
+										@tokenBadge(tokenState(t, v.Now))
+									</td>
+									<td>
+										if tokenState(t, v.Now) == "active" {
+											<form method="post" action={ templ.URL("/admin/tokens/" + esc(t.ID) + "/revoke") } class="text-right">
+												@hiddenCSRF(v.CSRF)
+												<button type="submit" class="btn btn-danger btn-sm" aria-label={ "Revocar token " + t.ID }>Revocar</button>
+											</form>
+										}
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			}
+		</section>
+	}
+}
+
+templ tokenBadge(state string) {
+	switch state {
+		case "active":
+			<span class="badge badge-success">Activo</span>
+		case "expired":
+			<span class="badge badge-muted">Vencido</span>
+		default:
+			<span class="badge badge-warn">Revocado</span>
+	}
+}
+
+// ---- audit ----
+
+templ adminAuditPage(p pageData, v auditView) {
+	@adminFrame(p, "audit", nil) {
+		<form method="get" action="/admin/audit" class="card grid items-end gap-3 p-4 sm:grid-cols-2 lg:grid-cols-[1fr_9rem_9rem_9rem_9rem_auto]" aria-label="Filtros de auditoría">
+			<label class="block">
+				<span class="label">Usuario</span>
+				<input name="user" class="input" autocomplete="off" value={ v.User }/>
+			</label>
+			<label class="block">
+				<span class="label">Protocolo</span>
+				<select name="protocol" class="select w-full">
+					<option value="">Todos</option>
+					for _, pr := range auditProtocols {
+						<option value={ pr } selected?={ pr == v.Protocol }>{ pr }</option>
+					}
+				</select>
+			</label>
+			<label class="block">
+				<span class="label">Estado</span>
+				<select name="status" class="select w-full">
+					<option value="">Todos</option>
+					for _, s := range []string{"ok", "error", "denied", "quota"} {
+						<option value={ s } selected?={ s == v.Status }>{ s }</option>
+					}
+				</select>
+			</label>
+			<label class="block">
+				<span class="label">Desde (UTC)</span>
+				<input name="from" type="date" class="input" value={ v.From }/>
+			</label>
+			<label class="block">
+				<span class="label">Hasta (UTC)</span>
+				<input name="to" type="date" class="input" value={ v.To }/>
+			</label>
+			<button type="submit" class="btn btn-primary">
+				@icon("search", "h-3.5 w-3.5")
+				Filtrar
+			</button>
+		</form>
+		if v.Err != "" {
+			<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+		}
+		<section class="card" aria-labelledby="a-list">
+			<div class="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+				<h2 id="a-list" class="text-sm font-semibold">Registro</h2>
+				<span class="text-xs text-muted">
+					{ strconv.FormatInt(v.Total, 10) } filas · página { strconv.Itoa(v.Page) } de { strconv.Itoa(max(v.Pages, 1)) } · SQL con credenciales ocultas
+				</span>
+			</div>
+			if len(v.Entries) == 0 && v.Err == "" {
+				<div class="p-4">
+					@emptyState("history", "Sin registros", "Ninguna sentencia coincide con los filtros.")
+				</div>
+			} else {
+				<div class="overflow-x-auto">
+					<table class="data-table">
+						<thead>
+							<tr>
+								<th scope="col">Hora (UTC)</th>
+								<th scope="col">Usuario</th>
+								<th scope="col">Protocolo</th>
+								<th scope="col">Estado</th>
+								<th scope="col">Duración</th>
+								<th scope="col">Filas</th>
+								<th scope="col">SQL</th>
+							</tr>
+						</thead>
+						<tbody>
+							for _, e := range v.Entries {
+								<tr>
+									<td class="text-xs">{ fmtTime(e.At) }</td>
+									<td>
+										<span class="font-mono">{ e.User }</span>
+										<span class="block text-xs text-muted">{ e.Role }</span>
+									</td>
+									<td><span class="badge badge-muted">{ e.Protocol }</span></td>
+									<td>
+										<span class={ "badge", auditStatusClass(e.Status) }>{ e.Status }</span>
+										if e.Cached {
+											<span class="badge badge-muted" title="Servido desde caché">caché</span>
+										}
+									</td>
+									<td>{ fmtDuration(e.Duration) }</td>
+									<td>{ strconv.FormatInt(e.Rows, 10) }</td>
+									<td class="!whitespace-normal">
+										@auditSQL(e)
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+				<nav class="flex items-center justify-between border-t border-line px-4 py-2" aria-label="Paginación">
+					if v.PrevURL != "" {
+						<a href={ templ.URL(v.PrevURL) } class="btn btn-secondary btn-sm" rel="prev">← Más recientes</a>
+					} else {
+						<span></span>
+					}
+					if v.NextURL != "" {
+						<a href={ templ.URL(v.NextURL) } class="btn btn-secondary btn-sm" rel="next">Más antiguas →</a>
+					}
+				</nav>
+			}
+		</section>
+	}
+}
+
+templ auditSQL(e contract.AuditEntry) {
+	<details class="max-w-xl">
+		<summary class="cursor-pointer truncate font-mono text-xs">{ clipText(oneLine(e.SQL), 110) }</summary>
+		<pre class="task-out mt-1" tabindex="0">{ e.SQL }</pre>
+		if e.Error != "" {
+			<p class="mt-1 text-xs text-danger">{ e.Error }</p>
+		}
+	</details>
+}
+

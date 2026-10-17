@@ -220,7 +220,7 @@ func (e *Engine) Init(ctx context.Context, cfg contract.Config) error {
 	}
 
 	var ready atomic.Bool
-	connector, err := duckdb.NewConnector("", func(ex driver.ExecerContext) error {
+	connector, err := duckdb.NewConnector(startupDSN(), func(ex driver.ExecerContext) error {
 		if !ready.Load() {
 			return nil
 		}

@@ -105,6 +105,9 @@ func (a *API) handle(pattern string, fn route) {
 	a.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := contract.AuditRecord{At: start.UTC(), Protocol: "admin", User: "-"}
+		if t, ok := r.Context().Value(trustedKey{}).(trusted); ok {
+			rec.Protocol = t.protocol
+		}
 		finish := func(status int, note, errText string) {
 			rec.SQL = r.Method + " " + r.URL.Path
 			if note != "" {
@@ -135,6 +138,13 @@ func (a *API) handle(pattern string, fn route) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		res, err := fn(r.WithContext(ctx), id)
+		if _, ok := r.Context().Value(trustedKey{}).(trusted); ok && err == nil && r.Method == http.MethodGet {
+			// The console reads several lists per page view: only changes (and
+			// failures) are audited for it, so the log stays readable.
+			res.status = max(res.status, http.StatusOK)
+			writeJSON(w, res.status, res.body)
+			return
+		}
 		if err != nil {
 			es := classify(err)
 			writeJSON(w, es.code, map[string]string{"error": es.msg})
@@ -150,6 +160,9 @@ func (a *API) handle(pattern string, fn route) {
 }
 
 func (a *API) authenticate(r *http.Request) (contract.Identity, error) {
+	if t, ok := r.Context().Value(trustedKey{}).(trusted); ok {
+		return t.id, nil // Invoke: the caller already authenticated the identity
+	}
 	h := r.Header.Get("Authorization")
 	switch {
 	case strings.HasPrefix(h, "Bearer "):
@@ -161,6 +174,46 @@ func (a *API) authenticate(r *http.Request) (contract.Identity, error) {
 	}
 	return contract.Identity{}, contract.ErrUnauthenticated
 }
+
+type trustedKey struct{}
+
+type trusted struct {
+	id       contract.Identity
+	protocol string
+}
+
+// Invoke runs one call of the API for an identity that the caller already
+// authenticated (the web console, whose session holds it), skipping the
+// Authorization header but nothing else: the admin-role check, validation, the
+// store rules and the audit record (labelled with protocol) are the same as for
+// an HTTP request, except that successful reads (GET) are not audited, so a page
+// that loads several lists does not flood the log. path is the full path ("/admin/v1/users"). It returns the
+// HTTP status and the JSON body.
+func (a *API) Invoke(ctx context.Context, protocol string, id contract.Identity, method, path string, body []byte) (int, []byte) {
+	ctx = context.WithValue(ctx, trustedKey{}, trusted{id: id, protocol: protocol})
+	var rd io.Reader
+	if body != nil {
+		rd = strings.NewReader(string(body))
+	}
+	req, err := http.NewRequestWithContext(ctx, method, path, rd)
+	if err != nil {
+		return http.StatusBadRequest, []byte(`{"error":"bad request"}`)
+	}
+	rec := &memResponse{h: http.Header{}, code: http.StatusOK}
+	a.mux.ServeHTTP(rec, req)
+	return rec.code, rec.buf
+}
+
+// memResponse is a minimal in-memory http.ResponseWriter.
+type memResponse struct {
+	h    http.Header
+	code int
+	buf  []byte
+}
+
+func (m *memResponse) Header() http.Header         { return m.h }
+func (m *memResponse) WriteHeader(code int)        { m.code = code }
+func (m *memResponse) Write(b []byte) (int, error) { m.buf = append(m.buf, b...); return len(b), nil }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -665,6 +718,11 @@ func (a *API) status(r *http.Request, _ contract.Identity) (call, error) {
 		_, _ = fmt.Sscan(rows[0][0], &id)
 		out["snapshot"] = map[string]any{"id": id, "time": rows[0][1]}
 	}
+	au := map[string]any{"export": s.Config.Audit.Export}
+	if ret, err := s.Config.Audit.RetentionDuration(); err == nil {
+		au["retention_seconds"] = int64(ret.Seconds()) // 0 = kept forever
+	}
+	out["audit"] = au
 	if a.cfg.Components != nil {
 		out["components"] = a.cfg.Components(ctx)
 	}

@@ -27,7 +27,7 @@ func TestParseManifestRejectsTraversal(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{
-		`{"format":2,"id":"20261007T120000Z"}`,
+		`{"format":3,"id":"20261007T120000Z"}`,
 		`{"format":1,"id":"../x"}`,
 		`{"format":1,"id":"20261007T120000Z","files":[{"path":"../../etc/passwd"}]}`,
 		`{"format":1,"id":"20261007T120000Z","lake_files":[{"path":"/abs"}]}`,

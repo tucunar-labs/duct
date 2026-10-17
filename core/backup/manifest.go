@@ -5,7 +5,7 @@
 //
 // Layout of one backup, under <to>/<id>/ (id is a UTC timestamp):
 //
-//	manifest.json           written last: a backup without it is incomplete
+//	manifest.json           written last: a backup without it is incomplete (always plaintext)
 //	catalog/<table>.parquet every DuckLake catalog table (ducklake_*, inlined data too)
 //	state/<table>.parquet   every Duct-owned table (duct_*)
 //	project/<path>          duct.toml and the project files (never .env*, .duct/, lake/)
@@ -16,7 +16,9 @@
 // copy is consistent with the snapshot id in the manifest, and Parquet makes it
 // independent of the catalog engine. Nothing in a backup is a credential;
 // password hashes and token hashes are in the state tables, so treat a backup
-// as sensitive as the catalog itself.
+// as sensitive as the catalog itself, unless it is encrypted: with --encrypt every
+// object but the manifest is an age file (name + ".age") for the recipients, and
+// the manifest lists the checksums of plaintext and ciphertext.
 package backup
 
 import (
@@ -26,8 +28,14 @@ import (
 	"time"
 )
 
-// FormatVersion is the manifest format this package reads and writes.
-const FormatVersion = 1
+// FormatVersion is the manifest format of plain backups; FormatEncrypted is the
+// one of encrypted backups (File gained the Encrypted fields), so that a duct
+// that does not know encryption refuses them instead of misreading them.
+// This package reads both.
+const (
+	FormatVersion   = 1
+	FormatEncrypted = 2
+)
 
 // ManifestFile is the name of the manifest inside a backup.
 const ManifestFile = "manifest.json"
@@ -41,11 +49,26 @@ type Count struct {
 
 // File is one object stored in the backup.
 type File struct {
-	Path string `json:"path"` // relative to the backup root
+	Path string `json:"path"` // relative to the backup root (the plaintext name)
 	Kind string `json:"kind"` // catalog, state, project, data
-	Size int64  `json:"size"`
+	// Size and SHA256 describe the plaintext, encrypted or not.
+	Size int64 `json:"size"`
 	// SHA256 is empty for data files copied server-side inside one S3 server.
 	SHA256 string `json:"sha256,omitempty"`
+	// Encrypted objects are stored as Path + ".age" (age format); CipherSize and
+	// CipherSHA256 describe those stored bytes, so integrity can be checked
+	// without the private key.
+	Encrypted    bool   `json:"encrypted,omitempty"`
+	CipherSize   int64  `json:"cipher_size,omitempty"`
+	CipherSHA256 string `json:"cipher_sha256,omitempty"`
+}
+
+// StoredKey is the key the object has inside the backup.
+func (f File) StoredKey() string {
+	if f.Encrypted {
+		return f.Path + EncryptedSuffix
+	}
+	return f.Path
 }
 
 // LakeFile is a data or delete file the catalog references.
@@ -66,9 +89,15 @@ type Manifest struct {
 	Storage       string    `json:"storage"`      // lake location as configured (no secrets)
 	StorageKind   string    `json:"storage_kind"` // local or s3
 	CatalogOnly   bool      `json:"catalog_only"`
-	SnapshotID    int64     `json:"snapshot_id"`
-	SnapshotTime  string    `json:"snapshot_time"`
-	Migrations    []int     `json:"migrations"`
+	// Encrypted: every object except this manifest is encrypted with age for
+	// Recipients (public keys). LakeEncrypted: the DuckLake itself is ENCRYPTED
+	// (its Parquet files carry per-file keys that live in the catalog tables).
+	Encrypted     bool     `json:"encrypted,omitempty"`
+	Recipients    []string `json:"recipients,omitempty"`
+	LakeEncrypted bool     `json:"lake_encrypted,omitempty"`
+	SnapshotID    int64    `json:"snapshot_id"`
+	SnapshotTime  string   `json:"snapshot_time"`
+	Migrations    []int    `json:"migrations"`
 	// Tables are the lake tables at SnapshotID with their row counts.
 	Tables []Count `json:"tables"`
 	// CatalogTables and StateTables are the copied metadata tables.
@@ -100,8 +129,8 @@ func parseManifest(b []byte) (*Manifest, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("manifest.json: %w", err)
 	}
-	if m.Format != FormatVersion {
-		return nil, fmt.Errorf("manifest.json: format %d is not supported by this duct (it reads format %d)", m.Format, FormatVersion)
+	if m.Format != FormatVersion && m.Format != FormatEncrypted {
+		return nil, fmt.Errorf("manifest.json: format %d is not supported by this duct (it reads formats %d and %d)", m.Format, FormatVersion, FormatEncrypted)
 	}
 	if !idRe.MatchString(m.ID) {
 		return nil, fmt.Errorf("manifest.json: bad id %q", m.ID)

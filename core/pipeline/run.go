@@ -315,11 +315,16 @@ func record(ctx context.Context, eng contract.Engine, runID int64, start time.Ti
 	if r.Err != nil {
 		msg = r.Err.Error()
 	}
-	return eng.Exec(ctx, "INSERT INTO "+RunsTable+
-		" (run_id, target, status, rows_written, rows_dropped, expectations, error, started_at, finished_at, duration_ms)"+
-		" VALUES (?, ?, ?, ?, ?, ?, ?, make_timestamp(?), make_timestamp(?), ?)",
-		runID, r.ID, r.Status, r.Rows, r.Dropped, string(viol), msg,
-		start.UnixMicro(), start.Add(r.Duration).UnixMicro(), r.Duration.Milliseconds())
+	// The table was refreshed already: losing the race for the catalog's write
+	// lock ("database is locked" with SQLite while serve's scheduler writes its
+	// own state) must not turn a good refresh into a failed run.
+	return txretry.Do(ctx, txretry.Default, func(ctx context.Context) error {
+		return eng.Exec(ctx, "INSERT INTO "+RunsTable+
+			" (run_id, target, status, rows_written, rows_dropped, expectations, error, started_at, finished_at, duration_ms)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, make_timestamp(?), make_timestamp(?), ?)",
+			runID, r.ID, r.Status, r.Rows, r.Dropped, string(viol), msg,
+			start.UnixMicro(), start.Add(r.Duration).UnixMicro(), r.Duration.Milliseconds())
+	})
 }
 
 func queryRow(ctx context.Context, eng contract.Engine, sql string, args ...any) ([]string, error) {

@@ -71,6 +71,7 @@ func writeContractFile(t *testing.T, root, rel, content string) {
 // `duct run` (schema, critical rule keeps the previous version, warning is
 // recorded), roles applied, test, freshness and breaking-change diff.
 func TestE2EContracts(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "demo")
 	mustDuct(t, "init", root)
 	q := func(sql string) { mustDuct(t, "query", "--project", root, sql) }
@@ -213,6 +214,7 @@ SELECT customer, CAST(sum(amount) AS VARCHAR) AS total FROM bronze.orders GROUP 
 
 // TestE2EContractLintErrors: duct-specific lint findings.
 func TestE2EContractLintErrors(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "demo")
 	mustDuct(t, "init", root)
 	mustDuct(t, "query", "--project", root, "CREATE SCHEMA gold")

@@ -1,3 +1,4 @@
+import datetime
 import json
 import subprocess
 import sys
@@ -55,7 +56,7 @@ def test_to_dict_is_json() -> None:
         return x
 
     d = json.loads(json.dumps(registry.to_dict()))
-    assert d["schema_version"] == 2
+    assert d["schema_version"] == 3
     assert d["functions"][0]["name"] == "f"
     assert "fn" not in d["functions"][0]
 
@@ -84,7 +85,11 @@ def test_duckdb_types_resolved() -> None:
         return a
 
     @duct.function
-    def h(x: list[int]) -> None: ...
+    def h(x: dict[str, int]) -> None: ...
+
+    @duct.function
+    def k(a: list[int], b: datetime.date, c: datetime.datetime | None) -> list[str]:
+        return []
 
     specs = {s.name: s for s in registry.functions()}
     assert specs["f"].duckdb_args == ["BIGINT", "DOUBLE", "VARCHAR", "BOOLEAN", "DOUBLE"]
@@ -93,6 +98,8 @@ def test_duckdb_types_resolved() -> None:
     assert specs["g"].duckdb_returns == "BIGINT"
     assert specs["h"].duckdb_args == [None]
     assert specs["h"].duckdb_returns is None
+    assert specs["k"].duckdb_args == ["BIGINT[]", "DATE", "TIMESTAMP"]
+    assert specs["k"].duckdb_returns == "VARCHAR[]"
 
 
 def test_types_length_checked() -> None:

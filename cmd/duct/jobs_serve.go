@@ -21,7 +21,7 @@ import (
 // Tasks that run user code get DUCT_URL (this server's HTTP protocol) and
 // DUCT_TOKEN (DUCT_JOBS_TOKEN, else DUCT_TOKEN, from the server's environment):
 // they talk to the lake as that governed user, never with lake credentials.
-func startJobs(ctx context.Context, p *project.Project, httpURL string, noJobs bool) (<-chan struct{}, error) {
+func startJobs(ctx context.Context, p *project.Project, httpURL string, noJobs bool, holder *orchHolder) (<-chan struct{}, error) {
 	done := make(chan struct{})
 	if noJobs {
 		close(done)
@@ -44,7 +44,7 @@ func startJobs(ctx context.Context, p *project.Project, httpURL string, noJobs b
 	if v := firstNonEmpty(os.Getenv("DUCT_JOBS_TOKEN"), os.Getenv("DUCT_TOKEN")); v != "" {
 		env["DUCT_TOKEN"] = v
 	}
-	js := &jobsServer{ctx: ctx, p: p, log: logger, opt: orchestrator.Options{Root: p.Root, Env: env, Logger: logger, HistoryRetention: retention}}
+	js := &jobsServer{ctx: ctx, p: p, log: logger, holder: holder, opt: orchestrator.Options{Root: p.Root, Env: env, Logger: logger, HistoryRetention: retention}}
 	if len(jobs) > 0 {
 		if err := js.start(jobs); err != nil {
 			close(done)
@@ -78,6 +78,7 @@ type jobsServer struct {
 
 	o        *orchestrator.Orchestrator
 	finished chan struct{}
+	holder   *orchHolder // shares o with the web console (console.go); may be nil
 }
 
 func (j *jobsServer) start(jobs []orchestrator.Job) error {
@@ -91,6 +92,9 @@ func (j *jobsServer) start(jobs []orchestrator.Job) error {
 		return err
 	}
 	j.o, j.finished = o, make(chan struct{})
+	if j.holder != nil {
+		j.holder.o.Store(o)
+	}
 	go func() {
 		defer close(j.finished)
 		defer func() { _ = eng.Close() }()

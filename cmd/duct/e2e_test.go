@@ -115,6 +115,7 @@ func TestE2ELocalLake(t *testing.T) {
 }
 
 func TestInitRefusesSyncedFolder(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "Dropbox", "demo")
 	_, errs, code := duct(t, "init", dir)
 	if code == 0 || !strings.Contains(errs, "--force") {

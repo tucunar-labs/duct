@@ -3,10 +3,11 @@ package engineduckdb
 import (
 	"context"
 	"fmt"
-	"strings"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	duckdb "github.com/duckdb/duckdb-go/v2"
 
@@ -14,21 +15,6 @@ import (
 )
 
 var _ contract.ScalarRegistrar = (*Engine)(nil)
-
-// udfTypes are the SQL types a ScalarFunction may use (ADR 0005).
-var udfTypes = map[string]struct {
-	duck  duckdb.Type
-	arrow arrow.DataType
-}{
-	"BOOLEAN":  {duckdb.TYPE_BOOLEAN, arrow.FixedWidthTypes.Boolean},
-	"TINYINT":  {duckdb.TYPE_TINYINT, arrow.PrimitiveTypes.Int8},
-	"SMALLINT": {duckdb.TYPE_SMALLINT, arrow.PrimitiveTypes.Int16},
-	"INTEGER":  {duckdb.TYPE_INTEGER, arrow.PrimitiveTypes.Int32},
-	"BIGINT":   {duckdb.TYPE_BIGINT, arrow.PrimitiveTypes.Int64},
-	"FLOAT":    {duckdb.TYPE_FLOAT, arrow.PrimitiveTypes.Float32},
-	"DOUBLE":   {duckdb.TYPE_DOUBLE, arrow.PrimitiveTypes.Float64},
-	"VARCHAR":  {duckdb.TYPE_VARCHAR, arrow.BinaryTypes.String},
-}
 
 // RegisterScalar implements contract.ScalarRegistrar. DuckDB registers the
 // function in the database catalog, so every pooled connection sees it.
@@ -70,28 +56,67 @@ func newScalarUDF(f contract.ScalarFunction) (*scalarUDF, error) {
 	}
 	u := &scalarUDF{f: f}
 	for i, t := range f.ArgTypes {
-		m, ok := udfTypes[strings.ToUpper(t)]
-		if !ok {
-			return nil, fmt.Errorf("engine-duckdb: function %s: argument %d has unsupported type %q", f.Name, i+1, t)
+		st, err := contract.ParseSQLType(t)
+		if err != nil {
+			return nil, fmt.Errorf("engine-duckdb: function %s: argument %d: %w", f.Name, i+1, err)
 		}
-		ti, err := duckdb.NewTypeInfo(m.duck)
+		ti, err := typeInfoOf(st)
+		if err != nil {
+			return nil, fmt.Errorf("engine-duckdb: function %s: argument %d: %w", f.Name, i+1, err)
+		}
+		u.cfg.InputTypeInfos = append(u.cfg.InputTypeInfos, ti)
+		u.args = append(u.args, st.Arrow())
+	}
+	st, err := contract.ParseSQLType(f.ReturnType)
+	if err != nil {
+		return nil, fmt.Errorf("engine-duckdb: function %s: return: %w", f.Name, err)
+	}
+	ti, err := typeInfoOf(st)
+	if err != nil {
+		return nil, fmt.Errorf("engine-duckdb: function %s: return: %w", f.Name, err)
+	}
+	u.cfg.ResultTypeInfo = ti
+	u.ret = st.Arrow()
+	return u, nil
+}
+
+// typeInfoOf builds the DuckDB type of a parsed UDF type.
+func typeInfoOf(t *contract.SQLType) (duckdb.TypeInfo, error) {
+	switch t.Kind {
+	case "DECIMAL":
+		return duckdb.NewDecimalInfo(t.Width, t.Scale)
+	case "LIST":
+		el, err := typeInfoOf(t.Elem)
 		if err != nil {
 			return nil, err
 		}
-		u.cfg.InputTypeInfos = append(u.cfg.InputTypeInfos, ti)
-		u.args = append(u.args, m.arrow)
+		return duckdb.NewListInfo(el)
+	case "STRUCT":
+		var ents []duckdb.StructEntry
+		for _, f := range t.Fields {
+			fi, err := typeInfoOf(f.Type)
+			if err != nil {
+				return nil, err
+			}
+			e, err := duckdb.NewStructEntry(fi, f.Name)
+			if err != nil {
+				return nil, err
+			}
+			ents = append(ents, e)
+		}
+		return duckdb.NewStructInfo(ents[0], ents[1:]...)
 	}
-	m, ok := udfTypes[strings.ToUpper(f.ReturnType)]
+	kinds := map[string]duckdb.Type{
+		"BOOLEAN": duckdb.TYPE_BOOLEAN, "TINYINT": duckdb.TYPE_TINYINT, "SMALLINT": duckdb.TYPE_SMALLINT,
+		"INTEGER": duckdb.TYPE_INTEGER, "BIGINT": duckdb.TYPE_BIGINT, "FLOAT": duckdb.TYPE_FLOAT,
+		"DOUBLE": duckdb.TYPE_DOUBLE, "VARCHAR": duckdb.TYPE_VARCHAR, "DATE": duckdb.TYPE_DATE,
+		"TIMESTAMP": duckdb.TYPE_TIMESTAMP,
+	}
+	k, ok := kinds[t.Kind]
 	if !ok {
-		return nil, fmt.Errorf("engine-duckdb: function %s: unsupported return type %q", f.Name, f.ReturnType)
+		return nil, fmt.Errorf("unsupported type %s", t.Kind)
 	}
-	ti, err := duckdb.NewTypeInfo(m.duck)
-	if err != nil {
-		return nil, err
-	}
-	u.cfg.ResultTypeInfo = ti
-	u.ret = m.arrow
-	return u, nil
+	return duckdb.NewTypeInfo(k)
 }
 
 func (u *scalarUDF) Config() duckdb.ScalarFuncConfig { return u.cfg }
@@ -146,11 +171,7 @@ func (u *scalarUDF) execute(ctx context.Context, st *duckdb.ChunkIteratorState) 
 		if err != nil {
 			return err
 		}
-		var v any
-		if !res.IsNull(i) {
-			v = arrayValue(res, i)
-		}
-		if err := row.SetResult(v); err != nil {
+		if err := row.SetResult(arrayValue(res, i)); err != nil {
 			return err
 		}
 		i++
@@ -158,7 +179,13 @@ func (u *scalarUDF) execute(ctx context.Context, st *duckdb.ChunkIteratorState) 
 	return nil
 }
 
+// appendValue appends one DuckDB value (as database/sql hands it over) to b.
+// Nested NULLs (list elements, struct members) arrive as nil.
 func appendValue(b array.Builder, v any) error {
+	if v == nil {
+		b.AppendNull()
+		return nil
+	}
 	switch bb := b.(type) {
 	case *array.BooleanBuilder:
 		x, ok := v.(bool)
@@ -208,6 +235,48 @@ func appendValue(b array.Builder, v any) error {
 			return typeErr(v)
 		}
 		bb.Append(x)
+	case *array.Date32Builder:
+		x, ok := v.(time.Time)
+		if !ok {
+			return typeErr(v)
+		}
+		bb.Append(arrow.Date32FromTime(x))
+	case *array.TimestampBuilder:
+		x, ok := v.(time.Time)
+		if !ok {
+			return typeErr(v)
+		}
+		bb.Append(arrow.Timestamp(x.UnixMicro()))
+	case *array.Decimal128Builder:
+		x, ok := v.(duckdb.Decimal)
+		if !ok || x.Value == nil {
+			return typeErr(v)
+		}
+		bb.Append(decimal128.FromBigInt(x.Value))
+	case *array.ListBuilder:
+		x, ok := v.([]any)
+		if !ok {
+			return typeErr(v)
+		}
+		bb.Append(true)
+		child := bb.ValueBuilder()
+		for _, e := range x {
+			if err := appendValue(child, e); err != nil {
+				return err
+			}
+		}
+	case *array.StructBuilder:
+		x, ok := v.(map[string]any)
+		if !ok {
+			return typeErr(v)
+		}
+		bb.Append(true)
+		st := bb.Type().(*arrow.StructType)
+		for i, f := range st.Fields() {
+			if err := appendValue(bb.FieldBuilder(i), x[f.Name]); err != nil {
+				return err
+			}
+		}
 	default:
 		return fmt.Errorf("unsupported builder %T", b)
 	}
@@ -216,7 +285,12 @@ func appendValue(b array.Builder, v any) error {
 
 func typeErr(v any) error { return fmt.Errorf("unexpected argument value %T", v) }
 
+// arrayValue returns element i of a (not NULL) as the Go value DuckDB accepts
+// for its type; nested NULLs are nil.
 func arrayValue(a arrow.Array, i int) any {
+	if a.IsNull(i) {
+		return nil
+	}
 	switch x := a.(type) {
 	case *array.Boolean:
 		return x.Value(i)
@@ -234,6 +308,28 @@ func arrayValue(a arrow.Array, i int) any {
 		return x.Value(i)
 	case *array.String:
 		return x.Value(i)
+	case *array.Date32:
+		return x.Value(i).ToTime()
+	case *array.Timestamp:
+		return x.Value(i).ToTime(arrow.Microsecond)
+	case *array.Decimal128:
+		t := x.DataType().(*arrow.Decimal128Type)
+		return duckdb.Decimal{Width: uint8(t.Precision), Scale: uint8(t.Scale), Value: x.Value(i).BigInt()}
+	case *array.List:
+		start, end := x.ValueOffsets(i)
+		out := make([]any, 0, end-start)
+		child := x.ListValues()
+		for j := start; j < end; j++ {
+			out = append(out, arrayValue(child, int(j)))
+		}
+		return out
+	case *array.Struct:
+		st := x.DataType().(*arrow.StructType)
+		out := make(map[string]any, len(st.Fields()))
+		for k, f := range st.Fields() {
+			out[f.Name] = arrayValue(x.Field(k), i)
+		}
+		return out
 	}
 	return nil
 }

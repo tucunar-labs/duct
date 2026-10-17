@@ -19,19 +19,23 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	contract "github.com/alonsoburon/duct/core/contract/v1"
 )
 
-// registrySnapshot is the JSON of `python -m duct.registry --json` (schema 2).
+// registrySnapshot is the JSON of `python -m duct.registry --json` (schema 3).
 type registrySnapshot struct {
 	SchemaVersion int `json:"schema_version"`
 	Functions     []struct {
-		Name           string    `json:"name"`
-		Module         string    `json:"module"`
-		Vectorized     bool      `json:"vectorized"`
-		DuckDBArgs     []*string `json:"duckdb_args"`
-		DuckDBReturns  *string   `json:"duckdb_returns"`
-		InputTypes     []string  `json:"input_types"`
-		ReturnTypeName *string   `json:"return_type"`
+		Name           string     `json:"name"`
+		Kind           string     `json:"kind"`
+		Columns        [][]string `json:"columns"`
+		Module         string     `json:"module"`
+		Vectorized     bool       `json:"vectorized"`
+		DuckDBArgs     []*string  `json:"duckdb_args"`
+		DuckDBReturns  *string    `json:"duckdb_returns"`
+		InputTypes     []string   `json:"input_types"`
+		ReturnTypeName *string    `json:"return_type"`
 	} `json:"functions"`
 }
 
@@ -52,12 +56,12 @@ func discoverPython(ctx context.Context, opt Options) ([]Spec, error) {
 	if err := json.Unmarshal(out.Bytes(), &snap); err != nil {
 		return nil, fmt.Errorf("udf: unreadable registry output: %w", err)
 	}
-	if snap.SchemaVersion != 2 {
-		return nil, fmt.Errorf("udf: duct-data registry schema %d, this duct needs 2 (upgrade duct-data)", snap.SchemaVersion)
+	if snap.SchemaVersion != 3 {
+		return nil, fmt.Errorf("udf: duct-data registry schema %d, this duct needs 3 (upgrade duct-data)", snap.SchemaVersion)
 	}
 	var specs []Spec
 	for _, f := range snap.Functions {
-		s := Spec{Name: f.Name, Kind: "python", Vectorized: f.Vectorized}
+		s := Spec{Name: f.Name, Kind: "python", Vectorized: f.Vectorized, Table: f.Kind == "table"}
 		s.File = f.Module
 		if stem, ok := strings.CutPrefix(f.Module, "_duct_user_"); ok { // registry's module alias
 			s.File = filepath.Join(DirName, stem+".py")
@@ -65,10 +69,21 @@ func discoverPython(ctx context.Context, opt Options) ([]Spec, error) {
 		for i, a := range f.DuckDBArgs {
 			if a == nil {
 				return nil, fmt.Errorf("udf: function %s: argument %d has no supported SQL type (annotation %q): "+
-					"use @duct.function(types=[...], returns=...) with BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, FLOAT, DOUBLE or VARCHAR",
+					"use @duct.function(types=[...], returns=...) with BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, FLOAT, DOUBLE, VARCHAR, "+
+					"DATE, TIMESTAMP, DECIMAL(p,s), T[] or STRUCT(name T, ...)",
 					f.Name, i+1, f.InputTypes[i])
 			}
 			s.ArgTypes = append(s.ArgTypes, *a)
+		}
+		if s.Table {
+			for _, c := range f.Columns {
+				if len(c) != 2 {
+					return nil, fmt.Errorf("udf: function %s: malformed columns", f.Name)
+				}
+				s.Columns = append(s.Columns, contract.TableColumn{Name: c[0], Type: c[1]})
+			}
+			specs = append(specs, s)
+			continue
 		}
 		if f.DuckDBReturns == nil {
 			return nil, fmt.Errorf("udf: function %s: no supported SQL return type: use @duct.function(returns=...)", f.Name)
@@ -89,10 +104,15 @@ type pyPool struct {
 	started int
 	closed  bool
 	wake    chan struct{} // signalled when a worker is returned or dropped
+	done    chan struct{} // closed by Close: wakes every waiter
 }
 
+// errPoolClosed is what acquire returns once Close was called; the callers of a
+// function whose pool was replaced by a reload retry with the new one.
+var errPoolClosed = errors.New("udf: worker pool closed")
+
 func newPyPool(opt Options) *pyPool {
-	return &pyPool{opt: opt, wake: make(chan struct{}, 1)}
+	return &pyPool{opt: opt, wake: make(chan struct{}, 1), done: make(chan struct{})}
 }
 
 // acquire waits for an idle worker or starts one. Waiting is bounded by ctx;
@@ -103,7 +123,7 @@ func (p *pyPool) acquire(ctx, parent context.Context) (*pyWorker, error) {
 		p.mu.Lock()
 		if p.closed {
 			p.mu.Unlock()
-			return nil, errors.New("udf: engine closed")
+			return nil, errPoolClosed
 		}
 		if n := len(p.idle); n > 0 {
 			w := p.idle[n-1]
@@ -128,6 +148,7 @@ func (p *pyPool) acquire(ctx, parent context.Context) (*pyWorker, error) {
 		p.mu.Unlock()
 		select {
 		case <-p.wake:
+		case <-p.done:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -149,9 +170,13 @@ func (p *pyPool) release(w *pyWorker, healthy bool) {
 	}
 }
 
-// Close stops every worker.
+// Close stops the idle workers now and every busy one as soon as its batch is
+// answered (release); new acquisitions fail with errPoolClosed. Idempotent.
 func (p *pyPool) Close() error {
 	p.mu.Lock()
+	if !p.closed {
+		close(p.done)
+	}
 	p.closed = true
 	idle := p.idle
 	p.idle = nil
@@ -162,23 +187,42 @@ func (p *pyPool) Close() error {
 	return nil
 }
 
-func (p *pyPool) caller(s Spec) func(context.Context, []arrow.Array) (arrow.Array, error) {
+// do sends one batch to a worker and returns the raw response frame (status
+// byte first). Only I/O failures and timeouts are errors here (they cost the
+// worker its life); an error raised by the function is a status-1 body.
+func (p *pyPool) do(ctx context.Context, name string, args []arrow.Array) ([]byte, error) {
+	parent := ctx
+	wctx, wcancel := context.WithTimeout(parent, p.opt.Timeout)
+	w, err := p.acquire(wctx, parent)
+	wcancel()
+	if err != nil {
+		return nil, err
+	}
+	// The batch clock starts once the worker is ready.
+	ctx, cancel := context.WithTimeout(parent, p.opt.Timeout)
+	defer cancel()
+	body, err := w.call(ctx, name, args)
+	p.release(w, err == nil)
+	return body, err
+}
+
+func (p *pyPool) caller(s Spec) callFunc {
 	return func(ctx context.Context, args []arrow.Array) (arrow.Array, error) {
-		parent := ctx
-		wctx, wcancel := context.WithTimeout(parent, p.opt.Timeout)
-		w, err := p.acquire(wctx, parent)
-		wcancel()
+		body, err := p.do(ctx, s.Name, args)
 		if err != nil {
 			return nil, err
 		}
-		// The batch clock starts once the worker is ready.
-		ctx, cancel := context.WithTimeout(parent, p.opt.Timeout)
-		defer cancel()
-		res, err := w.call(ctx, s.Name, args)
-		var remote *remoteError
-		// A function error leaves the worker healthy; I/O failures and timeouts do not.
-		p.release(w, err == nil || errors.As(err, &remote))
-		return res, err
+		return decodeResponse(body)
+	}
+}
+
+func (p *pyPool) tableCaller(s Spec) tableCallFunc {
+	return func(ctx context.Context, args []arrow.Array) ([]arrow.RecordBatch, error) {
+		body, err := p.do(ctx, s.Name, args)
+		if err != nil {
+			return nil, err
+		}
+		return decodeTable(body)
 	}
 }
 
@@ -257,9 +301,9 @@ func readFrame(r io.Reader) ([]byte, error) {
 	return body, err
 }
 
-// call sends one batch and waits for the result. On ctx expiry it kills the
+// call sends one batch and waits for the response frame. On ctx expiry it kills the
 // process (the pool replaces it).
-func (w *pyWorker) call(ctx context.Context, name string, args []arrow.Array) (arrow.Array, error) {
+func (w *pyWorker) call(ctx context.Context, name string, args []arrow.Array) ([]byte, error) {
 	fields := make([]arrow.Field, len(args))
 	for i, a := range args {
 		fields[i] = arrow.Field{Name: fmt.Sprintf("c%d", i), Type: a.DataType(), Nullable: true}
@@ -301,7 +345,7 @@ func (w *pyWorker) call(ctx context.Context, name string, args []arrow.Array) (a
 		if r.err != nil {
 			return nil, fmt.Errorf("python worker: %w", r.err)
 		}
-		return decodeResponse(r.body)
+		return r.body, nil
 	case <-ctx.Done():
 		_ = w.cmd.Process.Kill()
 		return nil, fmt.Errorf("python worker: %w", ctx.Err())
@@ -326,4 +370,32 @@ func decodeResponse(body []byte) (arrow.Array, error) {
 	col := rd.RecordBatch().Column(0)
 	col.Retain()
 	return col, nil
+}
+
+// decodeTable reads the batches of a table function's response.
+func decodeTable(body []byte) ([]arrow.RecordBatch, error) {
+	if len(body) == 0 {
+		return nil, errors.New("python worker: empty response")
+	}
+	if body[0] != 0 {
+		return nil, &remoteError{string(body[1:])}
+	}
+	rd, err := ipc.NewReader(bytes.NewReader(body[1:]))
+	if err != nil {
+		return nil, fmt.Errorf("python worker: %w", err)
+	}
+	defer rd.Release()
+	var out []arrow.RecordBatch
+	for rd.Next() {
+		b := rd.RecordBatch()
+		b.Retain()
+		out = append(out, b)
+	}
+	if err := rd.Err(); err != nil {
+		for _, b := range out {
+			b.Release()
+		}
+		return nil, fmt.Errorf("python worker: %w", err)
+	}
+	return out, nil
 }

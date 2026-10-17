@@ -24,6 +24,17 @@ type fakeEngine struct {
 	contract.Engine
 	mu    sync.Mutex
 	funcs map[string]contract.ScalarFunction
+	tabs  map[string]contract.TableFunction
+}
+
+func (f *fakeEngine) RegisterTable(_ context.Context, fn contract.TableFunction) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.tabs == nil {
+		f.tabs = map[string]contract.TableFunction{}
+	}
+	f.tabs[fn.Name] = fn
+	return nil
 }
 
 func (f *fakeEngine) RegisterScalar(_ context.Context, fn contract.ScalarFunction) error {

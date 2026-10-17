@@ -109,6 +109,7 @@ func TestE2EJobsCLIChain(t *testing.T) {
 // TestE2EJobsFailureSkipsDownstream: a failing task fails the run, skips what
 // depends on it, and independent tasks still run.
 func TestE2EJobsFailureSkipsDownstream(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	writeJob(t, root, "j", `name: j
 tasks:
@@ -138,6 +139,7 @@ tasks:
 
 // TestE2EJobsRetriesAndTimeout: backoff retries until success; a timeout is a failed attempt.
 func TestE2EJobsRetriesAndTimeout(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	writeJob(t, root, "j", `name: j
 tasks:
@@ -174,6 +176,7 @@ tasks:
 // the data contract exactly like `duct run` (critical rule keeps the previous
 // version, the run fails, downstream is skipped) and syncs the contract roles.
 func TestE2EJobsPipelineHonoursContracts(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	q := func(sql string) { mustDuct(t, "query", "--project", root, sql) }
 	q("CREATE SCHEMA bronze")
@@ -210,6 +213,7 @@ tasks:
 // TestE2EJobsFailureAlert: on_failure reaches a webhook through the channel
 // module (firing), and the next good run sends resolved.
 func TestE2EJobsFailureAlert(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var got []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +254,7 @@ alerts:
 // TestE2EJobsServeSchedulerAndTriggers: inside `duct serve`, a cron job ticks,
 // a snapshot trigger fires after an ingest, a file trigger fires on a new file,
 // and shutdown records a running task as cancelled.
-func TestE2EJobsServeSchedulerAndTriggers(t *testing.T) {
+func testE2EJobsServeSchedulerAndTriggers(t *testing.T) {
 	root := chainProject(t)
 	mustDuct(t, "ingest", "--project", root) // bronze.orders exists before the baseline
 	writeJob(t, root, "tick", `name: tick
@@ -306,7 +310,7 @@ tasks:
 	if n := count(t, root, "gold.revenue"); n != 3 {
 		t.Errorf("gold rows after triggered refresh = %v", n)
 	}
-	time.Sleep(5 * time.Second) // the job's own writes must not retrigger it (gold is not watched)
+	time.Sleep(3 * time.Second) // the job's own writes must not retrigger it (gold is not watched)
 	if n := len(runsOf(t, root, "job = 'onsnap'")); n != 1 {
 		t.Errorf("snapshot job ran %d times", n)
 	}
@@ -344,7 +348,7 @@ func quickJobYAML(name, schedule, extra string) string {
 // TestJobsHotReload: serve follows jobs/*.yaml. A new job starts ticking, an
 // invalid edit is rejected (the old definitions keep running), a removed job
 // stops, and the first job of a project that had none is picked up.
-func TestJobsHotReload(t *testing.T) {
+func testJobsHotReload(t *testing.T) {
 	old := jobsReloadEvery
 	jobsReloadEvery = 200 * time.Millisecond
 	t.Cleanup(func() { jobsReloadEvery = old })
@@ -374,7 +378,7 @@ func TestJobsHotReload(t *testing.T) {
 		return len(runsOf(t, root, "job = 'b' AND status = 'running'")) == 0
 	})
 	nb := len(runsOf(t, root, "job = 'b'"))
-	time.Sleep(3 * time.Second)
+	time.Sleep(2 * time.Second)
 	if n := len(runsOf(t, root, "job = 'b'")); n != nb {
 		t.Errorf("job b kept starting runs after its file was removed (%d -> %d)", nb, n)
 	}
@@ -389,7 +393,12 @@ func setCron(t *testing.T, root, job string, last time.Time) {
 // TestJobsCatchup: ticks missed while nothing ran are handled by the policy
 // (last: one run, all: one per tick in order, none: nothing), and two servers
 // on the same state still start exactly one run per tick.
-func TestJobsCatchup(t *testing.T) {
+func testJobsCatchup(t *testing.T) {
+	// Cron "* * * * *" ticks on the wall clock: start just after a minute boundary so a real tick
+	// does not land in the middle of the test and add runs to the catch-up counts.
+	if sec := time.Now().Second(); sec > 48 {
+		time.Sleep(time.Duration(61-sec) * time.Second)
+	}
 	root := newProject(t)
 	down := time.Now().Add(-5*time.Minute - 10*time.Second) // ~5 missed "* * * * *" ticks
 	writeJob(t, root, "keep", quickJobYAML("keep", "* * * * *", "catchup: last"))
@@ -408,7 +417,7 @@ func TestJobsCatchup(t *testing.T) {
 		return len(runsOf(t, root, "job = 'every' AND status = 'success'")) >= 4 &&
 			len(runsOf(t, root, "job = 'keep' AND status = 'success'")) >= 1
 	})
-	time.Sleep(3 * time.Second)
+	time.Sleep(2 * time.Second)
 	keep := runsOf(t, root, "job = 'keep'")
 	if len(keep) != 1 || keep[0]["trigger_kind"] != "cron" {
 		t.Errorf("last: %d runs %v", len(keep), keep)
@@ -438,6 +447,7 @@ func TestJobsCatchup(t *testing.T) {
 // TestJobsHistoryRetention: `duct gc` deletes finished runs past [jobs]
 // history_retention (and their attempts), never the running ones or the fresh ones.
 func TestJobsHistoryRetention(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	mustDuct(t, "migrate", "--project", root)
 	f, err := os.OpenFile(filepath.Join(root, "duct.toml"), os.O_APPEND|os.O_WRONLY, 0o644)

@@ -2,7 +2,7 @@
 
 Duct: reemplazo FOSS completo de Databricks, local-first. CLI `duct`, un solo binario Go.
 Criterio guía: **superficie mínima** y estándares abiertos. Por ahora solo se diseña el
-FOSS; Duct Cloud (modelo silo) va después. Aún no hay código: esta etapa es de diseño.
+FOSS; Duct Cloud (modelo silo) va después. Estado y versión actual: ver `BACKLOG.md`.
 
 ## Stack en una tabla
 

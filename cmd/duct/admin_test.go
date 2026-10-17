@@ -64,6 +64,8 @@ func (a api) query(token, user, pass, sql string) (int, string) {
 }
 
 func TestE2EAdminAPI(t *testing.T) {
+	// Not parallel: /metrics reads the process-wide DB collector, which follows the last `serve`
+	// started in the process, so no other server may start while this one is scraped.
 	root := governedProject(t)
 	mustDuct(t, "sql", "--project", root, "CREATE ROLE duct_admin")
 	mustDuct(t, "user", "create", "jefa", "--role", "duct_admin", "--password", "pw-jefa-123", "--project", root)
@@ -299,6 +301,7 @@ func TestE2EAdminAPI(t *testing.T) {
 
 // TestQuotaConcurrent: max_concurrent counts statements still being read.
 func TestQuotaConcurrent(t *testing.T) {
+	t.Parallel()
 	root := governedProject(t)
 	p, err := project.Load(root)
 	if err != nil {

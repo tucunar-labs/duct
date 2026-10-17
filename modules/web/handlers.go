@@ -35,6 +35,7 @@ type appConfig struct {
 	lockout       time.Duration // base lockout (0: 15m), doubles on repeats
 	minLoginTime  time.Duration // floor for failed-login latency
 	dashboardsDir string        // dashboards/*.yaml ("": none)
+	livePoll      time.Duration // how often a live run page refreshes (0: 1s)
 }
 
 type app struct {
@@ -46,6 +47,8 @@ type app struct {
 	assets assets
 	// chartCache holds dashboard query results per (lake snapshot, role, request).
 	chartCache *lru
+	// flash carries one-shot messages and secrets across a redirect (flash.go).
+	flash *flashes
 }
 
 func newApp(q contract.QueryHandler, auth contract.AuthProvider, cfg appConfig) *app {
@@ -65,7 +68,7 @@ func newApp(q contract.QueryHandler, auth contract.AuthProvider, cfg appConfig) 
 	if err != nil { // keys are validated in Init; this only guards direct callers
 		panic("web: " + err.Error())
 	}
-	return &app{q: q, auth: auth, cfg: cfg, store: store, limit: newLoginLimiter(cfg.userMax, cfg.ipMax, cfg.lockout), assets: newAssets(), chartCache: newLRU(cacheEntries, cacheBytes)}
+	return &app{q: q, auth: auth, cfg: cfg, store: store, limit: newLoginLimiter(cfg.userMax, cfg.ipMax, cfg.lockout), assets: newAssets(), chartCache: newLRU(cacheEntries, cacheBytes), flash: newFlashes()}
 }
 
 func (a *app) routes() http.Handler {
@@ -85,6 +88,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /dashboards", a.authed(a.dashList))
 	mux.HandleFunc("GET /dashboards/{name}", a.authed(a.dashView))
 	mux.HandleFunc("POST /dashboards/{name}/data", a.authed(a.dashData))
+	a.jobsRoutes(mux)
+	a.adminRoutes(mux)
 	return securityHeaders(sameOrigin(mux))
 }
 

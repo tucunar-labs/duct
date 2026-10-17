@@ -90,8 +90,9 @@ type Orchestrator struct {
 	ready chan struct{}
 
 	mu     sync.Mutex
-	cursor map[string]time.Time // next cron tick per job
-	known  map[string]Job       // every job ever loaded: runs in flight outlive an edit or removal
+	cursor map[string]time.Time    // next cron tick per job
+	known  map[string]Job          // every job ever loaded: runs in flight outlive an edit or removal
+	tasks  map[string]*runningTask // task attempts running in this process, by claim token
 }
 
 // catalog is an immutable set of validated jobs.
@@ -148,7 +149,7 @@ func New(eng contract.Engine, jobs []Job, opt Options) (*Orchestrator, error) {
 	host, _ := os.Hostname()
 	o := &Orchestrator{
 		eng: eng, st: &store{eng: eng}, opt: opt, log: opt.Logger,
-		cursor: map[string]time.Time{}, known: map[string]Job{},
+		cursor: map[string]time.Time{}, known: map[string]Job{}, tasks: map[string]*runningTask{},
 		instance: fmt.Sprintf("%s-%d-%s", host, os.Getpid(), randHex(3)),
 		kick:     make(chan struct{}, 1), sem: make(chan struct{}, opt.Workers), ready: make(chan struct{}),
 	}
@@ -192,6 +193,11 @@ func NextFire(j Job, now time.Time) (time.Time, bool) {
 // fire creates a run unless another process already fired key. It reports
 // whether this process started it.
 func (o *Orchestrator) fire(ctx context.Context, job Job, trigger, key string, scheduled time.Time, detail string) (bool, error) {
+	if off, err := JobDisabled(ctx, o.eng, job.Name); err != nil {
+		return false, err
+	} else if off {
+		return false, nil // paused from the console: the tick or event is dropped
+	}
 	_, created, err := o.st.createRun(ctx, newRun{Job: job, Trigger: trigger, FireKey: key, ScheduledFor: scheduled, Detail: detail, Now: o.now()})
 	if err != nil {
 		return false, err
@@ -285,8 +291,14 @@ func (o *Orchestrator) fireDue(ctx context.Context) {
 			if dropped := o.skipped(cur, ticks[0], sc); dropped > 0 {
 				o.log.Warn("cron catch-up: ticks dropped (too many or too old)", "job", name, "dropped", dropped)
 			}
+			// Fire first, record after: the saved cursor is where another server
+			// starting now resumes, so it must never get ahead of the runs that
+			// exist (it would start tick n+1 while tick n is still being created,
+			// out of order). A crash in between only repeats a fire the key dedups.
+			if !o.fireTick(ctx, job, ticks[0], len(ticks) > 1 || now.Sub(ticks[0]) > time.Minute) {
+				continue // not fired (error): the same tick is tried again
+			}
 			o.advanceTo(ctx, name, ticks[0], sc.Next(ticks[0]))
-			o.fireTick(ctx, job, ticks[0], len(ticks) > 1 || now.Sub(ticks[0]) > time.Minute)
 			continue
 		}
 		tick, next, due := advance(sc, cur, now)
@@ -321,16 +333,23 @@ func (o *Orchestrator) advanceTo(ctx context.Context, job string, handled, next 
 	}
 }
 
-func (o *Orchestrator) fireTick(ctx context.Context, job Job, tick time.Time, late bool) {
+// fireTick reports false when the tick could not be fired because of an error.
+func (o *Orchestrator) fireTick(ctx context.Context, job Job, tick time.Time, late bool) bool {
 	detail := ""
 	if late {
 		detail = "catch-up"
 	}
-	if created, err := o.fire(ctx, job, TriggerCron, "cron:"+job.Name+":"+strconv.FormatInt(tick.Unix(), 10), tick, detail); err != nil && ctx.Err() == nil {
-		o.log.Warn("cron fire", "job", job.Name, "err", err)
-	} else if created && late {
+	created, err := o.fire(ctx, job, TriggerCron, "cron:"+job.Name+":"+strconv.FormatInt(tick.Unix(), 10), tick, detail)
+	if err != nil {
+		if ctx.Err() == nil {
+			o.log.Warn("cron fire", "job", job.Name, "err", err)
+		}
+		return false
+	}
+	if created && late {
 		o.log.Info("cron catch-up", "job", job.Name, "tick", tick)
 	}
+	return true
 }
 
 // nextWake is how long the cron loop may sleep.
@@ -413,6 +432,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 				o.log.Warn("reap", "err", err)
 			}
 		}
+		o.checkCancels(ctx)
 		claimed, err := o.step(ctx, 0, true)
 		if err != nil && ctx.Err() == nil {
 			o.log.Warn("queue", "err", err)
@@ -487,6 +507,16 @@ func (o *Orchestrator) step(ctx context.Context, only int64, claim bool) (claime
 		if err != nil || !ok {
 			<-o.sem
 			if err != nil {
+				if ctx.Err() != nil {
+					// Shutting down while the claim was in flight: its UPDATE may
+					// have committed before the read-back was cancelled, and then
+					// nobody would ever run or record this attempt (the task would
+					// stay "running" until the heartbeat reaper). Close it as
+					// interrupted; a no-op when the claim did not commit.
+					rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+					_ = o.st.finishTask(rctx, t.RunID, t.ID, token, StatusCancelled, "interrupted: "+ctx.Err().Error(), "", o.now(), o.now(), time.Time{})
+					rcancel()
+				}
 				return claimed, err
 			}
 			continue
@@ -535,6 +565,7 @@ func (o *Orchestrator) RunJob(ctx context.Context, name string) (RunRow, []TaskR
 			hb = time.Now()
 			_ = o.st.touch(ctx, o.instance, o.now())
 		}
+		o.checkCancels(ctx)
 		claimed, err := o.step(ctx, id, true)
 		if err != nil && ctx.Err() == nil {
 			return RunRow{}, nil, err
@@ -573,6 +604,9 @@ func (o *Orchestrator) RunJob(ctx context.Context, name string) (RunRow, []TaskR
 func (o *Orchestrator) prune(ctx context.Context) {
 	if err := o.st.pruneFires(ctx, o.now().Add(-fireKeepFor)); err != nil && ctx.Err() == nil {
 		o.log.Warn("prune fires", "err", err)
+	}
+	if err := o.st.exec(ctx, "DELETE FROM "+stateT+" WHERE state_key LIKE 'cancel:%' AND CAST(updated_at AS TIMESTAMP) < "+tsLit(o.now().Add(-24*time.Hour))); err != nil && ctx.Err() == nil {
+		o.log.Warn("prune cancel requests", "err", err)
 	}
 	if o.opt.HistoryRetention > 0 {
 		n, err := project.PruneJobsHistory(ctx, o.eng, o.now().Add(-o.opt.HistoryRetention))

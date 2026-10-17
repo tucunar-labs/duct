@@ -13,6 +13,7 @@ import (
 // TestIngestLock: one holder at a time per source, independent sources do not
 // block each other, and a lease nobody renews is taken over.
 func TestIngestLock(t *testing.T) {
+	t.Parallel()
 	e := openRunEngine(t)
 	ctx := context.Background()
 

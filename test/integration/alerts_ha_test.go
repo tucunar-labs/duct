@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -128,19 +129,35 @@ SELECT sensor_id, temp FROM (
 			t.Errorf("s%d: %d initial notifications, want 1", i, n)
 		}
 	}
+	// Spacing is measured on the alert's own timestamp (the evaluation that produced
+	// it), not on when the request arrived: claiming through Postgres takes a
+	// variable time on a loaded machine (conflict retries), which compresses the
+	// arrival gaps of consecutive reminders without any instance repeating itself.
+	// Two instances sending the same reminder would carry timestamps ~one
+	// evaluation apart, so this still catches the duplicates.
 	checkSpacing := func(when string) {
 		hook.mu.Lock()
 		defer hook.mu.Unlock()
-		last := map[any]time.Time{}
+		times := map[any][]time.Time{}
 		for _, x := range hook.list {
 			if x.body["state"] != "firing" {
 				continue
 			}
-			key := x.body["key"]
-			if prev, ok := last[key]; ok && x.at.Sub(prev) < 1200*time.Millisecond {
-				t.Errorf("%s: %v notified twice within %s (REPEAT is 2s): two instances sent the same reminder", when, key, x.at.Sub(prev))
+			raw, _ := x.body["at"].(string)
+			at, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				t.Errorf("%s: %v: notification without a valid timestamp: %v", when, x.body["key"], x.body["at"])
+				continue
 			}
-			last[key] = x.at
+			times[x.body["key"]] = append(times[x.body["key"]], at)
+		}
+		for key, ts := range times {
+			sort.Slice(ts, func(i, j int) bool { return ts[i].Before(ts[j]) })
+			for i := 1; i < len(ts); i++ {
+				if d := ts[i].Sub(ts[i-1]); d < 1200*time.Millisecond {
+					t.Errorf("%s: %v notified twice within %s (REPEAT is 2s): two instances sent the same reminder", when, key, d)
+				}
+			}
 		}
 	}
 	checkSpacing("both alive")

@@ -35,6 +35,7 @@ func queryCSV(t *testing.T, root, sql string) string {
 // TestE2EIngestCSV: CSV -> bronze -> duct query; full replace, incremental
 // append, schema evolution and "state only saved on success".
 func TestE2EIngestCSV(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	writeFile(t, filepath.Join(root, "data", "c.csv"), "id,name,updated_at\n1,ana,2024-01-01\n2,beto,2024-01-02\n")
 	writeFile(t, filepath.Join(root, "ingest", "customers.yaml"), `name: customers
@@ -108,6 +109,7 @@ options:
 // generated message drives one request; see source-bento AGENTS.md)
 // (httptest) through the Bento module -> bronze.
 func TestE2EIngestBento(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, `[{"id":1,"name":"a","meta":{"x":1}},{"id":2,"name":"b","extra":true}]`)
 	}))
@@ -136,6 +138,7 @@ options:
 }
 
 func TestIngestNoDefinitions(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	if out := mustDuct(t, "ingest", "--project", root); !strings.Contains(out, "No ingestions") {
 		t.Errorf("got %q", out)

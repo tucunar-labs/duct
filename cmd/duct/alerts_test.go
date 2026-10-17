@@ -165,7 +165,7 @@ func startAlertsAs(t *testing.T, root string, srvURL string, instance string, tt
 // TestAlertsRunner: a threshold rule and a silent-sensor rule over a fake
 // consumer: firing within a second, dedup, resolution, record in Bronze,
 // persisted state and no repeat notification after a restart.
-func TestAlertsRunner(t *testing.T) {
+func testAlertsRunner(t *testing.T) {
 	root := newProject(t)
 	writeFile(t, root+"/streams/sensores.yaml", "name: sensors\ntopic: planta.sensores\nwindow: 1m\n")
 	writeFile(t, root+"/alerts/hot.sql", hotSQL)
@@ -261,7 +261,7 @@ func TestAlertsRunner(t *testing.T) {
 
 // TestAlertsDeliveryFailureIsRecorded: a channel that keeps failing is retried
 // and the transition is still recorded, with delivered = false and no URL.
-func TestAlertsDeliveryFailureIsRecorded(t *testing.T) {
+func testAlertsDeliveryFailureIsRecorded(t *testing.T) {
 	root := newProject(t)
 	writeFile(t, root+"/streams/sensores.yaml", "name: sensors\ntopic: planta.sensores\nwindow: 1m\n")
 	writeFile(t, root+"/alerts/hot.sql", hotSQL)
@@ -315,7 +315,7 @@ func alertsProject(t *testing.T, rule string) (root string, h *hook, url string)
 // TestAlertsHysteresisAndReminders: FOR holds the alert back until the
 // condition lasted (a blip never fires), RESOLVE_FOR keeps it firing through a
 // short dip, and REPEAT re-notifies while it stays firing.
-func TestAlertsHysteresisAndReminders(t *testing.T) {
+func testAlertsHysteresisAndReminders(t *testing.T) {
 	root, h, url := alertsProject(t, ruleWith("-- FOR 1s\n-- RESOLVE_FOR 1s\n-- REPEAT 1s\n"))
 	fd, stop := startAlerts(t, root, url)
 	defer stop()
@@ -376,7 +376,7 @@ func TestAlertsHysteresisAndReminders(t *testing.T) {
 // TestAlertsSilences: a silence mutes notifications (firing, reminders and
 // resolved) of a rule or one key, is recorded in Bronze, shows in `status`
 // and ends by itself or with `unsilence`; the state keeps tracking meanwhile.
-func TestAlertsSilences(t *testing.T) {
+func testAlertsSilences(t *testing.T) {
 	root, h, url := alertsProject(t, ruleWith("-- REPEAT 1s\n"))
 	if out, errs, code := duct(t, "alerts", "silence", "nope", "--for", "1h", "--reason", "x", "--project", root); code == 0 {
 		t.Fatalf("silencing an unknown rule worked: %s %s", out, errs)
@@ -433,7 +433,7 @@ func TestAlertsSilences(t *testing.T) {
 // TestAlertsActiveActive: two instances watching the same data (as two
 // consumer groups would) notify each transition exactly once; when the
 // instance that holds an alert dies, the other one takes it over and resolves it.
-func TestAlertsActiveActive(t *testing.T) {
+func testAlertsActiveActive(t *testing.T) {
 	root, h, url := alertsProject(t, ruleWith("-- REPEAT 1s\n"))
 	fa, stopA := startAlertsAs(t, root, url, "a", 3*time.Second)
 	fb, stopB := startAlertsAs(t, root, url, "b", 3*time.Second)

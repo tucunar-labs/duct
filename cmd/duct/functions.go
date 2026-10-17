@@ -27,9 +27,9 @@ func udfOptions(p *project.Project) udf.Options {
 //
 // A functions/ folder that cannot be loaded (no Python environment, a typo) is a
 // warning here, so unrelated queries and pipelines keep working; `duct serve`
-// is strict (openEngineUDFNames).
+// is strict (openEngineUDFManager).
 func openEngineUDF(ctx context.Context, p *project.Project, locked bool) (contract.Engine, error) {
-	eng, _, err := openEngineUDFNames(ctx, p, locked)
+	eng, _, err := openEngineUDFManager(ctx, p, locked)
 	if err != nil && udf.Exists(p.Root) && !errors.Is(err, errEngine) {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: functions/ not loaded: %v\n", err)
 		eng, err = openEngine(ctx, p, locked)
@@ -43,18 +43,20 @@ func openEngineUDF(ctx context.Context, p *project.Project, locked bool) (contra
 	return eng, err
 }
 
-// openEngineUDFNames also returns the names of the registered functions.
-func openEngineUDFNames(ctx context.Context, p *project.Project, locked bool) (contract.Engine, []string, error) {
+// openEngineUDFManager also returns the manager of the registered functions
+// (nil when the engine cannot take any and there are none), which `duct serve`
+// uses to know their names and to reload them.
+func openEngineUDFManager(ctx context.Context, p *project.Project, locked bool) (contract.Engine, *udf.Manager, error) {
 	eng, err := openEngine(ctx, p, locked)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", errEngine, err)
 	}
-	names, err := udf.Attach(ctx, eng, udfOptions(p))
+	m, err := udf.AttachManaged(ctx, eng, udfOptions(p))
 	if err != nil {
 		_ = eng.Close()
 		return nil, nil, err
 	}
-	return eng, names, nil
+	return eng, m, nil
 }
 
 // cmdFunctions is `duct functions list|check|bench`.
@@ -94,7 +96,19 @@ func cmdFunctions(ctx context.Context, args []string, stdout, stderr io.Writer) 
 			if s.Vectorized {
 				kind += " (vectorized)"
 			}
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t(%s)\t%s\t%s\n", s.Name, kind, join(s.ArgTypes), s.ReturnType, s.File)
+			ret := s.ReturnType
+			if s.Table {
+				kind += " (table)"
+				ret = "TABLE("
+				for i, c := range s.Columns {
+					if i > 0 {
+						ret += ", "
+					}
+					ret += c.Name + " " + c.Type
+				}
+				ret += ")"
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t(%s)\t%s\t%s\n", s.Name, kind, join(s.ArgTypes), ret, s.File)
 		}
 		return tw.Flush()
 	case "bench":
@@ -139,6 +153,9 @@ func benchFunctions(ctx context.Context, p *project.Project, only []string, rows
 		if len(want) > 0 && !want[s.Name] {
 			continue
 		}
+		if s.Table { // no per-row cost to compare: it runs once per query
+			continue
+		}
 		args := ""
 		for i, t := range s.ArgTypes {
 			if i > 0 {
@@ -172,7 +189,11 @@ func benchArg(t string) string {
 		return "CAST(i AS VARCHAR)"
 	case "BOOLEAN":
 		return "i % 2 = 0"
+	case "DATE":
+		return "DATE '2026-01-01' + CAST(i % 100 AS INTEGER)"
+	case "TIMESTAMP":
+		return "TIMESTAMP '2026-01-01' + to_seconds(i)"
 	default:
-		return "CAST(i % 100 AS " + t + ")"
+		return "CAST(i % 100 AS " + t + ")" // numbers, DECIMAL(p,s); lists and structs need a hand-written query
 	}
 }

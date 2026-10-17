@@ -168,6 +168,18 @@ Pendientes conocidos para v0.2:
       cruzados por click/brush con Datastar, isla ECharts 6.1.0 (`static/charts.js`, 670 KB) con temas
       claro/oscuro. Evidencia: `modules/web/dashboards_test.go`, `TestE2EDashboards`, capturas en
       `/tmp/duct-ui-shots/dashboard-*.png` (Chromium headless, sin errores de consola/CSP).
+- [x] Web: páginas Trabajos y Admin (2026-10-12, ADR 0012). Trabajos (todos los roles, acciones solo
+      `duct_admin`): lista (horario legible + zona, disparadores, última ejecución, próxima, activo/pausa),
+      detalle con DAG en SVG (sin xyflow, bundle intacto), historial, detalle de ejecución con estado por
+      tarea, error y salida, y en vivo por SSE; acciones Ejecutar ahora, Cancelar y Pausar/Reanudar
+      (orquestador: `JobDisabled`/`SetJobEnabled`, `StartRun`, `CancelRun`, sin migración). Admin (solo
+      `duct_admin`, 403 al resto): estado, usuarios (crear, deshabilitar, restablecer contraseña, rol),
+      roles con permisos, filtros de filas, máscaras y cuota, tokens y visor de auditoría paginado; todo vía
+      la API admin (`admin.API.Invoke`), secretos mostrados una sola vez. Contrato: `AdminCaller`,
+      `AuditReader`, `JobsConsole` (opcionales). Evidencia: `modules/web/console_test.go`,
+      `TestE2EWebConsole`, capturas en `~/.cache/duct-ui-shots/` (Chromium, sin errores de consola/CSP).
+      Falta: borrar usuarios/roles desde la web, editar jobs, logs completos por tarea, estado en vivo
+      en la lista.
 - [ ] Dashboards: caché compartida entre procesos (hoy en memoria), exportar a imagen/PDF, dashboards
       por rol (`grants` sobre el YAML), parámetros en la URL (filtros compartibles), alertas sobre un gráfico.
 
@@ -182,8 +194,12 @@ Pendientes conocidos para v0.2:
       (`just test-integration`). Falta: copiar métricas a Bronze, serving online.
 - [x] UDFs Python (`functions/*.py`, `@duct.function`, escalares y vectorizadas) y ejecutables stdin/stdout
       (`functions/*.toml`); solo `duct_admin` en `duct serve`. Evidencia: `TestE2EFunctions`,
-      `TestE2EServeFunctionsAdminOnly`, `core/udf` tests; costo por lote en ADR 0005. Falta: tipos
-      no escalares (DATE, DECIMAL, LIST), funciones de tabla/agregado, recarga en caliente.
+      `TestE2EServeFunctionsAdminOnly`, `core/udf` tests; costo por lote en ADR 0005. 2026-10-12:
+      tipos DATE/TIMESTAMP/DECIMAL/LIST/STRUCT (`TestE2EFunctionsTypesAndTables`, `TestUDFComplexTypes`,
+      `TestExecComplexTypes`), `@duct.table_function` (`TestRegisterTable`, `TestPythonTypesAndTableFunctions`) y
+      recarga en caliente en `duct serve` (`TestServeFunctionsHotReload`, `TestManagerReload`,
+      `TestManagerReloadDrainsInFlight`). Falta: agregados (duckdb-go no expone la API; ver ADR 0005),
+      argumentos con nombre en funciones de tabla, y recargar una firma cambiada sin reiniciar (DuckDB crearía una sobrecarga).
 - [x] OpenSharing fase 1 (por consulta) y fase 2 (servidor REST con copias Parquet filtradas y
       enmascaradas, URLs firmadas ~15 min, local y S3) (ADR 0014, sección Implementado).
       Evidencia: `TestE2EShare` (cliente oficial `delta-sharing`), `TestShareS3RustFS`,
@@ -200,7 +216,11 @@ Pendientes conocidos para v0.2:
       `cmd/duct/audit_test.go`. Falta: columnas de tiempo reales en SQLite (límite de DuckDB), redacción
       con parser en vez de expresiones regulares.
 - [ ] Cuotas en el protocolo Postgres (usa su propia sesión DuckDB: hoy solo HTTP, MCP y web).
-- [ ] Respaldo: cifrado (lakes con `encrypted`), objetos de más de 5 GiB, restauración parcial por tabla.
+- [x] Respaldo (2026-10-12, ADR 0013): cifrado con age (`--encrypt`/`--recipient`, `--identity`), lakes
+      `ENCRYPTED` (claves por archivo y flag preservados), copia y subida multipart (> 5 GiB) y
+      `duct restore --table`. Evidencia: `TestE2EBackupEncrypted`, `TestE2EBackupEncryptedLake`,
+      `TestE2ERestoreTables`, `TestMultipartPutAndCopy`, `TestBackupMultipartS3`. Falta: passphrase/rotación
+      de destinatarios, restaurar particiones/vistas/historial de una tabla, `duct init` con lake cifrado.
 - [x] Job de CI `integration` (docker run de Postgres, RustFS y Kafka + `just test-integration` con
       `DUCT_TEST_*`). Evidencia: las 17 pruebas pasan en local contra servidores externos (192 s);
       falta verlo verde en Actions.

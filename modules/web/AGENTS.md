@@ -17,9 +17,9 @@
   `dashboards_dir` (folder with `dashboards/*.yaml`; `duct serve` passes `<project>/dashboards`; unset: none).
 - **Routes:** `/login` (GET/POST), `/logout` (POST), `/catalog`, `/catalog/{schema}/{table}`,
   `/sql`, `GET /catalog.json` (role-visible schemas/tables/columns for drag & drop and autocompletion), `POST /sql/run` (Datastar SSE), `/dashboards`, `/dashboards/{name}`,
-  `POST /dashboards/{name}/data` (SSE), `/static/*`.
+  `POST /dashboards/{name}/data` (SSE), `/jobs...`, `/admin...` (below), `/static/*`.
 - **Shell:** server-rendered frame (templ) with a collapsible sidebar (Catalog, SQL editor,
-  Dashboards, Jobs/Admin placeholders — Admin only for role `duct_admin`), breadcrumbs, a user
+  Dashboards, Trabajos, Admin — Admin only for role `duct_admin`), breadcrumbs, a user
   menu and a light/dark/system toggle. The `static/shell.js` island (a classic script loaded in
   `<head>` so the theme applies before first paint) persists the theme and sidebar in
   `localStorage`, filters the schema trees client-side, drives the tabs and the editor/results
@@ -47,6 +47,21 @@
   sets signal `ev`, the server toggles it into signal `cross` (source chart -> values of its first dim)
   and applies it to every chart but the source (`cross_filter: false` opts a chart out). Cache hits skip the
   audit log (the first query of each snapshot is audited).
+- **Jobs (`jobs.go`, `jobs.templ`, `consoleutil.go`):** `/jobs`, `/jobs/{name}`, `/jobs/{name}/runs/{id}`
+  and `.../live` (Datastar SSE that patches `#run-live` until the run ends). Data and actions come from the
+  OPTIONAL `contract.JobsConsole` of the QueryHandler. Everyone reads; `POST /jobs/{name}/run`,
+  `/jobs/{name}/enabled` and `.../runs/{id}/cancel` are duct_admin only (403 before calling the core, which
+  checks and audits again). The DAG is a server-rendered SVG layered graph (`layoutDAG`): no xyflow, no JS;
+  nodes link to the task row (`#task-<id>`). Cron wording is `humanSchedule` (anything unknown shows
+  as "Cron: ..."). Run ids are shown shortened (`runLabel`); the full id is the URL.
+- **Admin (`admin.go`, `admin.templ`):** `/admin` (status), `/admin/users`, `/admin/roles[/{role}]`
+  (grants, row filters, masks, quota), `/admin/tokens`, `/admin/audit` (filters + pagination). 403 page for
+  non-admins on every verb. Reads and changes go through the OPTIONAL `contract.AdminCaller` (the same code
+  as `/admin/v1`: governance validation errors reach the form unchanged, nothing is re-implemented);
+  the audit viewer uses `contract.AuditReader`. Forms are plain POSTs with CSRF and post/redirect/get:
+  the outcome, the draft of a failed form and any secret (temporary password, new token) travel in
+  an in-memory one-shot `flash` (`flash.go`, bound to the session, deleted when read, 2 min TTL), never in a
+  URL, cookie or the token list; reloading shows nothing.
 - **Security:** session cookie `HttpOnly`+`SameSite=Strict`; sessions are stateless: the cookie is
   XChaCha20-Poly1305 (identity, id, CSRF secret, timestamps, key id) so they survive restarts; logout
   uses an in-memory denylist (a restart forgets it; stolen cookies live until idle/absolute timeout);
@@ -82,5 +97,8 @@
 - **Tests:** `web_test.go` (httptest with fake QueryHandler/AuthProvider): `session_test.go` (restart, tamper, timeouts, rotation, logout, rate limits); login/CSRF/cookies,
   redirects, catalog, table detail (columns/preview/details, 404, nullable), admin-only nav, shell
   markers, run selection, query, truncation, errors, escaping, `errPos`, static, Serve lifecycle; `dashboards_test.go`
-  (fake SemanticQuerier: render, filters, cross-filter, cache by snapshot/role, role without access, LRU).
-- **Status:** experimental (M5 web + dashboards; Jobs/Admin are placeholders, no notebooks yet).
+  (fake SemanticQuerier: render, filters, cross-filter, cache by snapshot/role, role without access, LRU); `console_test.go`
+  (fake JobsConsole/AdminCaller/AuditReader: read-only jobs for non-admins, 403 on actions and /admin, CSRF, actions reach the core,
+  secrets shown once and not to another session, governance errors with draft, audit filters/paging, cron wording, DAG layout, SSE) and
+  `cmd/duct/console_test.go` (`TestE2EWebConsole` against a real `duct serve`).
+- **Status:** experimental (M5 web + dashboards + Jobs/Admin; no notebooks yet).

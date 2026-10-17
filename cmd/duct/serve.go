@@ -155,11 +155,15 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 		return err
 	}
 
-	eng, udfNames, err := openEngineUDFNames(ctx, p, true)
+	eng, udfs, err := openEngineUDFManager(ctx, p, true)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = eng.Close() }()
+	var udfNames []string
+	if udfs != nil {
+		udfNames = udfs.Names()
+	}
 	handler := governance.NewHandler(eng, governance.HandlerOptions{AdminOnlyFunctions: udfNames})
 	defer func() { _ = handler.Close() }()
 	auth := governance.NewStore(eng)
@@ -232,7 +236,8 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	for i, proto := range protocols {
 		byName[names[i]] = proto
 	}
-	mountOperability(p, eng, handler, auth, byName) // /admin/v1, /readyz, DB-backed metrics
+	mountOperability(p, eng, handler, auth, byName)  // /admin/v1, /readyz, DB-backed metrics
+	jobsHolder := wireConsole(p, eng, handler, auth) // web console: admin API and jobs (console.go)
 	if opt.Ready != nil {
 		addrs := map[string]string{}
 		for i, proto := range protocols {
@@ -245,11 +250,12 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	jobsDone, err := startJobs(sctx, p, httpURLOf(p, names, protocols), opt.NoJobs)
+	jobsDone, err := startJobs(sctx, p, httpURLOf(p, names, protocols), opt.NoJobs, jobsHolder)
 	if err != nil {
 		return fmt.Errorf("jobs: %w", err)
 	}
 	semanticDone := startSemantic(sctx, p, live, handler)
+	functionsDone := startFunctionsReload(sctx, p, udfs, handler)
 	streamingDone := func() error { return nil }
 	if !opt.NoStream {
 		streamingDone = startStreaming(sctx, cancel, p) // [stream] / [alerts] in duct.toml
@@ -280,6 +286,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	wg.Wait()
 	cancel()
 	semanticDone()
+	functionsDone()
 	<-jobsDone // running tasks are cancelled and recorded before the engine closes
 	if err := streamingDone(); err != nil && firstErr == nil {
 		firstErr = err

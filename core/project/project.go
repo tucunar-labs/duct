@@ -66,6 +66,8 @@ type Config struct {
 	Audit AuditSettings `toml:"audit"`
 	// Jobs configures the orchestrator: history retention (jobsretention.go).
 	Jobs JobsSettings `toml:"jobs"`
+	// Backup configures backup encryption (backupconfig.go; ADR 0013).
+	Backup BackupSettings `toml:"backup"`
 }
 
 // S3Config is the [s3] table of duct.toml, used when storage is s3://...:

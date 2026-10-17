@@ -268,8 +268,9 @@ func (s *s3Store) Delete(ctx context.Context, key string) error {
 // copyObject copies src/srcKey to dst/dstKey. Inside one S3 server it is a
 // server-side copy (no data through this process; the checksum is then unknown
 // and returned empty). Otherwise the bytes stream through and the SHA-256 is
-// computed on the way.
-func copyObject(ctx context.Context, src Store, srcKey string, dst Store, dstKey string) (size int64, sha string, err error) {
+// computed on the way. sizeHint (the object's length, 0 if unknown) picks a
+// multipart copy above 5 GiB.
+func copyObject(ctx context.Context, src Store, srcKey string, dst Store, dstKey string, sizeHint int64) (size int64, sha string, err error) {
 	if a, ok := src.(*s3Store); ok {
 		if b, ok := dst.(*s3Store); ok && a.c.SameServer(b.c) {
 			if err := safeKey(srcKey); err != nil {
@@ -278,7 +279,7 @@ func copyObject(ctx context.Context, src Store, srcKey string, dst Store, dstKey
 			if err := safeKey(dstKey); err != nil {
 				return 0, "", err
 			}
-			if err := a.c.Copy(ctx, a.bucket, a.key(srcKey), b.bucket, b.key(dstKey)); err != nil {
+			if err := a.c.CopySized(ctx, a.bucket, a.key(srcKey), b.bucket, b.key(dstKey), sizeHint); err != nil {
 				return 0, "", err
 			}
 			return -1, "", nil
@@ -309,19 +310,27 @@ func getFile(ctx context.Context, src Store, key, local string) (string, error) 
 		return "", err
 	}
 	defer func() { _ = rc.Close() }()
-	if err := os.MkdirAll(filepath.Dir(local), 0o750); err != nil {
+	h := sha256.New()
+	if err := writeLocal(local, io.TeeReader(rc, h)); err != nil {
 		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// writeLocal writes r to a local file, creating its folders.
+func writeLocal(local string, r io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(local), 0o750); err != nil {
+		return err
 	}
 	f, err := os.Create(local) //nolint:gosec // path built by this package
 	if err != nil {
-		return "", err
+		return err
 	}
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), rc); err != nil {
+	if _, err := io.Copy(f, r); err != nil {
 		_ = f.Close()
-		return "", err
+		return err
 	}
-	return hex.EncodeToString(h.Sum(nil)), f.Close()
+	return f.Close()
 }
 
 // readAll reads a small object.

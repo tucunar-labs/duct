@@ -399,6 +399,11 @@ components:
           properties:
             id: { type: integer }
             time: { type: string }
+        audit:
+          type: object
+          properties:
+            retention_seconds: { type: integer, description: "0 = kept forever." }
+            export: { type: boolean }
         components:
           type: object
           description: "jobs, stream and alerts, each with `configured` and `health` (ok, degraded, firing, idle, disabled)."

@@ -29,6 +29,7 @@ charts:
 `
 
 func TestDashboardLint(t *testing.T) {
+	t.Parallel()
 	root := semanticProject(t)
 	writeFile(t, filepath.Join(root, "dashboards", "tienda.yaml"), shopDashboard)
 	out := mustDuct(t, "dashboard", "lint", "--project", root)
@@ -192,6 +193,7 @@ func startWeb(t *testing.T, root string) string {
 // role sees its own numbers (row filters), the cross-filter narrows the other
 // charts, and a role without the views gets error panels.
 func TestE2EDashboards(t *testing.T) {
+	t.Parallel()
 	root := semanticProject(t)
 	writeFile(t, filepath.Join(root, "dashboards", "tienda.yaml"), shopDashboard)
 	base := startWeb(t, root)

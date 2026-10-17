@@ -73,6 +73,7 @@ func noStage(t *testing.T, e contract.Engine) {
 // violations counted are exactly the rows dropped, and written + dropped is
 // the number of rows staged. With two evaluations these disagree.
 func TestRefreshEvaluatesOnce(t *testing.T) {
+	t.Parallel()
 	e := openRunEngine(t)
 	ctx := context.Background()
 	const n = 20000
@@ -108,6 +109,7 @@ func TestRefreshEvaluatesOnce(t *testing.T) {
 // FAIL UPDATE on a non-deterministic source aborts the table, keeps the
 // previous version and leaves no staging behind. NULL counts as violation.
 func TestRefreshFailUpdateKeepsPrevious(t *testing.T) {
+	t.Parallel()
 	e := openRunEngine(t)
 	ctx := context.Background()
 	ok := parseTables(t, `CREATE MATERIALIZED VIEW s.t AS SELECT 1 AS x, 'keep' AS tag;`)

@@ -5,7 +5,8 @@ Wire format (all integers big endian), one request answered by one response:
 * request frame:  ``u32 length`` + ``u16 name_length`` + ``name`` (UTF-8) + Arrow IPC stream
   (schema + one record batch holding one column per argument, named ``c0``, ``c1``...)
 * response frame: ``u32 length`` + ``u8 status`` + body. Status 0: Arrow IPC stream with one
-  column ``result``; status 1: UTF-8 error message.
+  column ``result``; status 1: UTF-8 error message. A ``@table_function`` gets one row of
+  arguments and answers with an Arrow IPC stream of its declared columns (any number of rows).
 
 On start the worker sends one ready frame (status 0, JSON body with the registry snapshot).
 stdout is reserved for the protocol: user ``print`` output is redirected to stderr.
@@ -21,9 +22,9 @@ import os
 import struct
 import sys
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 from duct import registry
 from duct.registry.__main__ import _load as load_path  # pyright: ignore[reportPrivateUsage]
@@ -73,8 +74,37 @@ def _ipc_bytes(table: Any) -> bytes:
     return sink.getvalue().to_pybytes()
 
 
+def _as_table(res: Any, schema: Any) -> Any:
+    """Coerce what a table function returned into a ``pyarrow.Table`` of ``schema``."""
+    if isinstance(res, pa.Table):
+        parts: list[Any] = [res]
+    elif isinstance(res, pa.RecordBatch):
+        parts = [pa.Table.from_batches([res])]
+    elif isinstance(res, dict):
+        parts = [pa.table(res)]
+    elif isinstance(res, list) and res and isinstance(res[0], dict):
+        parts = [pa.Table.from_pylist(res)]
+    else:  # an iterable (generator) of batches, tables, dicts or row lists
+        parts = [_as_table(r, schema) for r in cast(Iterable[Any], res)]
+    parts = [p.select(schema.names) if p.num_columns else p for p in parts]
+    parts = [p.cast(schema) for p in parts if p.num_columns]
+    return pa.concat_tables(parts) if parts else schema.empty_table()
+
+
+def make_table_runner(spec: registry.FunctionSpec) -> Callable[[Any], Any]:
+    """Return ``args table (one row) -> pyarrow.Table`` for a ``@table_function``."""
+    schema = pa.schema([(n, arrow_type(t)) for n, t in spec.columns])
+    fn = spec.fn
+
+    def run_table(table: Any) -> Any:
+        args = [table.column(i)[0].as_py() for i in range(table.num_columns)]
+        return _as_table(fn(*args), schema)
+
+    return run_table
+
+
 def make_runner(spec: registry.FunctionSpec) -> Callable[[Any], Any]:
-    """Return ``table -> pyarrow.Array`` for one registered function."""
+    """Return ``table -> pyarrow.Array`` for one registered scalar function."""
     if spec.duckdb_returns is None:
         raise ValueError(f"function {spec.name}: return type unresolved (use returns=)")
     out_type = arrow_type(spec.duckdb_returns)
@@ -126,8 +156,11 @@ def serve(stdin: BinaryIO, proto_out: BinaryIO, load: list[Path]) -> int:
     for p in load:
         load_path(p)
     runners: dict[str, Callable[[Any], Any]] = {}
+    tables: set[str] = set()
     for spec in registry.functions():
-        runners[spec.name] = make_runner(spec)
+        runners[spec.name] = make_table_runner(spec) if spec.kind == "table" else make_runner(spec)
+        if spec.kind == "table":
+            tables.add(spec.name)
     _warm_up()
     write_frame(proto_out, b"\x00" + json.dumps(registry.to_dict()).encode())
     while True:
@@ -140,9 +173,12 @@ def serve(stdin: BinaryIO, proto_out: BinaryIO, load: list[Path]) -> int:
             run = runners[name]
             table = ipc.open_stream(pa.py_buffer(frame[2 + nlen :])).read_all()
             result = run(table)
-            if len(result) != table.num_rows:
-                raise ValueError(f"returned {len(result)} values for {table.num_rows} rows")
-            body = b"\x00" + _ipc_bytes(pa.table({"result": result}))
+            if name in tables:
+                body = b"\x00" + _ipc_bytes(result)
+            else:
+                if len(result) != table.num_rows:
+                    raise ValueError(f"returned {len(result)} values for {table.num_rows} rows")
+                body = b"\x00" + _ipc_bytes(pa.table({"result": result}))
         except KeyError:
             body = b"\x01" + f"unknown function {name!r}".encode()
         except Exception as e:  # report to the caller; the worker stays alive

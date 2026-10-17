@@ -1,0 +1,548 @@
+package web
+
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+
+	contract "github.com/alonsoburon/duct/core/contract/v1"
+)
+
+// ---- shared bits ----
+
+templ statusBadge(s string) {
+	<span class={ "badge", statusBadgeClass(s) }>
+		if s == "running" {
+			<span class="run-dot" aria-hidden="true"></span>
+		}
+		{ statusLabel(s) }
+	</span>
+}
+
+// flashBanner shows the outcome of the last action; successes also toast.
+templ flashBanner(f *flash) {
+	if f != nil && f.Msg != "" {
+		if f.Kind == "error" {
+			<p role="alert" class="flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">
+				@icon("alert", "mt-0.5 h-4 w-4 flex-none")
+				<span class="whitespace-pre-wrap break-words">{ f.Msg }</span>
+			</p>
+		} else {
+			<p
+				role="status"
+				class="flex items-start gap-2 rounded-lg border border-success/40 bg-success-bg px-3 py-2 text-sm text-success"
+				data-init={ "window.ductToast && window.ductToast(" + jsString(f.Msg) + ")" }
+			>
+				@icon("history", "mt-0.5 h-4 w-4 flex-none")
+				<span class="break-words">{ f.Msg }</span>
+			</p>
+		}
+	}
+}
+
+func jsString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+templ forbiddenPage(p pageData, what string) {
+	@layout(p) {
+		<div class="mx-auto max-w-2xl pt-10">
+			@emptyState("admin", "Acceso denegado (403)", what)
+		</div>
+	}
+}
+
+templ notFoundPage(p pageData, what string) {
+	@layout(p) {
+		<div class="mx-auto max-w-2xl pt-10">
+			@emptyState("alert", "No encontrado", what)
+		</div>
+	}
+}
+
+templ hiddenCSRF(csrf string) {
+	<input type="hidden" name="csrf" value={ csrf }/>
+}
+
+// ---- jobs list ----
+
+templ jobsPage(p pageData, role, csrf string, v jobsView) {
+	@layout(p) {
+		<div class="mx-auto max-w-6xl space-y-4">
+			<div class="flex flex-wrap items-baseline justify-between gap-2">
+				<div>
+					<h1 class="text-xl font-semibold">Trabajos</h1>
+					<p class="text-sm text-muted">Pipelines e ingestas orquestados: horario, disparadores y últimas ejecuciones</p>
+				</div>
+				<div class="flex items-center gap-2">
+					<span class="badge badge-muted">{ strconv.Itoa(len(v.Jobs)) } trabajos</span>
+					if !v.Admin {
+						<span class="badge badge-muted" title="Solo duct_admin puede ejecutar, cancelar o pausar">solo lectura</span>
+					}
+				</div>
+			</div>
+			@flashBanner(v.Flash)
+			if v.Err != "" {
+				<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+			} else if len(v.Jobs) == 0 {
+				@emptyState("jobs", "No hay trabajos", "Crea jobs/<nombre>.yaml en el proyecto: un horario cron o disparadores, y un grafo de tareas.")
+			} else {
+				<div class="card overflow-x-auto">
+					<table class="data-table">
+						<thead>
+							<tr>
+								<th scope="col">Trabajo</th>
+								<th scope="col">Horario</th>
+								<th scope="col">Disparadores</th>
+								<th scope="col">Última ejecución</th>
+								<th scope="col">Próxima</th>
+								<th scope="col">Estado</th>
+								if v.Admin {
+									<th scope="col"><span class="sr-only">Acciones</span></th>
+								}
+							</tr>
+						</thead>
+						<tbody>
+							for _, j := range v.Jobs {
+								<tr>
+									<td>
+										<a href={ templ.URL("/jobs/" + j.Name) } class="font-medium text-brand-strong hover:underline">{ j.Name }</a>
+										<p class="text-xs text-muted">{ strconv.Itoa(len(j.Tasks)) } tareas</p>
+									</td>
+									<td>
+										<span title={ j.Schedule }>{ humanSchedule(j.Schedule) }</span>
+										if j.Schedule != "" && j.Timezone != "" {
+											<p class="text-xs text-muted">{ j.Timezone }</p>
+										}
+									</td>
+									<td>
+										@triggerBadges(j)
+									</td>
+									<td>
+										if j.LastRun != nil {
+											<a href={ templ.URL("/jobs/" + j.Name + "/runs/" + strconv.FormatInt(j.LastRun.ID, 10)) } class="inline-flex items-center gap-2 hover:underline">
+												@statusBadge(j.LastRun.Status)
+												<span class="text-xs text-muted">{ fmtDuration(runDuration(*j.LastRun, v.Now)) }</span>
+											</a>
+											<p class="text-xs text-muted" title={ fmtTime(j.LastRun.StartedAt) + " UTC" }>{ relTime(j.LastRun.StartedAt, v.Now) }</p>
+										} else {
+											<span class="text-muted">Nunca</span>
+										}
+									</td>
+									<td>
+										if !j.NextFire.IsZero() {
+											<span title={ fmtTime(j.NextFire) + " UTC" }>{ relTime(j.NextFire, v.Now) }</span>
+										} else {
+											<span class="text-muted">—</span>
+										}
+									</td>
+									<td>
+										if j.Enabled {
+											<span class="badge badge-success">Activo</span>
+										} else {
+											<span class="badge badge-warn">En pausa</span>
+										}
+									</td>
+									if v.Admin {
+										<td>
+											<div class="flex items-center justify-end gap-1.5">
+												<form method="post" action={ templ.URL("/jobs/" + j.Name + "/run") }>
+													@hiddenCSRF(csrf)
+													<input type="hidden" name="back" value="list"/>
+													<button type="submit" class="btn btn-secondary btn-sm" aria-label={ "Ejecutar " + j.Name + " ahora" }>
+														@icon("play", "h-3 w-3")
+														Ejecutar
+													</button>
+												</form>
+												@enabledForm(csrf, j.Name, j.Enabled, "list")
+											</div>
+										</td>
+									}
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			}
+		</div>
+	}
+}
+
+templ triggerBadges(j contract.JobInfo) {
+	<div class="flex flex-wrap gap-1">
+		for _, t := range j.OnSnapshot {
+			<span class="badge badge-num" title="Se ejecuta cuando esta tabla recibe un snapshot nuevo">al cambiar { t }</span>
+		}
+		if j.OnFile != "" {
+			<span class="badge badge-bool" title="Se ejecuta cuando aparece o cambia un archivo">archivo { j.OnFile }</span>
+		}
+		if len(j.OnSnapshot) == 0 && j.OnFile == "" {
+			<span class="text-muted">—</span>
+		}
+	</div>
+}
+
+templ enabledForm(csrf, name string, enabled bool, back string) {
+	<form method="post" action={ templ.URL("/jobs/" + name + "/enabled") }>
+		@hiddenCSRF(csrf)
+		<input type="hidden" name="back" value={ back }/>
+		if enabled {
+			<input type="hidden" name="enabled" value="0"/>
+			<button type="submit" class="btn btn-ghost btn-sm" aria-label={ "Pausar " + name }>Pausar</button>
+		} else {
+			<input type="hidden" name="enabled" value="1"/>
+			<button type="submit" class="btn btn-secondary btn-sm" aria-label={ "Reanudar " + name }>Reanudar</button>
+		}
+	</form>
+}
+
+// ---- job detail ----
+
+templ jobPage(p pageData, csrf string, v jobView) {
+	@layout(p) {
+		<div class="mx-auto max-w-6xl space-y-4">
+			<div class="flex flex-wrap items-start justify-between gap-3">
+				<div class="min-w-0">
+					<h1 class="truncate font-mono text-xl font-semibold">{ v.Job.Name }</h1>
+					<p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted">
+						if v.Job.Enabled {
+							<span class="badge badge-success">Activo</span>
+						} else {
+							<span class="badge badge-warn">En pausa</span>
+						}
+						<span title={ v.Job.Schedule }>{ humanSchedule(v.Job.Schedule) }</span>
+					</p>
+				</div>
+				if v.Admin {
+					<div class="flex items-center gap-2">
+						<form method="post" action={ templ.URL("/jobs/" + v.Job.Name + "/run") }>
+							@hiddenCSRF(csrf)
+							<button type="submit" class="btn btn-primary">
+								@icon("play", "h-3.5 w-3.5")
+								Ejecutar ahora
+							</button>
+						</form>
+						@enabledForm(csrf, v.Job.Name, v.Job.Enabled, "detail")
+					</div>
+				} else {
+					<span class="badge badge-muted" title="Solo duct_admin puede ejecutar, cancelar o pausar">solo lectura</span>
+				}
+			</div>
+			@flashBanner(v.Flash)
+			<dl class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+				@infoCard("Horario") {
+					<span title={ v.Job.Schedule }>{ humanSchedule(v.Job.Schedule) }</span>
+					if v.Job.Schedule != "" {
+						<p class="font-mono text-xs text-muted">{ v.Job.Schedule }{ tzSuffix(v.Job.Timezone) }</p>
+					}
+				}
+				@infoCard("Próxima ejecución") {
+					if !v.Job.NextFire.IsZero() {
+						{ relTime(v.Job.NextFire, v.Now) }
+						<p class="text-xs text-muted">{ fmtTime(v.Job.NextFire) } UTC</p>
+					} else if !v.Job.Enabled {
+						<span class="text-muted">En pausa</span>
+					} else {
+						<span class="text-muted">Sin horario</span>
+					}
+				}
+				@infoCard("Disparadores") {
+					@triggerBadges(*v.Job)
+				}
+				@infoCard("Alertas y recuperación") {
+					if len(v.Job.Alerts) > 0 {
+						<p>Al fallar: { strings.Join(v.Job.Alerts, ", ") }</p>
+					} else {
+						<p class="text-muted">Sin alertas</p>
+					}
+					if v.Job.Catchup != "" {
+						<p class="text-xs text-muted">Recuperar ticks perdidos: { v.Job.Catchup }</p>
+					}
+				}
+			</dl>
+			<section class="card" aria-labelledby="dag-title">
+				<div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+					<h2 id="dag-title" class="text-sm font-semibold">Tareas</h2>
+					<span class="badge badge-muted">{ strconv.Itoa(len(v.Job.Tasks)) }</span>
+				</div>
+				<div class="dag">
+					@dagSVG(layoutDAG(dagFromDefs(v.Job.Tasks)), "Grafo de tareas de "+v.Job.Name, "")
+				</div>
+				<div class="overflow-x-auto border-t border-line">
+					<table class="data-table">
+						<thead>
+							<tr>
+								<th scope="col">Tarea</th>
+								<th scope="col">Tipo</th>
+								<th scope="col">Depende de</th>
+								<th scope="col">Reintentos</th>
+								<th scope="col">Tiempo máx.</th>
+							</tr>
+						</thead>
+						<tbody>
+							for _, t := range v.Job.Tasks {
+								<tr>
+									<td class="font-mono">{ t.ID }</td>
+									<td><span class="badge badge-muted">{ t.Type }</span></td>
+									<td class="font-mono text-xs">
+										if len(t.DependsOn) == 0 {
+											<span class="text-muted">—</span>
+										} else {
+											{ strings.Join(t.DependsOn, ", ") }
+										}
+									</td>
+									<td>{ strconv.Itoa(t.Retries) }</td>
+									<td>{ fmtDuration(t.Timeout) }</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			</section>
+			<section class="card" aria-labelledby="runs-title">
+				<div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+					<h2 id="runs-title" class="text-sm font-semibold">Historial de ejecuciones</h2>
+					<span class="text-xs text-muted">últimas { strconv.Itoa(runsShown) }</span>
+				</div>
+				if v.Err != "" {
+					<p role="alert" class="m-3 rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+				} else if len(v.Runs) == 0 {
+					<div class="p-4">
+						@emptyState("history", "Sin ejecuciones todavía", "Cuando el trabajo se ejecute (por horario, por un evento o a mano) aparecerá aquí.")
+					</div>
+				} else {
+					<div class="overflow-x-auto">
+						<table class="data-table">
+							<thead>
+								<tr>
+									<th scope="col">Ejecución</th>
+									<th scope="col">Estado</th>
+									<th scope="col">Origen</th>
+									<th scope="col">Inicio (UTC)</th>
+									<th scope="col">Duración</th>
+									<th scope="col" title="Intentos de todas las tareas">Intentos</th>
+								</tr>
+							</thead>
+							<tbody>
+								for _, r := range v.Runs {
+									<tr>
+										<td>
+											<a href={ templ.URL("/jobs/" + v.Job.Name + "/runs/" + strconv.FormatInt(r.ID, 10)) } class="font-mono text-brand-strong hover:underline" title={ "Ejecución " + strconv.FormatInt(r.ID, 10) }>{ runLabel(r.ID) }</a>
+										</td>
+										<td>@statusBadge(r.Status)</td>
+										<td>{ triggerLabel(r) }</td>
+										<td title={ relTime(r.StartedAt, v.Now) }>{ fmtTime(r.StartedAt) }</td>
+										<td>{ fmtDuration(runDuration(r, v.Now)) }</td>
+										<td>{ strconv.Itoa(r.Attempts) } / { strconv.Itoa(r.Tasks) } tareas</td>
+									</tr>
+								}
+							</tbody>
+						</table>
+					</div>
+				}
+			</section>
+		</div>
+	}
+}
+
+func tzSuffix(tz string) string {
+	if tz == "" {
+		return ""
+	}
+	return " · " + tz
+}
+
+templ infoCard(label string) {
+	<div class="card-flat p-3 text-sm">
+		<dt class="mb-1 text-xs font-medium uppercase tracking-wide text-muted">{ label }</dt>
+		<dd>
+			{ children... }
+		</dd>
+	</div>
+}
+
+// dagSVG draws the layered graph. In a run, boxes link to the task row
+// (anchor "task-<id>") so keyboard users can jump from the graph to the table.
+templ dagSVG(l dagLayout, label, anchorPrefix string) {
+	if len(l.Boxes) == 0 {
+		<p class="p-3 text-sm text-muted">Sin tareas.</p>
+	} else {
+		<svg
+			xmlns="http://www.w3.org/2000/svg"
+			viewBox={ "0 0 " + strconv.Itoa(l.Width) + " " + strconv.Itoa(l.Height) }
+			width={ strconv.Itoa(l.Width) }
+			height={ strconv.Itoa(l.Height) }
+			role="group"
+			aria-label={ label }
+		>
+			<defs>
+				<marker id="dag-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+					<path class="dag-arrow" d="M0 0.5 L8 4 L0 7.5z"></path>
+				</marker>
+			</defs>
+			for _, e := range l.Edges {
+				<path class="dag-edge" data-status={ e.Status } d={ e.Path } marker-end="url(#dag-arrow)"></path>
+			}
+			for _, b := range l.Boxes {
+				<g class="dag-node" data-status={ b.Status }>
+					if anchorPrefix != "" {
+						<a href={ templ.URL("#" + anchorPrefix + b.ID) } aria-label={ b.ID + ", " + dagStatusText(b.Status) }>
+							@dagBoxInner(b)
+						</a>
+					} else {
+						@dagBoxInner(b)
+					}
+				</g>
+			}
+		</svg>
+	}
+}
+
+templ dagBoxInner(b dagBox) {
+	<rect x={ strconv.Itoa(b.X) } y={ strconv.Itoa(b.Y) } width={ strconv.Itoa(b.W) } height={ strconv.Itoa(b.H) } rx="9"></rect>
+	<circle class="dag-mark" cx={ strconv.Itoa(b.X + 14) } cy={ strconv.Itoa(b.Y + b.H/2) } r="4.5"></circle>
+	<text class="dag-id" x={ strconv.Itoa(b.X + 26) } y={ strconv.Itoa(b.Y + 20) }>{ clipText(b.ID, 20) }</text>
+	<text class="dag-type" x={ strconv.Itoa(b.X + 26) } y={ strconv.Itoa(b.Y + 35) }>
+		{ b.Type }
+		if b.Status != "" {
+			{ " · " + statusLabel(b.Status) }
+		}
+	</text>
+	<title>{ b.ID } ({ b.Type }){ dagTitleStatus(b.Status) }</title>
+}
+
+func dagStatusText(s string) string {
+	if s == "" {
+		return "sin ejecutar"
+	}
+	return statusLabel(s)
+}
+
+func dagTitleStatus(s string) string {
+	if s == "" {
+		return ""
+	}
+	return ": " + statusLabel(s)
+}
+
+func clipText(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
+// ---- run detail ----
+
+templ runPage(p pageData, v runView) {
+	@layout(p) {
+		<div class="mx-auto max-w-6xl space-y-4">
+			@flashBanner(v.Flash)
+			if v.Live {
+				<div data-init={ "@get('/jobs/" + v.Job.Name + "/runs/" + strconv.FormatInt(v.Run.ID, 10) + "/live')" }>
+					@runLiveBody(v)
+				</div>
+			} else {
+				@runLiveBody(v)
+			}
+		</div>
+	}
+}
+
+// runLiveBody is what the live stream replaces (id run-live).
+templ runLiveBody(v runView) {
+	<div id="run-live" class="space-y-4" aria-live="off">
+		<div class="flex flex-wrap items-start justify-between gap-3">
+			<div class="min-w-0">
+				<h1 class="text-xl font-semibold">
+					<a href={ templ.URL("/jobs/" + v.Run.Job) } class="font-mono hover:underline">{ v.Run.Job }</a>
+					<span class="font-mono text-muted" title={ "Ejecución " + strconv.FormatInt(v.Run.ID, 10) }>{ runLabel(v.Run.ID) }</span>
+				</h1>
+				<p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted">
+					@statusBadge(v.Run.Status)
+					<span>{ triggerLabel(v.Run) }</span>
+					<span>·</span>
+					<span title={ fmtTime(v.Run.StartedAt) + " UTC" }>inicio { relTime(v.Run.StartedAt, v.Now) }</span>
+					<span>·</span>
+					<span>duración { fmtDuration(runDuration(v.Run, v.Now)) }</span>
+				</p>
+			</div>
+			if v.Admin && v.Live {
+				<form method="post" action={ templ.URL("/jobs/" + v.Run.Job + "/runs/" + strconv.FormatInt(v.Run.ID, 10) + "/cancel") }>
+					@hiddenCSRF(v.CSRF)
+					<button type="submit" class="btn btn-danger">
+						@icon("x", "h-3.5 w-3.5")
+						Cancelar ejecución
+					</button>
+				</form>
+			}
+		</div>
+		if v.Run.Error != "" {
+			<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger whitespace-pre-wrap break-words">{ v.Run.Error }</p>
+		}
+		<section class="card" aria-label="Grafo de la ejecución">
+			<div class="dag">
+				@dagSVG(layoutDAG(dagFromRun(v.Tasks)), "Estado de las tareas de la ejecución", "task-")
+			</div>
+		</section>
+		<section class="card" aria-labelledby="tasks-title">
+			<div class="flex items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+				<h2 id="tasks-title" class="text-sm font-semibold">Tareas</h2>
+				<span class="badge badge-muted">{ strconv.Itoa(len(v.Tasks)) }</span>
+			</div>
+			<div class="overflow-x-auto">
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th scope="col">Tarea</th>
+							<th scope="col">Estado</th>
+							<th scope="col">Intentos</th>
+							<th scope="col">Inicio (UTC)</th>
+							<th scope="col">Duración</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, t := range v.Tasks {
+							<tr id={ "task-" + t.ID } class="scroll-mt-16 target:bg-hover">
+								<td>
+									<span class="font-mono">{ t.ID }</span>
+									<span class="badge badge-muted ml-1">{ t.Type }</span>
+								</td>
+								<td>@statusBadge(t.Status)</td>
+								<td>{ strconv.Itoa(t.Attempts) } / { strconv.Itoa(t.MaxAttempts) }</td>
+								<td>{ fmtTime(t.StartedAt) }</td>
+								<td>{ taskDuration(t) }</td>
+							</tr>
+							if t.Error != "" || t.Output != "" {
+								<tr>
+									<td colspan="5" class="!whitespace-normal !pt-0">
+										if t.Error != "" {
+											<p role="alert" class="mb-1.5 whitespace-pre-wrap break-words rounded-lg border border-danger/40 bg-danger-bg px-3 py-1.5 text-xs text-danger">{ t.Error }</p>
+										}
+										if t.Output != "" {
+											<details open?={ t.Status == "failed" || t.Status == "running" }>
+												<summary class="cursor-pointer text-xs text-muted">Salida (últimas líneas)</summary>
+												<pre class="task-out mt-1" tabindex="0">{ tail(t.Output, 40) }</pre>
+											</details>
+										}
+									</td>
+								</tr>
+							}
+						}
+					</tbody>
+				</table>
+			</div>
+		</section>
+	</div>
+}
+
+func taskDuration(t contract.JobTaskRun) string {
+	if t.StartedAt.IsZero() && t.Duration == 0 {
+		return "—"
+	}
+	return fmtDuration(t.Duration)
+}
+
+

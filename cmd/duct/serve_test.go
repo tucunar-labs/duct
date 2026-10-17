@@ -164,6 +164,7 @@ func pgRows(t *testing.T, c *pgx.Conn, sql string) ([][]any, error) {
 }
 
 func TestE2EServe(t *testing.T) {
+	t.Parallel()
 	root := governedProject(t)
 	cert, key := selfSigned(t)
 	srv := startServe(t, root, map[string]map[string]any{"pg": {"tls_cert": cert, "tls_key": key}})
@@ -517,6 +518,7 @@ var _ = tls.VersionTLS12
 
 // TestHandlerCatalog: the optional Catalog method lists only the role's views.
 func TestHandlerCatalog(t *testing.T) {
+	t.Parallel()
 	root := governedProject(t)
 	p, err := project.Load(root)
 	if err != nil {

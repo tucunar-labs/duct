@@ -194,6 +194,7 @@ func rewriteEndpoint(t *testing.T, path, endpoint string) {
 // TestE2EShare: the whole of ADR 0014 with the real CLI and the official
 // Python client, on a local lake.
 func TestE2EShare(t *testing.T) {
+	t.Parallel()
 	py := deltaSharingPython(t)
 	root := newProject(t)
 	g := func(args ...string) string { return mustDuct(t, append(args, "--project", root)...) }

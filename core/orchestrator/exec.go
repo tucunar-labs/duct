@@ -28,12 +28,16 @@ func (o *Orchestrator) execute(ctx context.Context, row TaskRow, token string) {
 	job, jok := o.job(row.Job)
 	task, tok := job.Task(row.ID)
 	var actx context.Context
+	var rt *runningTask
 	var cancel context.CancelFunc = func() {}
 	if !jok || !tok {
 		err = fmt.Errorf("task %s/%s is not defined in this process's %s/ (jobs changed during the run?)", row.Job, row.ID, Dir)
 	} else {
 		actx, cancel = context.WithTimeout(ctx, task.timeout())
+		rt = &runningTask{run: row.RunID, cancel: cancel}
+		o.track(token, rt)
 		res, err = o.runTask(actx, job, task, row.RunID)
+		o.untrack(token)
 	}
 	defer cancel()
 
@@ -41,6 +45,8 @@ func (o *Orchestrator) execute(ctx context.Context, row TaskRow, token string) {
 	if err != nil {
 		msg = err.Error()
 		switch {
+		case rt != nil && rt.user.Load() && ctx.Err() == nil:
+			status, msg = StatusCancelled, "cancelled by user"
 		case ctx.Err() != nil:
 			status, msg = StatusCancelled, "interrupted: "+ctx.Err().Error()
 		case actx != nil && errors.Is(actx.Err(), context.DeadlineExceeded):

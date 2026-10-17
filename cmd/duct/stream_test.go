@@ -103,6 +103,7 @@ func streamCfg(t *testing.T, yaml string) stream.Config {
 // evolution, rejects, offsets committed only after the rows are visible, and
 // redelivery after a "crash" does not duplicate rows.
 func TestStreamWriter(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	p, err := project.Load(root)
 	if err != nil {

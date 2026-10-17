@@ -76,7 +76,7 @@ func TestRegisterScalar(t *testing.T) {
 func TestRegisterScalarErrors(t *testing.T) {
 	e, _ := open(t, false)
 	ctx := context.Background()
-	if err := e.RegisterScalar(ctx, contract.ScalarFunction{Name: "x", ArgTypes: []string{"DATE"}, ReturnType: "DOUBLE",
+	if err := e.RegisterScalar(ctx, contract.ScalarFunction{Name: "x", ArgTypes: []string{"JSON"}, ReturnType: "DOUBLE",
 		Call: func(context.Context, []arrow.Array) (arrow.Array, error) { return nil, nil }}); err == nil || !strings.Contains(err.Error(), "unsupported type") {
 		t.Fatalf("unsupported arg type: %v", err)
 	}

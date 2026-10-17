@@ -13,6 +13,7 @@ import (
 // TestE2EGovernanceSQL: `duct sql` runs the Unity-style statements with the
 // same effect as the role/grant/policy commands.
 func TestE2EGovernanceSQL(t *testing.T) {
+	t.Parallel()
 	root := governedProject(t)
 	s := func(sql string) string { return mustDuct(t, "sql", "--project", root, sql) }
 
@@ -105,6 +106,7 @@ func TestE2EGovernanceSQL(t *testing.T) {
 // TestE2EServeAdmin: the duct_admin role runs governance SQL over the Postgres
 // protocol and over HTTP; a normal user is refused and audited.
 func TestE2EServeAdmin(t *testing.T) {
+	t.Parallel()
 	root := governedProject(t)
 	mustDuct(t, "sql", "--project", root, "CREATE ROLE duct_admin")
 	mustDuct(t, "user", "create", "jefa", "--role", "duct_admin", "--password", "pw-jefa-123", "--project", root)

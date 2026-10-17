@@ -10,6 +10,7 @@ import (
 // HTTP ArrowStream and HTTP JSON (token), and the Postgres wire through psycopg (password),
 // all as the governed user (row filter and mask applied).
 func TestSDKTransports(t *testing.T) {
+	t.Parallel()
 	py := pythonEnv(t)
 	root := governedProject(t)
 	srv := startServe(t, root, nil)

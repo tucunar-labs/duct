@@ -16,7 +16,6 @@ import (
 
 func auditProject(t *testing.T) string {
 	t.Helper()
-	t.Setenv("USER", "tester")
 	root := filepath.Join(t.TempDir(), "demo")
 	mustDuct(t, "init", root)
 	return root
@@ -55,6 +54,7 @@ func openAuditEngine(t *testing.T, root string) (contract.Engine, func()) {
 }
 
 func TestAuditCLIRows(t *testing.T) {
+	t.Parallel()
 	root := auditProject(t)
 	mustDuct(t, "query", "--project", root, "CREATE TABLE t (id INTEGER)")
 	mustDuct(t, "query", "--project", root, "INSERT INTO t VALUES (1),(2),(3)")
@@ -99,6 +99,7 @@ func TestAuditCLIRows(t *testing.T) {
 }
 
 func TestAuditRedaction(t *testing.T) {
+	t.Parallel()
 	root := auditProject(t)
 	mustDuct(t, "query", "--project", root, "CREATE SECRET s1 (TYPE s3, KEY_ID 'AKIAXXXX', SECRET 'topsecretvalue')")
 	mustDuct(t, "query", "--project", root, "SELECT 'x' AS a /* password=hunter2 */")
@@ -112,6 +113,7 @@ func TestAuditRedaction(t *testing.T) {
 }
 
 func TestRedactSQL(t *testing.T) {
+	t.Parallel()
 	for in, leak := range map[string]string{
 		"CREATE SECRET s (TYPE s3, KEY_ID 'a', SECRET 'b-leak')":         "b-leak",
 		"create or replace persistent secret x (type s3, secret 'LEAK')": "LEAK",
@@ -136,6 +138,7 @@ func TestRedactSQL(t *testing.T) {
 }
 
 func TestAuditPruneBatches(t *testing.T) {
+	t.Parallel()
 	root := auditProject(t)
 	eng, closeEng := openAuditEngine(t, root)
 	defer closeEng()
@@ -175,6 +178,7 @@ func TestAuditPruneBatches(t *testing.T) {
 }
 
 func TestAuditExportIdempotent(t *testing.T) {
+	t.Parallel()
 	root := auditProject(t)
 	now := time.Now()
 	for i := range 4 {
@@ -207,6 +211,7 @@ func TestAuditExportIdempotent(t *testing.T) {
 }
 
 func TestAuditCacheHitsCoalesce(t *testing.T) {
+	t.Parallel()
 	root := auditProject(t)
 	eng, closeEng := openAuditEngine(t, root)
 	h := governance.NewHandler(eng, governance.HandlerOptions{})
@@ -243,6 +248,7 @@ func TestAuditCacheHitsCoalesce(t *testing.T) {
 // TestAuditTimestampMigration: a state database from before migration 9
 // (ragged text timestamps, no audit_id/cached/hits) is converted in place.
 func TestAuditTimestampMigration(t *testing.T) {
+	t.Parallel()
 	root := auditProject(t)
 	q := func(s string) { mustDuct(t, "query", "--project", root, s) }
 	// Back to v8.
@@ -285,6 +291,7 @@ func TestAuditTimestampMigration(t *testing.T) {
 // TestAuditMaintenanceLoop: what `duct serve` runs in the background prunes by
 // retention and exports, and exports once more when it is stopped.
 func TestAuditMaintenanceLoop(t *testing.T) {
+	t.Parallel()
 	root := auditProject(t)
 	now := time.Now()
 	insertAudit(t, root, now.Add(-10*24*time.Hour), "old", "SELECT 1")

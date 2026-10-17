@@ -11,14 +11,14 @@ type crumb struct {
 
 type pageData struct {
 	Title   string
-	Active  string // "catalog" | "dashboards" | "sql" | "admin" | ""
+	Active  string // "catalog" | "dashboards" | "sql" | "jobs" | "admin" | ""
 	User    string
 	Role    string
 	CSRF    string
 	Assets  assets
 	Crumbs  []crumb
 	Pinned  bool // full-height layout: the page manages its own scrolling
-	IsAdmin bool // role duct_admin: shows the Admin placeholder
+	IsAdmin bool // role duct_admin: shows the Admin entry
 }
 
 templ layout(p pageData) {
@@ -106,9 +106,9 @@ templ sidebar(p pageData) {
 			@navItem("/catalog", "catalog", "Catálogo", p.Active == "catalog")
 			@navItem("/sql", "sql", "Editor SQL", p.Active == "sql")
 			@navItem("/dashboards", "dashboards", "Dashboards", p.Active == "dashboards")
-			@navPlaceholder("jobs", "Trabajos")
+			@navItem("/jobs", "jobs", "Trabajos", p.Active == "jobs")
 			if p.IsAdmin {
-				@navPlaceholder("admin", "Admin")
+				@navItem("/admin", "admin", "Admin", p.Active == "admin")
 			}
 		</nav>
 		<div class="border-t border-line px-4 py-2 text-xs text-muted">
@@ -128,18 +128,6 @@ templ navItem(href, iconName, label string, active bool) {
 		@icon(iconName, "h-4.5 w-4.5 flex-none")
 		<span class="sidebar-label truncate">{ label }</span>
 	</a>
-}
-
-templ navPlaceholder(iconName, label string) {
-	<span
-		class="sidebar-link cursor-not-allowed opacity-60"
-		aria-disabled="true"
-		title="Próximamente"
-	>
-		@icon(iconName, "h-4.5 w-4.5 flex-none")
-		<span class="sidebar-label truncate">{ label }</span>
-		<span class="sidebar-label badge badge-muted ml-auto">pronto</span>
-	</span>
 }
 
 templ topbar(p pageData) {

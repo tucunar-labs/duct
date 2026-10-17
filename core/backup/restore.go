@@ -86,14 +86,36 @@ func OpenSource(ctx context.Context, from, id string) (*Source, error) {
 	return &Source{Store: store, Manifest: m}, nil
 }
 
-// ConfigFile returns the duct.toml stored in the backup.
-func (s *Source) ConfigFile(ctx context.Context) ([]byte, error) {
-	return readAll(ctx, s.Store, "project/"+project.ConfigFile)
+// ConfigFile returns the duct.toml stored in the backup (decrypted with c if
+// the backup is encrypted).
+func (s *Source) ConfigFile(ctx context.Context, c *Crypto) ([]byte, error) {
+	name := "project/" + project.ConfigFile
+	for _, f := range s.Manifest.Files {
+		if f.Path != name {
+			continue
+		}
+		if !f.Encrypted {
+			break
+		}
+		tmp, err := os.MkdirTemp("", "duct-cfg-*")
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = os.RemoveAll(tmp) }()
+		if err := c.fetchFile(ctx, s.Store, f, filepath.Join(tmp, "duct.toml")); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(filepath.Join(tmp, "duct.toml")) //nolint:gosec // our own temp file
+	}
+	return readAll(ctx, s.Store, name)
 }
 
 // RestoreOptions configure Restore.
 type RestoreOptions struct {
 	Log func(format string, args ...any)
+	// Crypto carries the identities that open an encrypted backup (see
+	// Crypto.Identities); nil for plain backups.
+	Crypto *Crypto
 }
 
 func (o *RestoreOptions) logf(format string, args ...any) {
@@ -103,7 +125,9 @@ func (o *RestoreOptions) logf(format string, args ...any) {
 }
 
 // fixed keys of ducklake_metadata that belong to the target, not the backup.
-const keepMetadata = "('data_path', 'version', 'created_by', 'encrypted')"
+// ('encrypted' comes from the backup: the file keys in the catalog only make
+// sense in a lake that is marked encrypted.)
+const keepMetadata = "('data_path', 'version', 'created_by')"
 
 // Restore writes the backup into the project p, which must be freshly
 // initialised (an empty lake, the Duct tables migrated) and opened through eng
@@ -112,6 +136,9 @@ const keepMetadata = "('data_path', 'version', 'created_by', 'encrypted')"
 // with a new engine: DuckLake caches the catalog.
 func Restore(ctx context.Context, p *project.Project, eng contract.Engine, src *Source, opt RestoreOptions) error {
 	m := src.Manifest
+	if m.Encrypted && (opt.Crypto == nil || len(opt.Crypto.Identities) == 0) {
+		return errors.New("restore: this backup is encrypted: pass --identity <age identity file> (or set " + project.EnvBackupIdentity + ")")
+	}
 	for _, v := range m.Migrations {
 		if v > maxMigration() {
 			return fmt.Errorf("restore: the backup has Duct migration %d, newer than this duct knows (%d); use a newer duct", v, maxMigration())
@@ -156,6 +183,9 @@ type restore struct {
 	s     session
 	pg    pgconn.Params
 	stage string
+	// scratch, if set, is a SQLite catalog file that restoreCatalog fills
+	// instead of the project's catalog (partial restores).
+	scratch string
 
 	attached bool
 }
@@ -215,12 +245,8 @@ func (r *restore) stageParquet(ctx context.Context) error {
 		if f.Kind != "catalog" && f.Kind != "state" {
 			continue
 		}
-		sum, err := getFile(ctx, r.src.Store, f.Path, filepath.Join(r.stage, filepath.FromSlash(f.Path)))
-		if err != nil {
+		if err := r.opt.Crypto.fetchFile(ctx, r.src.Store, f, filepath.Join(r.stage, filepath.FromSlash(f.Path))); err != nil {
 			return fmt.Errorf("restore: read %s: %w", f.Path, err)
-		}
-		if f.SHA256 != "" && sum != f.SHA256 {
-			return fmt.Errorf("restore: %s is corrupted (checksum mismatch)", f.Path)
 		}
 	}
 	return nil
@@ -275,7 +301,13 @@ func (r *restore) restoreData(ctx context.Context) error {
 		if sz, ok := have[rel]; ok && sz == f.Size {
 			return nil // already there (restoring onto the lake that wrote it)
 		}
-		size, sha, err := copyObject(ctx, r.src.Store, f.Path, dst, rel)
+		if f.Encrypted {
+			if err := r.opt.Crypto.decryptPut(ctx, r.src.Store, f, dst, rel); err != nil {
+				return fmt.Errorf("restore: copy %s: %w", rel, err)
+			}
+			return nil
+		}
+		size, sha, err := copyObject(ctx, r.src.Store, f.Path, dst, rel, f.Size)
 		if err != nil {
 			return fmt.Errorf("restore: copy %s: %w", rel, err)
 		}
@@ -287,7 +319,11 @@ func (r *restore) restoreData(ctx context.Context) error {
 }
 
 func (r *restore) attachCatalog(ctx context.Context) error {
-	if r.pg != nil {
+	if r.scratch != "" {
+		if err := r.s.exec(ctx, fmt.Sprintf("ATTACH %s AS %s (TYPE sqlite, BUSY_TIMEOUT 5000)", ql(r.scratch), catAlias)); err != nil {
+			return err
+		}
+	} else if r.pg != nil {
 		if err := r.s.exec(ctx, r.pg.SecretSQL(catSecret)); err != nil {
 			return err
 		}
@@ -303,7 +339,7 @@ func (r *restore) attachCatalog(ctx context.Context) error {
 
 // qualified is the name of a table of the attached catalog.
 func (r *restore) qualified(t string) string {
-	if r.pg != nil {
+	if r.pg != nil && r.scratch == "" {
 		return catAlias + ".public." + qi(t)
 	}
 	return catAlias + "." + qi(t)
@@ -314,7 +350,7 @@ func (r *restore) restoreCatalog(ctx context.Context) error {
 		return err
 	}
 	schema := "main"
-	if r.pg != nil {
+	if r.pg != nil && r.scratch == "" {
 		schema = "public"
 	}
 	var stmts []string
@@ -408,12 +444,8 @@ func (r *restore) restoreProjectFiles(ctx context.Context) error {
 			continue // written by the caller, with the target's own catalog and storage
 		}
 		dst := filepath.Join(r.p.Root, filepath.FromSlash(rel))
-		sum, err := getFile(ctx, r.src.Store, f.Path, dst)
-		if err != nil {
+		if err := r.opt.Crypto.fetchFile(ctx, r.src.Store, f, dst); err != nil {
 			return fmt.Errorf("restore: %s: %w", rel, err)
-		}
-		if f.SHA256 != "" && sum != f.SHA256 {
-			return fmt.Errorf("restore: %s is corrupted (checksum mismatch)", rel)
 		}
 	}
 	return nil

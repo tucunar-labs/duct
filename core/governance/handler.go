@@ -39,7 +39,9 @@ type Handler struct {
 	quotas  quotaCache // per-role limits (quota.go)
 
 	semModel atomic.Pointer[semanticModel] // see semantic.go; nil: no model
+	udfNames atomic.Pointer[[]string]      // current admin-only functions (udf.go); nil: opt's
 	fresh    freshCache                    // preaggregates that may serve a role (preagg.go)
+	console  consoleHooks                  // admin API and jobs, for the web console (console.go)
 }
 
 var (

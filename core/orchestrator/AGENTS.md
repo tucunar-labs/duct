@@ -21,3 +21,8 @@ Orquestador propio (ADR 0005), dentro de `duct serve` y por CLI (`duct jobs list
 - **Apagado:** las tareas en curso se cancelan y quedan `cancelled`; la corrida queda `cancelled`.
 - **No vigilar** con `on_snapshot` una tabla que el propio job escribe (se dispararía solo).
 - Tests con motor real: `cmd/duct/jobs_test.go` y `test/integration/jobs_test.go` (core no importa módulos).
+- **Consola web (2026-10-12):** pausar un job (`SetJobEnabled`, clave `disabled:<job>` en `duct_jobs_state`; `fire` descarta
+  ticks y eventos mientras está en pausa, las corridas manuales siguen), `StartRun` (corrida manual sin esperar; la toma
+  cualquier worker) y `CancelRun` (cancela tareas pendientes al instante y deja la clave `cancel:<run>`; el proceso que
+  ejecuta una tarea la interrumpe en ≤ `Poll` y queda `cancelled`). `Console` implementa `contract.JobsConsole` sobre
+  el estado; la autorización y la auditoría son de `governance` (`protocolHandler`).

@@ -20,7 +20,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/apache/arrow-go/v18/arrow"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 )
@@ -36,7 +40,28 @@ type Spec struct {
 	Kind       string // "python" or "exec"
 	File       string // source file, relative to the project
 	Vectorized bool   // python only
+	Table      bool   // a table function: Columns instead of ReturnType
+	Columns    []contract.TableColumn
 	exec       *execSpec
+}
+
+// callFunc and tableCallFunc are the bodies behind a registered function.
+type (
+	callFunc      = func(context.Context, []arrow.Array) (arrow.Array, error)
+	tableCallFunc = func(context.Context, []arrow.Array) ([]arrow.RecordBatch, error)
+)
+
+// signature is what DuckDB fixed at registration: it cannot change while the
+// process lives.
+func (s Spec) signature() string {
+	if s.Table {
+		cols := make([]string, len(s.Columns))
+		for i, c := range s.Columns {
+			cols[i] = c.Name + " " + c.Type
+		}
+		return fmt.Sprintf("table(%s) -> (%s)", strings.Join(s.ArgTypes, ", "), strings.Join(cols, ", "))
+	}
+	return fmt.Sprintf("(%s) -> %s", strings.Join(s.ArgTypes, ", "), s.ReturnType)
 }
 
 // Options configure discovery and the worker processes.
@@ -119,46 +144,276 @@ func Discover(ctx context.Context, opt Options) ([]Spec, error) {
 // Attach discovers the project's functions and registers them in eng. It
 // returns their names (lower case). The processes start on first use and stop
 // when eng closes. It does nothing when there is no functions/ folder; it
-// fails when eng cannot register functions.
+// fails when eng cannot register functions. Use AttachManaged to reload them.
 func Attach(ctx context.Context, eng contract.Engine, opt Options) ([]string, error) {
-	if !Exists(opt.Root) {
-		return nil, nil
-	}
-	reg, ok := eng.(contract.ScalarRegistrar)
-	if !ok {
-		return nil, errors.New("udf: this engine cannot register scalar functions")
-	}
-	opt = opt.withDefaults()
-	specs, err := Discover(ctx, opt)
-	if err != nil {
+	m, err := AttachManaged(ctx, eng, opt)
+	if m == nil || err != nil {
 		return nil, err
 	}
-	var pool *pyPool
-	hooked := false
-	var names []string
-	for _, s := range specs {
-		f := contract.ScalarFunction{Name: s.Name, ArgTypes: s.ArgTypes, ReturnType: s.ReturnType}
-		switch s.Kind {
-		case "python":
-			if pool == nil {
-				pool = newPyPool(opt)
-			}
-			f.Call = pool.caller(s)
-			if !hooked { // the engine closes the pool with the first python function
-				f.Close, hooked = pool.Close, true
-			}
-		case "exec":
-			f.Call = s.exec.caller(opt, s)
+	return m.Names(), nil
+}
+
+// slot is one function registered in the engine. DuckDB cannot unregister or
+// re-register a function, so the registered body is a stub that forwards to the
+// current implementation, which a reload swaps.
+type slot struct {
+	spec    Spec
+	impl    atomic.Pointer[impl]
+	removed bool // guarded by Manager.mu
+}
+
+type impl struct {
+	call  callFunc
+	tcall tableCallFunc
+}
+
+// Manager owns the functions registered by AttachManaged and can reload them
+// (ADR 0005, hot reload).
+type Manager struct {
+	eng    contract.Engine
+	opt    Options
+	scalar contract.ScalarRegistrar
+	table  contract.TableRegistrar
+
+	guard func(names []string)
+
+	mu     sync.Mutex // serialises Reload and guards the fields below
+	slots  map[string]*slot
+	order  []string
+	pool   *pyPool
+	hooked bool
+	closed bool
+}
+
+// AttachManaged is Attach returning the Manager, which stays valid for Reload
+// even when functions/ is empty or missing at the start. It returns nil (and no
+// error) when there are no functions and eng cannot register any.
+func AttachManaged(ctx context.Context, eng contract.Engine, opt Options) (*Manager, error) {
+	m := &Manager{eng: eng, opt: opt.withDefaults(), slots: map[string]*slot{}}
+	m.scalar, _ = eng.(contract.ScalarRegistrar)
+	m.table, _ = eng.(contract.TableRegistrar)
+	if m.scalar == nil {
+		if Exists(opt.Root) {
+			return nil, errors.New("udf: this engine cannot register scalar functions")
 		}
-		if err := reg.RegisterScalar(ctx, f); err != nil {
+		return nil, nil
+	}
+	if !Exists(opt.Root) {
+		return m, nil
+	}
+	if _, err := m.Reload(ctx); err != nil {
+		_ = m.Close()
+		return nil, err
+	}
+	return m, nil
+}
+
+// SetGuard registers f, called by every Reload with the complete list of names
+// BEFORE a new function is registered in the engine, so an access guard (the
+// admin-only list of `duct serve`) already covers it when it becomes callable.
+func (m *Manager) SetGuard(f func(names []string)) {
+	m.mu.Lock()
+	m.guard = f
+	m.mu.Unlock()
+}
+
+// Names lists every function ever registered (lower case), including the ones a
+// later reload no longer finds: DuckDB keeps their name, they only answer with an
+// error, and the governance guard must keep them admin-only.
+func (m *Manager) Names() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.order...)
+}
+
+// Close stops the Python workers (the engine calls it when it closes).
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
+	if m.pool != nil {
+		_ = m.pool.Close()
+	}
+	return nil
+}
+
+// Change is what a Reload did.
+type Change struct {
+	Added, Updated, Removed []string // function names
+}
+
+// Empty reports whether the reload changed the set of names.
+func (c Change) Empty() bool { return len(c.Added)+len(c.Removed) == 0 }
+
+// Reload re-reads functions/ and applies it without restarting the engine:
+//
+//   - the whole folder is discovered first (python -m duct.registry); on any error
+//     nothing changes and the old functions keep working;
+//   - a new name is registered in the engine; an existing one gets its new body;
+//   - a name that disappeared stays registered (DuckDB cannot drop it) but fails
+//     with "removed" until the process restarts;
+//   - a changed signature (types, columns) cannot be applied: registering it again
+//     would add an overload and leave the old signature callable, so the reload
+//     fails and asks for a restart;
+//   - the Python workers are replaced: calls in flight finish on the old ones,
+//     which then stop; new calls start fresh workers (lazily).
+func (m *Manager) Reload(ctx context.Context) (Change, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ch Change
+	if m.closed {
+		return ch, errors.New("udf: engine closed")
+	}
+	var specs []Spec
+	if Exists(m.opt.Root) {
+		var err error
+		if specs, err = Discover(ctx, m.opt); err != nil {
+			return ch, err
+		}
+	}
+	for _, s := range specs {
+		key := strings.ToLower(s.Name)
+		if old, ok := m.slots[key]; ok && old.spec.signature() != s.signature() {
+			return ch, fmt.Errorf("function %s changed its signature from %s to %s: DuckDB would keep the old signature as an overload, restart duct serve",
+				s.Name, old.spec.signature(), s.signature())
+		}
+		if s.Table && m.table == nil {
+			return ch, fmt.Errorf("function %s: this engine cannot register table functions", s.Name)
+		}
+	}
+	var pool *pyPool
+	build := func(s Spec) *impl {
+		if s.Kind != "python" {
+			return &impl{call: s.exec.caller(m.opt, s)}
+		}
+		if pool == nil {
+			pool = newPyPool(m.opt)
+		}
+		if s.Table {
+			return &impl{tcall: pool.tableCaller(s)}
+		}
+		return &impl{call: pool.caller(s)}
+	}
+	impls := make([]*impl, len(specs))
+	for i, s := range specs {
+		impls[i] = build(s)
+	}
+	if m.guard != nil {
+		all := append([]string(nil), m.order...)
+		for _, s := range specs {
+			if key := strings.ToLower(s.Name); m.slots[key] == nil && !contains(all, key) {
+				all = append(all, key)
+			}
+		}
+		m.guard(all)
+	}
+	// Register the new names first: if the engine refuses one, nothing was swapped.
+	seen := map[string]bool{}
+	for i, s := range specs {
+		key := strings.ToLower(s.Name)
+		seen[key] = true
+		if _, ok := m.slots[key]; ok {
+			continue
+		}
+		sl := &slot{spec: s}
+		sl.impl.Store(impls[i])
+		if err := m.register(ctx, sl); err != nil {
 			if pool != nil {
 				_ = pool.Close()
 			}
-			return nil, fmt.Errorf("function %s (%s): %w", s.Name, s.File, err)
+			return ch, fmt.Errorf("function %s (%s): %w", s.Name, s.File, err)
 		}
-		names = append(names, strings.ToLower(s.Name))
+		m.slots[key] = sl
+		m.order = append(m.order, key)
+		ch.Added = append(ch.Added, key)
 	}
-	return names, nil
+	for i, s := range specs {
+		key := strings.ToLower(s.Name)
+		sl := m.slots[key]
+		if !contains(ch.Added, key) {
+			sl.spec, sl.removed = s, false
+			sl.impl.Store(impls[i])
+			ch.Updated = append(ch.Updated, key)
+		}
+	}
+	for _, key := range m.order {
+		if seen[key] {
+			continue
+		}
+		sl := m.slots[key]
+		name := sl.spec.Name
+		if !sl.removed {
+			sl.removed = true
+			sl.impl.Store(&impl{
+				call: func(context.Context, []arrow.Array) (arrow.Array, error) {
+					return nil, fmt.Errorf("function %s was removed from functions/ (restart duct serve to drop it)", name)
+				},
+				tcall: func(context.Context, []arrow.Array) ([]arrow.RecordBatch, error) {
+					return nil, fmt.Errorf("function %s was removed from functions/ (restart duct serve to drop it)", name)
+				},
+			})
+			ch.Removed = append(ch.Removed, key)
+		}
+	}
+	old := m.pool
+	m.pool = pool
+	if old != nil {
+		_ = old.Close() // in-flight batches finish; the workers stop as they come back
+	}
+	return ch, nil
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// register hands a slot to the engine. The Manager closes with the first one.
+func (m *Manager) register(ctx context.Context, sl *slot) error {
+	var closeHook func() error
+	if !m.hooked {
+		closeHook = m.Close
+	}
+	s := sl.spec
+	if s.Table {
+		f := contract.TableFunction{Name: s.Name, ArgTypes: s.ArgTypes, Columns: s.Columns, Close: closeHook,
+			Call: func(ctx context.Context, args []arrow.Array) ([]arrow.RecordBatch, error) {
+				return forward(sl, func(i *impl) ([]arrow.RecordBatch, error) { return i.tcall(ctx, args) })
+			}}
+		if err := m.table.RegisterTable(ctx, f); err != nil {
+			return err
+		}
+	} else {
+		f := contract.ScalarFunction{Name: s.Name, ArgTypes: s.ArgTypes, ReturnType: s.ReturnType, Close: closeHook,
+			Call: func(ctx context.Context, args []arrow.Array) (arrow.Array, error) {
+				return forward(sl, func(i *impl) (arrow.Array, error) { return i.call(ctx, args) })
+			}}
+		if err := m.scalar.RegisterScalar(ctx, f); err != nil {
+			return err
+		}
+	}
+	m.hooked = true
+	return nil
+}
+
+// forward runs call against the slot's current implementation. If a reload
+// closed that implementation's worker pool between the lookup and the
+// acquisition, it retries against the new one.
+func forward[T any](sl *slot, call func(*impl) (T, error)) (T, error) {
+	var zero T
+	for range 3 {
+		cur := sl.impl.Load()
+		res, err := call(cur)
+		if errors.Is(err, errPoolClosed) && sl.impl.Load() != cur {
+			continue
+		}
+		return res, err
+	}
+	return zero, errPoolClosed
 }
 
 // SafeEnv returns the allow-listed part of the process environment plus extra.

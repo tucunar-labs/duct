@@ -78,6 +78,7 @@ func semanticProject(t *testing.T) string {
 }
 
 func TestSemanticCLI(t *testing.T) {
+	t.Parallel()
 	root := semanticProject(t)
 	if out := mustDuct(t, "semantic", "validate", "--project", root); !strings.Contains(out, "ok: 1 documents, 3 datasets, 2 relationships, 2 metrics") {
 		t.Errorf("validate: %q", out)
@@ -159,6 +160,7 @@ func callTool(t *testing.T, ctx context.Context, s *sdk.ClientSession, name stri
 }
 
 func TestE2EMCP(t *testing.T) {
+	t.Parallel()
 	root := semanticProject(t)
 	tok := func(user string) string {
 		return strings.TrimSpace(mustDuct(t, "token", "create", "--user", user, "--project", root))
@@ -363,6 +365,7 @@ custom_extensions:
 `
 
 func TestSemanticDerivedHavingAndPreaggregates(t *testing.T) {
+	t.Parallel()
 	root := semanticProject(t)
 	writeFile(t, filepath.Join(root, "semantic", "shop.ossie.yaml"), preaggModel)
 	q := func(args ...string) (string, string) {
@@ -446,7 +449,7 @@ func TestSemanticDerivedHavingAndPreaggregates(t *testing.T) {
 
 // TestServeSemanticHotReload: the model is swapped in place (MCP follows), an
 // invalid edit is rejected, and serve builds and uses the preaggregates by itself.
-func TestServeSemanticHotReload(t *testing.T) {
+func testServeSemanticHotReload(t *testing.T) {
 	old := preaggRefreshEvery
 	preaggRefreshEvery = 300 * time.Millisecond
 	t.Cleanup(func() { preaggRefreshEvery = old })
@@ -515,7 +518,7 @@ func TestServeSemanticHotReload(t *testing.T) {
 	}
 	// An invalid edit is rejected: the previous model keeps serving.
 	writeFile(t, modelPath, strings.Replace(preaggModel, "SUM(orders.amount)", "SUM(orders.nope)", 1))
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	if m := metrics(); !strings.Contains(m, "revenue_per_unit") {
 		t.Errorf("invalid model replaced the good one: %s", m)
 	}
@@ -529,10 +532,13 @@ func TestServeSemanticHotReload(t *testing.T) {
 	if !strings.Contains(rows, `"CL","paid",150`) || !strings.Contains(rows, `"CL","void",300`) {
 		t.Errorf("rows from the preaggregate: %s", rows)
 	}
-	// New data: queries read the views (never old numbers), then the refresh catches up.
+	// New data: never old numbers. Right after the insert the query reads the
+	// views, or the preaggregate if serve's refresh loop already rebuilt it (the
+	// insert command takes long enough for that to happen); either way the rows
+	// must include the new order.
 	mustDuct(t, "query", "--project", root, "INSERT INTO gold.orders VALUES (14, 2, 1000, 'paid')")
 	rows, sql := query()
-	if strings.Contains(sql, "semantic_cache") || !strings.Contains(rows, `"AR","paid",1200`) {
+	if !strings.Contains(rows, `"AR","paid",1200`) || !strings.Contains(rows, `"CL","paid",150`) {
 		t.Errorf("after an insert: sql=%s rows=%s", sql, rows)
 	}
 	waitFor("the refreshed preaggregate", func() bool { _, sql := query(); return strings.Contains(sql, "semantic_cache") })

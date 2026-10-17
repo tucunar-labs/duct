@@ -25,6 +25,7 @@ func freePort(t *testing.T) string {
 }
 
 func TestEnableMLflow(t *testing.T) {
+	t.Parallel()
 	root := newProject(t)
 	if _, errs, code := duct(t, "enable", "mlflow", "--listen", "0.0.0.0:5000", "--project", root); code != 2 || !strings.Contains(errs, "loopback") {
 		t.Fatalf("public listen must be refused: code=%d err=%q", code, errs)

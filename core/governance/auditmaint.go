@@ -212,6 +212,10 @@ type AuditFilter struct {
 	Status string
 	Since  time.Duration // 0: no lower bound
 	Limit  int           // default 100
+	// Protocol, From, To and Offset serve the web console's paginated viewer.
+	Protocol string
+	From, To time.Time // zero: no bound
+	Offset   int
 }
 
 // AuditRow is one row of the audit log as `duct audit query` shows it.
@@ -229,14 +233,9 @@ type AuditRow struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// QueryAudit returns the newest rows matching f. SQL and errors are
-// redacted again on the way out, so rows written by older versions are safe.
-func QueryAudit(ctx context.Context, eng contract.Engine, f AuditFilter) ([]AuditRow, error) {
-	if f.Limit <= 0 {
-		f.Limit = 100
-	}
-	q := `SELECT ` + occurredText + `, user_name, role, protocol, status, duration_ms, rows_returned,
-		CAST(COALESCE(cached, false) AS VARCHAR), COALESCE(hits, 1), sql_text, COALESCE(error, '') FROM duct.duct_audit WHERE true`
+// where renders the conditions of f (with a leading AND each) and their args.
+func (f AuditFilter) where() (string, []any) {
+	var q string
 	var args []any
 	if f.User != "" {
 		q += " AND user_name = ?"
@@ -246,11 +245,50 @@ func QueryAudit(ctx context.Context, eng contract.Engine, f AuditFilter) ([]Audi
 		q += " AND status = ?"
 		args = append(args, f.Status)
 	}
+	if f.Protocol != "" {
+		q += " AND protocol = ?"
+		args = append(args, f.Protocol)
+	}
 	if f.Since > 0 {
 		q += " AND occurred_at >= ?"
 		args = append(args, time.Now().Add(-f.Since).UTC().Format(project.AuditTimeLayout))
 	}
+	if !f.From.IsZero() {
+		q += " AND occurred_at >= ?"
+		args = append(args, f.From.UTC().Format(project.AuditTimeLayout))
+	}
+	if !f.To.IsZero() {
+		q += " AND occurred_at < ?"
+		args = append(args, f.To.UTC().Format(project.AuditTimeLayout))
+	}
+	return q, args
+}
+
+// CountAudit returns how many rows match f (Limit and Offset are ignored).
+func CountAudit(ctx context.Context, eng contract.Engine, f AuditFilter) (int64, error) {
+	where, args := f.where()
+	v, err := auditScalar(ctx, eng, "SELECT CAST(count(*) AS VARCHAR) FROM duct.duct_audit WHERE true"+where, args...)
+	if err != nil {
+		return 0, err
+	}
+	var n int64
+	_, _ = fmt.Sscan(v, &n)
+	return n, nil
+}
+
+// QueryAudit returns the newest rows matching f. SQL and errors are
+// redacted again on the way out, so rows written by older versions are safe.
+func QueryAudit(ctx context.Context, eng contract.Engine, f AuditFilter) ([]AuditRow, error) {
+	if f.Limit <= 0 {
+		f.Limit = 100
+	}
+	where, args := f.where()
+	q := `SELECT ` + occurredText + `, user_name, role, protocol, status, duration_ms, rows_returned,
+		CAST(COALESCE(cached, false) AS VARCHAR), COALESCE(hits, 1), sql_text, COALESCE(error, '') FROM duct.duct_audit WHERE true` + where
 	q += fmt.Sprintf(" ORDER BY occurred_at DESC LIMIT %d", f.Limit)
+	if f.Offset > 0 {
+		q += fmt.Sprintf(" OFFSET %d", f.Offset)
+	}
 	st, err := eng.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err

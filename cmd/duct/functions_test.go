@@ -9,11 +9,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // pythonEnv points DUCT_PYTHON at the workspace venv of python/ (duct, pyarrow,
 // marimo, psycopg installed); the test is skipped without it.
+// pythonOnce sets DUCT_PYTHON for the whole process (t.Setenv would forbid t.Parallel).
+var pythonOnce sync.Once
+
 func pythonEnv(t *testing.T) string {
 	t.Helper()
 	_, file, _, _ := runtime.Caller(0)
@@ -24,7 +28,11 @@ func pythonEnv(t *testing.T) string {
 	if _, err := os.Stat(py); err != nil {
 		t.Skip("python/.venv not found: run `cd python && uv sync` (or set DUCT_TEST_PYTHON)")
 	}
-	t.Setenv("DUCT_PYTHON", py)
+	pythonOnce.Do(func() {
+		if err := os.Setenv("DUCT_PYTHON", py); err != nil {
+			t.Fatal(err)
+		}
+	})
 	return py
 }
 
@@ -57,6 +65,7 @@ func writeFunctions(t *testing.T, root string) {
 }
 
 func TestE2EFunctions(t *testing.T) {
+	t.Parallel()
 	pythonEnv(t)
 	root := newProject(t)
 	writeFunctions(t, root)

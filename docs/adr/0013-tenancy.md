@@ -67,8 +67,8 @@ data/<ruta>              archivos de datos y de deletes que el catálogo referen
   se calculan con `AT (VERSION => id)`. Los escritores pueden seguir; `duct gc` no debe correr a la
   vez (el respaldo falla en vez de quedar mal). Las tablas `duct_*` van en otra transacción.
 - Archivos de datos: todos los que el catálogo aún referencia (conserva el viaje en el tiempo). Local →
-  copia; S3 → S3 en el mismo servidor, copia del lado del servidor (sin pasar bytes por `duct`; hasta
-  5 GiB por objeto, sin sha256 en el manifiesto); otro destino, en streaming con sha256 y tamaño.
+  copia; S3 → S3 en el mismo servidor, copia del lado del servidor (sin pasar bytes por `duct`, sin sha256 en el manifiesto; más de
+  5 GiB por objeto: ver «Objetos de más de 5 GiB»); otro destino, en streaming con sha256 y tamaño.
   `--catalog-only` (solo con lake en S3) omite los datos; la restauración comprueba que estén.
 - Manifiesto: formato, id, fecha, versiones (duct, DuckDB, DuckLake), tipo de catálogo, almacenamiento,
   `snapshot_id`/hora, migraciones, tablas con filas, tablas de catálogo y de estado, archivos con tamaño
@@ -110,3 +110,59 @@ ninguna prueba por falta de control de contenedores.
 Evidencia: `TestE2EBackupRestoreSQLite`, `TestE2EAdminAPI`, `TestQuotaConcurrent`, `core/metrics` y
 `core/backup` (unitarias), `TestBackupRestoreS3` (SQLite y Postgres sobre RustFS) y las 17 pruebas de
 `test/integration` contra servidores externos (192 s).
+
+## Implementado: respaldo cifrado, objetos grandes y restauración parcial (2026-10-12)
+
+**Cifrado en reposo** (`duct backup --encrypt`, `core/backup/crypt.go`). Usa [age](https://age-encryption.org)
+(`filippo.io/age`, BSD-3): `--recipient age1…` (repetible; también `age1pq…` y claves públicas
+`ssh-ed25519`/`ssh-rsa`) o `[backup] recipients = [...]` en `duct.toml` (con `--encrypt` y sin
+`--recipient`); `--recipient` solo ya implica `--encrypt`. Se cifra todo menos `manifest.json`: catálogo,
+estado (hashes de contraseñas y tokens), archivos del proyecto y de datos van como `<ruta>.age`, en
+streaming (sin pasar plaintext por disco ni, hacia S3, por el servidor). El manifiesto sigue en claro,
+sube a `format: 2` (un duct que no conoce el cifrado lo rechaza en vez de leerlo mal) y trae
+`encrypted`, `recipients` (públicas) y, por archivo, `size`/`sha256` del texto plano más `cipher_size`/
+`cipher_sha256` de lo almacenado: la integridad se comprueba sin la clave privada, y la restauración
+verifica ambos (age autentica además cada trozo: un byte cambiado con el sha reescrito igual falla).
+Restaurar: `--identity <archivo>` o `DUCT_BACKUP_IDENTITY` (archivo de identidades de `age-keygen` o clave
+privada OpenSSH sin passphrase); sin ella, o con otra, falla con un mensaje claro y no escribe nada.
+La copia del lado del servidor no sirve con cifrado: los datos pasan por `duct` (leer, cifrar, subir).
+Límites: sin passphrase (scrypt) ni plugins de age; la clave privada nunca está en `duct.toml`; no hay
+rotación de destinatarios (hay que hacer un respaldo nuevo).
+
+**Lakes DuckLake `ENCRYPTED`**. Las claves por archivo (`encryption_key`) viven en `ducklake_data_file` y
+`ducklake_delete_file`; la copia del catálogo (`SELECT *`) las lleva, los archivos de datos se copian tal
+cual (siguen cifrados) y la restauración ya no conserva el `encrypted` del destino sino el del respaldo,
+así que el lake restaurado sigue marcado cifrado y sus escrituras nuevas también. El manifiesto anota
+`lake_encrypted`. Ojo: sin `--encrypt` las claves quedan junto a los datos en el respaldo (el aviso
+`warning: this lake is ENCRYPTED but the backup is not` lo dice); usar `--encrypt`. Duct no crea lakes
+cifrados por sí mismo (`duct init` no tiene la opción): el catálogo se crea con `ATTACH … (ENCRYPTED)` y
+Duct lo respeta al abrirlo.
+
+**Objetos de más de 5 GiB en S3** (`core/s3conn/multipart.go`). Copia del lado del servidor con
+`CreateMultipartUpload` + `UploadPartCopy` (partes de 256 MiB, más grandes si hacen falta para no pasar de
+10 000) + `CompleteMultipartUpload`, y subida por partes (cada una firmada con su sha256; un archivo se
+relee, un flujo se bufferiza por parte) cuando `Put` supera el umbral. Se aborta la subida si algo falla.
+El umbral es 5 GiB; `DUCT_S3_MULTIPART_THRESHOLD` y `DUCT_S3_PART_SIZE` (bytes, solo para pruebas; partes
+≥ 5 MiB en S3 real) lo bajan para ejercitar el mismo camino.
+
+**Restauración parcial**: `duct restore --from X --table schema.t [--table …] [--overwrite] <carpeta>`
+(nombre sin esquema = `main`). Carpeta vacía → proyecto nuevo (config, archivos y tablas `duct_*` del
+respaldo completos, pero solo esas tablas del lake); carpeta con `duct.toml` → se restauran solo las
+tablas en ese proyecto, sin tocar su config, usuarios ni archivos (`--catalog`/`--storage` no aplican).
+Una tabla que ya existe es error salvo `--overwrite` (la reemplaza). Cómo: el catálogo del respaldo se
+carga en un DuckLake temporal (SQLite en un directorio temporal; sus datos son la carpeta `data/` del
+respaldo si es local y sin cifrar, o los archivos de esas tablas descargados/descifrados a una carpeta
+temporal) y cada tabla se recrea en el destino con `CREATE TABLE` + `INSERT … SELECT` a través de DuckLake;
+se comprueba que las filas coincidan con las del manifiesto (estado al `snapshot_id` del respaldo). No se
+mezclan filas de catálogo directamente porque un catálogo vivo tiene sus propios ids y snapshots.
+Límites: se restauran columnas (nombres, tipos, `NOT NULL`) y filas; no particiones, comentarios, vistas,
+macros, modelos semánticos ni grants, y la tabla empieza historia nueva (un snapshot en el destino, sin
+viaje en el tiempo). Las dependencias entre objetos (una vista sobre la tabla, políticas) las debe
+restaurar el usuario junto con ella. Un respaldo `--catalog-only` no sirve (no tiene datos).
+
+Evidencia: `TestE2EBackupEncrypted` (sin plaintext salvo el manifiesto, sha de cifrado, identidad
+ausente/equivocada, ciphertext alterado, `[backup] recipients`), `TestE2EBackupEncryptedLake` (lake
+`ENCRYPTED`: claves, flag y escrituras posteriores cifradas, plano y con age), `TestE2ERestoreTables`
+(proyecto nuevo y existente, tipos DECIMAL/LIST/TIMESTAMP, `--overwrite`, rechazos, plano y con age),
+`core/s3conn` `TestMultipartPutAndCopy` (servidor falso) y `TestBackupMultipartS3` (RustFS con umbral
+de 6 MiB: ETags `-N` en copia, subida cifrada y restauración, y parcial desde S3).

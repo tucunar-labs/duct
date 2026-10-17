@@ -53,6 +53,8 @@ type RunRow struct {
 	StartedAt    time.Time
 	FinishedAt   time.Time
 	Error        string
+	Tasks        int // tasks of the run
+	Attempts     int // attempts made so far across its tasks
 }
 
 // TaskRow is a row of duct_task_runs.
@@ -364,12 +366,11 @@ func (s *store) pruneFires(ctx context.Context, before time.Time) error {
 // History returns the most recent runs, newest first, of job ("" = every job).
 func History(ctx context.Context, eng contract.Engine, job string, limit int) ([]RunRow, error) {
 	s := &store{eng: eng}
-	q := "SELECT id, job, trigger_kind, COALESCE(detail, ''), status, " + epoch("scheduled_for") + ", " + epoch("started_at") + ", " +
-		epoch("finished_at") + ", COALESCE(error, '') FROM " + runsT
+	q := "SELECT " + runCols + " FROM " + runsT + " r"
 	if job != "" {
-		q += " WHERE job = " + sqlQ(job)
+		q += " WHERE r.job = " + sqlQ(job)
 	}
-	q += " ORDER BY id DESC LIMIT " + strconv.Itoa(max(limit, 1))
+	q += " ORDER BY r.id DESC LIMIT " + strconv.Itoa(max(limit, 1))
 	r, err := s.rows(ctx, q)
 	if err != nil {
 		return nil, err
@@ -377,12 +378,19 @@ func History(ctx context.Context, eng contract.Engine, job string, limit int) ([
 	return parseRuns(r), nil
 }
 
+// runCols are the columns of RunRow, for a query over runsT aliased r.
+var runCols = "r.id, r.job, r.trigger_kind, COALESCE(r.detail, ''), r.status, " + epoch("r.scheduled_for") + ", " + epoch("r.started_at") + ", " +
+	epoch("r.finished_at") + ", COALESCE(r.error, ''), " +
+	"(SELECT count(*) FROM " + tasksT + " t WHERE t.run_id = r.id), (SELECT COALESCE(sum(t.attempts), 0) FROM " + tasksT + " t WHERE t.run_id = r.id)"
+
 func parseRuns(r [][]string) []RunRow {
 	out := make([]RunRow, len(r))
 	for i, x := range r {
 		out[i] = RunRow{Job: x[1], Trigger: x[2], Detail: x[3], Status: x[4], ScheduledFor: micros(x[5]),
 			StartedAt: micros(x[6]), FinishedAt: micros(x[7]), Error: x[8]}
 		out[i].ID, _ = strconv.ParseInt(x[0], 10, 64)
+		out[i].Tasks, _ = strconv.Atoi(x[9])
+		out[i].Attempts, _ = strconv.Atoi(x[10])
 	}
 	return out
 }
@@ -390,8 +398,7 @@ func parseRuns(r [][]string) []RunRow {
 // GetRun returns one run and its tasks (in id order); ok=false if there is none.
 func GetRun(ctx context.Context, eng contract.Engine, id int64) (RunRow, []TaskRow, bool, error) {
 	s := &store{eng: eng}
-	r, err := s.rows(ctx, "SELECT id, job, trigger_kind, COALESCE(detail, ''), status, "+epoch("scheduled_for")+", "+epoch("started_at")+", "+
-		epoch("finished_at")+", COALESCE(error, '') FROM "+runsT+" WHERE id = ?", id)
+	r, err := s.rows(ctx, "SELECT "+runCols+" FROM "+runsT+" r WHERE r.id = ?", id)
 	if err != nil || len(r) == 0 {
 		return RunRow{}, nil, false, err
 	}

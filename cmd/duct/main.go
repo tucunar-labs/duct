@@ -22,8 +22,8 @@ commands:
   query "SQL"          run SQL against the lake (--format table|csv|json)
   sql "STATEMENT"      governance SQL (CREATE ROLE, GRANT, SHOW GRANTS, ALTER TABLE ... SET ROW FILTER|MASK) or any SQL
   migrate              apply Duct-owned table migrations
-  backup --to X        consistent backup of catalog, state, project files and lake data (folder or s3://); backup list
-  restore --from X DIR restore a backup into an empty folder and verify it (snapshot, row counts, files)
+  backup --to X        consistent backup of catalog, state, project files and lake data (folder or s3://); --encrypt/--recipient age; backup list
+  restore --from X DIR restore a backup into an empty folder and verify it; --identity for encrypted ones; --table schema.t for only some tables
   catalog              catalog tools: info, migrate --to postgres://... (SQLite -> Postgres)
   audit <cmd>          query audit log: query [--user --since --status --limit], prune --older-than 30d, export
   gc                   prune the audit log, checkpoint the catalog WAL and run DuckLake maintenance

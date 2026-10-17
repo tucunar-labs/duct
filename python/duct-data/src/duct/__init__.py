@@ -8,7 +8,7 @@ from duct._connection import (
     Result,
     connect,
 )
-from duct.registry import Expectation, FunctionSpec, TableSpec, function, table
+from duct.registry import Expectation, FunctionSpec, TableSpec, function, table, table_function
 
 __all__ = [
     "Connection",
@@ -22,5 +22,6 @@ __all__ = [
     "connect",
     "function",
     "table",
+    "table_function",
 ]
 __version__ = "0.0.1"

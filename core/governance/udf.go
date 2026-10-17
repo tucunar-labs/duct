@@ -9,14 +9,26 @@ import (
 // deniedFunctionsFor returns the user-defined functions id may not call: all of
 // them unless id is the administrator.
 func (h *Handler) deniedFunctionsFor(id contract.Identity) map[string]bool {
-	if len(h.opt.AdminOnlyFunctions) == 0 || IsAdmin(id) {
+	names := h.opt.AdminOnlyFunctions
+	if p := h.udfNames.Load(); p != nil {
+		names = *p
+	}
+	if len(names) == 0 || IsAdmin(id) {
 		return nil
 	}
-	m := make(map[string]bool, len(h.opt.AdminOnlyFunctions))
-	for _, f := range h.opt.AdminOnlyFunctions {
+	m := make(map[string]bool, len(names))
+	for _, f := range names {
 		m[strings.ToLower(f)] = true
 	}
 	return m
+}
+
+// SetAdminOnlyFunctions replaces the set of user-defined functions that only the
+// admin role may call (a hot reload of functions/ can add names). It applies to
+// the statements that start after the call.
+func (h *Handler) SetAdminOnlyFunctions(names []string) {
+	cp := append([]string(nil), names...)
+	h.udfNames.Store(&cp)
 }
 
 func (rw *rewriter) checkUDF(v map[string]any) error {

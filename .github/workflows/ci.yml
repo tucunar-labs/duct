@@ -7,7 +7,8 @@ on:
 # go.mod has `replace github.com/posthog/duckgres => ../duckgres` (private fork,
 # branch `duct`), so both repos are checked out side by side.
 jobs:
-  check:
+  # Static gates and tests run in parallel (`just check` runs both locally).
+  lint:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -27,7 +28,29 @@ jobs:
           working_directory: duct
       - name: Python env for UDF/notebook/SDK tests
         run: cd python && uv sync
-      - run: just check
+      - run: just generate-check fmt-check vet lint python-check
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: duct
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: duct
+      - uses: actions/checkout@v4
+        with:
+          repository: alonsoburon/duckgres
+          ref: duct
+          path: duckgres
+          ssh-key: ${{ secrets.DUCKGRES_DEPLOY_KEY }}
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: duct
+      - name: Python env for UDF/notebook/SDK tests
+        run: cd python && uv sync
+      - run: just test
 
   e2e:
     runs-on: ubuntu-latest
