@@ -119,3 +119,9 @@ Estado: aceptada (2026-10-03)
 - **Límites.** Sin agregados; sin argumentos con nombre en funciones de tabla; sin TIMESTAMP WITH TIME ZONE,
   MAP, UNION, ENUM, DECIMAL > 38; la recarga no cubre helpers importados desde `functions/` (solo se
   observan `*.py` y `*.toml` de esa carpeta, y se cargan todos como módulos de usuario) ni cambios de firma.
+- **Sandbox (2026-10-18, ver ADR 0006 «Menor privilegio de los autores y sandbox de tareas»).** Las tareas `python` y `notebook` de jobs y los workers Python de UDF (también
+  la carga de `functions/*.py`) corren en bubblewrap por defecto: proyecto de solo lectura sin `.duct/`, `duct.toml`, `.git`, `.env*` ni el lake local, `/tmp` privado, un directorio
+  escribible opcional (`params.writable`) y red compartida para `DUCT_URL`. `[sandbox] mode|jobs|udf|shell` en `duct.toml`; `shell` es opt-in; `sandbox: false|true` por tarea; sin bwrap,
+  `auto` avisa y corre sin aislar, `bwrap` falla; `uv run` no cabe (intérprete directo en `[python] command`). Una tarea `notebook` solo arranca si ningún autor de otro rol modificó el
+  notebook después de la última revisión de la identidad del job (`duct notebook approve`); si no, falla sin ejecutar nada. Evidencia: `TestJobSandbox`, `TestNotebookJobGuard`,
+  `TestPythonSandboxed*` (core/udf). UDFs ejecutables (`functions/*.toml`) siguen sin bubblewrap.

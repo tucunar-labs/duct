@@ -86,9 +86,15 @@ func pythonCmd(t *testing.T) []string {
 	return []string{py}
 }
 
+// testSandbox, when set, is the Options.Sandbox of every attach (the sandboxed variants of the Python tests).
+var testSandbox string
+
 func attach(t *testing.T, root string, opt Options) (*fakeEngine, []string) {
 	t.Helper()
 	opt.Root = root
+	if opt.Sandbox == "" {
+		opt.Sandbox = testSandbox
+	}
 	eng := &fakeEngine{}
 	names, err := Attach(context.Background(), eng, opt)
 	if err != nil {

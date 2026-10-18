@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -120,9 +121,35 @@ func (o *Orchestrator) runTask(ctx context.Context, job Job, t Task, runID int64
 	for k, v := range t.Params {
 		params[k] = v
 	}
+	delete(params, "sandbox")
+	delete(params, "writable")
+	if t.Type == TypeNotebook && o.opt.NotebookGuard != nil {
+		nb, _ := t.Params["notebook"].(string)
+		if !filepath.IsAbs(nb) {
+			nb = filepath.Join(o.opt.Root, nb)
+		}
+		if err := o.opt.NotebookGuard(ctx, job.Name, t.ID, nb); err != nil {
+			return contract.TaskResult{}, err
+		}
+	}
+	if o.sandboxed(t) {
+		sb := map[string]any{"hide": o.opt.Sandbox.Hide}
+		if w, _ := t.Params["writable"].(string); w != "" {
+			sb["writable"] = w
+		}
+		params["sandbox"] = sb
+	}
 	params["root"] = o.opt.Root
 	params["env"] = o.taskEnv(job, runID, t)
 	return mod.Run(ctx, contract.TaskSpec{Name: t.ID, Params: params})
+}
+
+// sandboxed says whether a user-code task runs inside bubblewrap: its own `sandbox:` flag, else the mode of its type.
+func (o *Orchestrator) sandboxed(t Task) bool {
+	if v, ok := t.Params["sandbox"].(bool); ok {
+		return v
+	}
+	return o.opt.Sandbox.Modes[t.Type] == "bwrap"
 }
 
 func stringList(v any) []string {

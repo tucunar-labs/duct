@@ -80,6 +80,13 @@ type Options struct {
 	StartTimeout time.Duration
 	// ExtraEnv is added to the allow-listed environment of the children.
 	ExtraEnv map[string]string
+	// Sandbox is sandbox.Bwrap to run the Python workers (and the loading of functions/*.py) inside bubblewrap:
+	// the project read-only without .duct/, the local lake, duct.toml, .git and .env*, a private /tmp (ADR 0005).
+	// Anything else runs them as the server's user. SandboxAuto makes a worker the sandbox cannot wrap (a `uv run`
+	// interpreter) start unisolated with a warning instead of failing; SandboxHide adds paths to the hidden ones.
+	Sandbox     string
+	SandboxAuto bool
+	SandboxHide []string
 }
 
 func (o Options) withDefaults() Options {

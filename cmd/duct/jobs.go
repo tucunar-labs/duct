@@ -176,7 +176,12 @@ func jobsRun(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if _, err := project.Migrate(ctx, eng); err != nil {
 		return err
 	}
-	o, err := orchestrator.New(eng, jobs, orchestrator.Options{Root: p.Root, Env: jobsEnv()})
+	ts, err := taskSandbox(p)
+	if err != nil {
+		return err
+	}
+	env := jobsEnv()
+	o, err := orchestrator.New(eng, jobs, orchestrator.Options{Root: p.Root, Env: env, Sandbox: ts, NotebookGuard: notebookGuard(eng, env["DUCT_TOKEN"])})
 	if err != nil {
 		return err
 	}

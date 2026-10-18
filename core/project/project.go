@@ -70,6 +70,8 @@ type Config struct {
 	Backup BackupSettings `toml:"backup"`
 	// Notebooks configures the web console's notebooks (notebooksconfig.go; ADR 0006).
 	Notebooks NotebooksSettings `toml:"notebooks"`
+	// Sandbox configures the bubblewrap isolation of user code (sandboxconfig.go; ADR 0006).
+	Sandbox SandboxSettings `toml:"sandbox"`
 }
 
 // S3Config is the [s3] table of duct.toml, used when storage is s3://...:
@@ -164,6 +166,9 @@ func Load(dir string) (*Project, error) {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
 	if err := cfg.Notebooks.CheckSandbox(); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
+	}
+	if err := cfg.Sandbox.Check(); err != nil {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
 	return &Project{Root: root, Config: cfg}, nil

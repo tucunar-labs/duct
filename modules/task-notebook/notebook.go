@@ -75,5 +75,5 @@ func (t *Task) Run(ctx context.Context, spec contract.TaskSpec) (contract.TaskRe
 	for _, k := range keys {
 		argv = append(argv, "--"+k, fmt.Sprint(kv[k]))
 	}
-	return taskrun.Run(ctx, taskrun.Cmd{Argv: argv, Dir: taskrun.Dir(spec.Params), Env: taskrun.Env(spec.Params)})
+	return taskrun.Run(ctx, taskrun.Cmd{Argv: argv, Dir: taskrun.Dir(spec.Params), Env: taskrun.Env(spec.Params), Sandbox: taskrun.SandboxOf(spec.Params, true)})
 }

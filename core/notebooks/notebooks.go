@@ -85,6 +85,9 @@ type Service struct {
 
 	histMu sync.Mutex // serializes recording versions
 
+	stampMu sync.Mutex
+	stamps  map[string]string // notebook -> mtime/size at the last attribute()
+
 	mu      sync.Mutex
 	kernels map[kkey]*kernel
 	closed  bool
@@ -418,7 +421,7 @@ func (s *Service) RenameNotebook(ctx context.Context, id contract.Identity, from
 	if err := os.Rename(s.path(from), s.path(to)); err != nil {
 		return err
 	}
-	for _, t := range []string{"duct_notebook_versions", "duct_notebook_comments"} {
+	for _, t := range []string{"duct_notebook_versions", "duct_notebook_comments", "duct_notebook_trust"} {
 		if err := s.exec(ctx, "UPDATE duct."+t+" SET notebook = ? WHERE notebook = ?", to, from); err != nil {
 			return err
 		}

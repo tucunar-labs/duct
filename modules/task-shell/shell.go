@@ -52,5 +52,5 @@ func (t *Task) Run(ctx context.Context, spec contract.TaskSpec) (contract.TaskRe
 	if len(argv) == 0 {
 		return contract.TaskResult{}, errors.New("shell: param \"command\" is required (a list: [program, arg...])")
 	}
-	return taskrun.Run(ctx, taskrun.Cmd{Argv: argv, Dir: taskrun.Dir(spec.Params), Env: taskrun.Env(spec.Params)})
+	return taskrun.Run(ctx, taskrun.Cmd{Argv: argv, Dir: taskrun.Dir(spec.Params), Env: taskrun.Env(spec.Params), Sandbox: taskrun.SandboxOf(spec.Params, false)})
 }

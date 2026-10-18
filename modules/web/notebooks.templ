@@ -3,6 +3,7 @@ package web
 import (
 	"net/url"
 	"strconv"
+	"strings"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 )
@@ -241,6 +242,33 @@ templ notebookPage(p pageData, v notebookView) {
 					@icon("alert", "mt-0.5 h-4 w-4 flex-none")
 					<span>Solo lectura: <strong>{ v.LockedBy }</strong> está editando este notebook. Lo ves en modo ejecución (con la versión guardada); podrás editar cuando termine o se quede inactivo.</span>
 				</p>
+			}
+			if v.RunAs != "" {
+				<div role="status" class="flex flex-none flex-wrap items-start gap-2 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-warn">
+					@icon("alert", "mt-0.5 h-4 w-4 flex-none")
+					<span class="min-w-0 flex-1">Este notebook lo modificó <strong>{ strings.Join(v.Authors, ", ") }</strong> sin que tú ni nadie de tu rol lo revisara: corre con los permisos de <strong>{ v.RunAs }</strong> (rol { v.RunAsRole }), no con los tuyos. Si lo revisaste y confías en esta versión, corre con tu rol.</span>
+					<form method="post" action={ templ.URL(nbURL(v.Info.Name, "trust")) }>
+						@hiddenCSRF(v.CSRF)
+						<input type="hidden" name="hash" value={ v.Hash }/>
+						<button type="submit" class="btn btn-secondary btn-sm">Confiar en esta versión</button>
+					</form>
+				</div>
+			}
+			if v.Trusted {
+				<p role="status" class="flex flex-none items-start gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-muted">
+					<span>Confiaste en esta versión: corre con tu rol. Una edición nueva pide confiar otra vez.</span>
+				</p>
+			}
+			if v.Untrusted != nil {
+				<div role="alert" class="flex flex-none flex-wrap items-start gap-2 rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">
+					@icon("alert", "mt-0.5 h-4 w-4 flex-none")
+					<span class="min-w-0 flex-1">Este notebook no se abre hasta que confíes en su versión actual: { v.Untrusted.Reason }. Ejecutarlo daría a ese código tus permisos (o los suyos a ti).</span>
+					<form method="post" action={ templ.URL(nbURL(v.Info.Name, "trust")) }>
+						@hiddenCSRF(v.CSRF)
+						<input type="hidden" name="hash" value={ v.Untrusted.Hash }/>
+						<button type="submit" class="btn btn-secondary btn-sm">Confiar en esta versión</button>
+					</form>
+				</div>
 			}
 			if v.Err != "" {
 				<p role="alert" class="flex flex-none items-start gap-2 rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">

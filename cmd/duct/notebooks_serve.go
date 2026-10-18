@@ -27,7 +27,7 @@ func wireNotebooks(p *project.Project, h *governance.Handler, tokens notebooks.T
 	// edit (the others get run mode, which only executes code that an admin wrote). A test launcher is its own thing.
 	sandbox, editors := notebooks.SandboxNone, p.Config.Notebooks.EditorRoles()
 	if launcher == nil {
-		mode, adminOnly, msg, err := notebooks.ResolveSandbox(p.Config.Notebooks.Sandbox)
+		mode, adminOnly, msg, err := notebooks.ResolveSandbox(p.SandboxFor(project.SandboxNotebooks))
 		if err != nil {
 			return nil, err
 		}

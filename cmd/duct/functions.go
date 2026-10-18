@@ -10,6 +10,7 @@ import (
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/contract/v1/sandbox"
 	"github.com/alonsoburon/duct/core/project"
 	"github.com/alonsoburon/duct/core/udf"
 )
@@ -18,7 +19,15 @@ import (
 var errEngine = errors.New("engine")
 
 func udfOptions(p *project.Project) udf.Options {
-	return udf.Options{Root: p.Root, Python: p.PythonCommand(), Workers: p.Config.Python.Workers}
+	opt := udf.Options{Root: p.Root, Python: p.PythonCommand(), Workers: p.Config.Python.Workers, SandboxHide: p.SandboxHide()}
+	// Python workers run inside bubblewrap (ADR 0005); an unusable explicit "bwrap" is left in force so that the
+	// first worker fails closed with the reason instead of running unisolated.
+	mode, auto, err := sandboxMode(p, project.SandboxUDF)
+	if err != nil {
+		mode = sandbox.Bwrap
+	}
+	opt.Sandbox, opt.SandboxAuto = mode, auto
+	return opt
 }
 
 // openEngineUDF is openEngine plus the project's functions/ (ADR 0005): Python

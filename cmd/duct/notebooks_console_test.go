@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alonsoburon/duct/core/contract/v1/sandbox"
 	"github.com/alonsoburon/duct/core/notebooks"
 	"github.com/alonsoburon/duct/core/project"
 )
@@ -950,7 +951,7 @@ func TestNotebooksMarimo(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "super-secret")
 	t.Setenv("PGPASSWORD", "super-secret")
 	sandboxed := false
-	if _, err := notebooks.BwrapAvailable(); err == nil {
+	if _, err := sandbox.Available(); err == nil {
 		sandboxed = true
 	} else {
 		t.Logf("bubblewrap not usable (%v): running the notebooks unsandboxed", err)

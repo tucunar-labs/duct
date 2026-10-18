@@ -27,6 +27,7 @@ import (
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/contract/v1/sandbox"
 	"github.com/alonsoburon/duct/core/registry"
 )
 
@@ -63,6 +64,11 @@ func init() {
 type Server struct {
 	listen, dir, role, tokenEnv, ductURL string
 	python                               []string
+	// sandbox is sandbox.Bwrap to run the Python app inside bubblewrap (read-only notebooks folder, private
+	// /tmp, no lake, no .duct/, loopback network); sandboxAuto lets an interpreter that cannot be wrapped
+	// (`uv run`) start unisolated with a warning. Filled by `duct serve` from [sandbox] jobs.
+	sandbox     string
+	sandboxAuto bool
 
 	app     net.Listener // reserved port of the Python app
 	appAddr string
@@ -95,6 +101,8 @@ func (s *Server) Init(_ context.Context, cfg contract.Config) error {
 	s.tokenEnv = str("token_env", "DUCT_NOTEBOOK_TOKEN")
 	s.ductURL = str("duct_url", "")
 	s.dir = str("dir", "")
+	s.sandbox = str("sandbox", sandbox.None)
+	s.sandboxAuto, _ = cfg["sandbox_auto"].(bool)
 	if s.dir == "" {
 		return errors.New("notebook: dir is required (`duct serve` sets <project>/notebooks)")
 	}
@@ -181,9 +189,21 @@ func (s *Server) Serve(ctx context.Context, _ contract.QueryHandler, auth contra
 	argv := append(append([]string{}, s.python...), "-m", "duct.notebook.asgi",
 		"--dir", s.dir, "--host", host, "--port", port,
 		"--auth-url", "http://"+s.authLn.Addr().String()+"/auth", "--allow-role", s.role)
+	envList, dir := childEnv(env), filepath.Dir(s.dir)
+	if s.sandbox == sandbox.Bwrap {
+		wrapped, err := s.wrap(argv)
+		switch {
+		case err == nil:
+			argv, envList, dir = wrapped, sandbox.Env(envList), ""
+		case s.sandboxAuto:
+			slog.Warn("notebook: the Python app runs without the sandbox (sandbox = auto): " + err.Error())
+		default:
+			return fmt.Errorf("notebook: %w", err)
+		}
+	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // interpreter from the project's own duct.toml
-	cmd.Dir = filepath.Dir(s.dir)
-	cmd.Env = childEnv(env)
+	cmd.Dir = dir
+	cmd.Env = envList
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 5 * time.Second
@@ -207,6 +227,24 @@ func (s *Server) Serve(ctx context.Context, _ contract.QueryHandler, auth contra
 		<-done
 		return nil
 	}
+}
+
+// wrap puts the Python app in bubblewrap: only the notebooks folder (read-only: this protocol only runs them) is
+// visible of the project.
+func (s *Server) wrap(argv []string) ([]string, error) {
+	bw, err := sandbox.Available()
+	if err != nil {
+		return nil, err
+	}
+	if b := filepath.Base(argv[0]); b == "uv" || b == "uvx" {
+		return nil, errors.New("`uv run` cannot run inside the sandbox: set [python] command to a direct interpreter, or [sandbox] notebooks = \"none\"")
+	}
+	py := argv[0]
+	if strings.Contains(py, "/") && !filepath.IsAbs(py) {
+		py = filepath.Join(filepath.Dir(s.dir), py)
+		argv = append([]string{py}, argv[1:]...)
+	}
+	return sandbox.Argv(sandbox.Spec{Bwrap: bw, Python: py, Root: filepath.Dir(s.dir), ReadOnly: []string{s.dir}, Chdir: s.dir}, argv)
 }
 
 // childEnv is a small allow-list of the server environment plus extra: the

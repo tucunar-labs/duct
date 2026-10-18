@@ -7,4 +7,5 @@
 - **Credentials:** the child gets `DUCT_URL` and `DUCT_TOKEN` (duct serve, ADR 0007) so
   `duct.connect()` works; never the lake or catalog credentials (the orchestrator builds the
   environment, see `core/contract/v1/taskrun`).
+- **Sandbox:** when the orchestrator adds `params.sandbox` the process runs in bubblewrap through `taskrun.Cmd.Sandbox` (project read-only without `.duct/`, lake, `duct.toml`; optional `params.writable`); see ADR 0006.
 - **Status:** experimental.

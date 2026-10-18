@@ -123,7 +123,7 @@
           "uniqueItems": true
         },
         "params": {
-          "description": "pipeline: targets (list), only (bool). ingest: names (list; empty = all). shell: command (list), cwd, env. python: script, args (list), uv (bool), python, cwd, env. notebook: notebook, args (map), uv, python, cwd, env. Task processes get DUCT_URL/DUCT_TOKEN and a minimal environment, never the lake credentials.",
+          "description": "pipeline: targets (list), only (bool). ingest: names (list; empty = all). shell: command (list), cwd, env. python: script, args (list), uv (bool), python, cwd, env. notebook: notebook, args (map), uv, python, cwd, env. python, notebook and shell also take sandbox (bool: override [sandbox] for this task) and writable (a project directory the sandboxed task may write; the rest of the project is read-only, without .duct/, the local lake, duct.toml, .git and .env*). Task processes get DUCT_URL/DUCT_TOKEN and a minimal environment, never the lake credentials.",
           "type": "object"
         },
         "retries": {

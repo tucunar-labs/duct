@@ -9,6 +9,9 @@
 //     orchestrator builds it from a small allow-list plus DUCT_URL/DUCT_TOKEN
 //     and the task's own env, so lake and catalog credentials never reach
 //     user code. A module must not add anything from its own environment.
+//   - "sandbox": present when the task must run inside bubblewrap (ADR 0006, "Sandbox"): a map with
+//     "hide" (paths under the root that do not exist for the child) and "writable" (the one project
+//     directory the child may write). A module passes SandboxOf(params, isPython) to Cmd.Sandbox.
 package taskrun
 
 import (
@@ -25,6 +28,7 @@ import (
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/contract/v1/sandbox"
 )
 
 // TailBytes is how much of the combined stdout/stderr is kept as the task output.
@@ -36,6 +40,78 @@ type Cmd struct {
 	Argv []string
 	Dir  string
 	Env  map[string]string // the whole environment of the child
+	// Sandbox, when set, runs the process inside bubblewrap: the project read-only without its secrets, a private
+	// /tmp, and Sandbox.Writable as the only writable project path.
+	Sandbox *Sandbox
+}
+
+// Sandbox is the isolation of one task (see the package comment, parameter "sandbox").
+type Sandbox struct {
+	Root     string   // project directory
+	Hide     []string // absolute paths under Root that the child does not see
+	Writable string   // absolute directory under Root the child may write ("" = none)
+	Python   bool     // argv[0] is a Python interpreter: its environment is made visible read-only
+}
+
+// SandboxOf reads the "sandbox" parameter the orchestrator adds (nil when the task is not sandboxed).
+func SandboxOf(p contract.Config, python bool) *Sandbox {
+	m, ok := p["sandbox"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	sb := &Sandbox{Root: Root(p), Python: python}
+	switch h := m["hide"].(type) {
+	case []string:
+		sb.Hide = h
+	case []any:
+		for _, x := range h {
+			sb.Hide = append(sb.Hide, fmt.Sprint(x))
+		}
+	}
+	if w, _ := m["writable"].(string); w != "" {
+		if !filepath.IsAbs(w) {
+			w = filepath.Join(sb.Root, w)
+		}
+		sb.Writable = filepath.Clean(w)
+	}
+	return sb
+}
+
+// wrap turns the command into its bubblewrap form.
+func (sb *Sandbox) wrap(c Cmd) (argv, env []string, err error) {
+	bw, err := sandbox.Available()
+	if err != nil {
+		return nil, nil, fmt.Errorf("sandbox: %w (install bubblewrap, or set sandbox: false on the task / [sandbox] in duct.toml)", err)
+	}
+	if rel, err := filepath.Rel(sb.Root, c.Dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, nil, fmt.Errorf("sandbox: the working directory %s is outside the project", c.Dir)
+	}
+	argv = append([]string(nil), c.Argv...)
+	sp := sandbox.Spec{Bwrap: bw, Root: sb.Root, ProjectRO: true, Hide: sb.Hide, Chdir: c.Dir}
+	if sb.Writable != "" {
+		if err := os.MkdirAll(sb.Writable, 0o755); err != nil { //nolint:gosec // the task's work directory in the project
+			return nil, nil, err
+		}
+		rw, err1 := filepath.EvalSymlinks(sb.Writable)
+		rr, err2 := filepath.EvalSymlinks(sb.Root)
+		if rel, err := filepath.Rel(rr, rw); err1 != nil || err2 != nil || err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, nil, fmt.Errorf("sandbox: the writable directory %s must be a directory inside the project (symlinks are followed)", sb.Writable)
+		}
+		sp.Writable = []string{rw}
+	}
+	if sb.Python {
+		if filepath.Base(argv[0]) == "uv" {
+			return nil, nil, errors.New("sandbox: `uv run` cannot run inside the sandbox (it needs its cache and the network): give params.python a direct interpreter, or set sandbox: false on the task")
+		}
+		if strings.Contains(argv[0], "/") && !filepath.IsAbs(argv[0]) {
+			argv[0] = filepath.Join(c.Dir, argv[0])
+		}
+		sp.Python = argv[0]
+	}
+	if argv, err = sandbox.Argv(sp, argv); err != nil {
+		return nil, nil, err
+	}
+	return argv, sandbox.Env(envList(c.Env)), nil
 }
 
 // Run starts the process and waits for it. On ctx cancellation it kills the
@@ -48,9 +124,16 @@ func Run(ctx context.Context, c Cmd) (contract.TaskResult, error) {
 	if err := ctx.Err(); err != nil {
 		return contract.TaskResult{}, err
 	}
-	cmd := exec.Command(c.Argv[0], c.Argv[1:]...) //nolint:gosec // argv comes from the project's own jobs/*.yaml, no shell
+	argv, env := c.Argv, envList(c.Env)
+	if c.Sandbox != nil {
+		var err error
+		if argv, env, err = c.Sandbox.wrap(c); err != nil {
+			return contract.TaskResult{}, err
+		}
+	}
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv comes from the project's own jobs/*.yaml, no shell
 	cmd.Dir = c.Dir
-	cmd.Env = envList(c.Env)
+	cmd.Env = env
 	tail := &tailBuffer{max: TailBytes}
 	cmd.Stdout, cmd.Stderr = tail, tail
 	setProcessGroup(cmd)

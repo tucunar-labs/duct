@@ -63,5 +63,5 @@ func (t *Task) Run(ctx context.Context, spec contract.TaskSpec) (contract.TaskRe
 		argv = []string{"uv", "run", "python", script}
 	}
 	argv = append(argv, args...)
-	return taskrun.Run(ctx, taskrun.Cmd{Argv: argv, Dir: taskrun.Dir(spec.Params), Env: taskrun.Env(spec.Params)})
+	return taskrun.Run(ctx, taskrun.Cmd{Argv: argv, Dir: taskrun.Dir(spec.Params), Env: taskrun.Env(spec.Params), Sandbox: taskrun.SandboxOf(spec.Params, true)})
 }

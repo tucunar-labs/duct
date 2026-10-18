@@ -139,22 +139,80 @@ HTML/JS de un notebook (los residuales están al final).
   notebook devuelven 403 y ambos se niegan a enmarcarse; con host propio las cookies quedan en jarras distintas.
 
 **Residuales (2026-10-18)**
-- **El código de un editor corre con el token de quien lo ejecuta.** El modo ejecución corre `notebooks/x.py` con el rol del visitante: un
-  `analistas` que edita puede hacer que un `duct_admin` ejecute código con el rol de admin (dentro del sandbox, pero con red: puede consultar lo
-  que el admin ve y sacarlo). Es inherente a notebooks compartidos; mitigaciones: que los admins no abran notebooks de otros sin revisarlos, o
-  (pendiente) ejecutar los notebooks de no admin con el rol del autor.
+- ~~El código de un editor corre con el token de quien lo ejecuta.~~ Resuelto el mismo día: «Menor privilegio de los autores» abajo.
 - **Todos los notebooks comparten el origen del notebook**: el JS de un notebook podría hablar con el proceso de otro notebook que la víctima tenga
   abierto (la cookie es por ruta, no un límite de seguridad frente a JS del mismo origen). Un origen por notebook queda pendiente.
 - El editor puede cambiar cualquier `notebooks/*.py` (montaje de la carpeta): se registra como versión «externa» del historial, pero el candado por archivo
   no lo impide.
-- Tareas `notebook`/`python`/`shell` de jobs y los workers de UDF Python **no** usan bubblewrap (corren como el usuario del servidor, con la lista blanca
-  de entorno): son código del repositorio, pero una tarea `notebook` ejecuta un archivo que un editor puede modificar. No tocar el lake desde ahí exige
-  revisar esos notebooks o sandboxear `taskrun`.
+- ~~Tareas `notebook`/`python`/`shell` de jobs y workers de UDF Python sin bubblewrap.~~ Resuelto: ver abajo (shell queda opt-in).
 - `--share-net`, namespaces abstractos de Unix compartidos y el tmpfs de 1 GiB contado como memoria (no hay límite de CPU ni de procesos por notebook).
 - El ticket y las cookies se validan en memoria de un solo `duct serve` (un ticket usado vale una vez por instancia).
-- La CLI `duct notebook` y el protocolo `notebook` (montaje ASGI) no usan el sandbox: son herramientas de un solo usuario/rol admin.
+- La CLI `duct notebook` sigue sin sandbox (decisión explícita, abajo); el protocolo `notebook` (montaje ASGI) ya corre en bubblewrap.
 - Evidencia: `core/notebooks/sandbox_test.go` (el sandbox no ve lake/`.duct/`/`duct.toml`, `notebooks/` solo lectura o escritura, tmp y home privados, `/proc`
   propio, loopback sí, rechazo de un venv que contiene el proyecto, `ResolveSandbox`), `modules/web/nbauth_test.go` (ticket de un solo uso y de 30 s, ligado a la
   sesión, cookie de la consola inválida allí y viceversa, cookie atada a notebook y modo, inactividad, fin con la sesión, sin rutas de consola, `Sec-Fetch-*`),
   `TestNotebooksOrigin`, `TestNotebooksConsole`, `TestNotebooksMarimo` (marimo real en bubblewrap: el notebook informa que solo ve `notebooks/`, consulta con su rol y no
   escribe en la carpeta en modo ejecución) y la comprobación en Chromium descrita arriba.
+
+## Menor privilegio de los autores y sandbox de tareas (2026-10-18)
+Cierra los residuales «el código de un editor corre con el token de quien lo ejecuta» y «tareas de jobs y workers de UDF sin sandbox».
+
+**1. Menor privilegio de los autores** (`core/notebooks/trust.go`, `Policy.Evaluate`). Amenaza: un `analistas` que edita deja código que corre con el
+token de un `duct_admin` cuando este lo abre o lo ejecuta. Regla, evaluada en cada apertura (edición y ejecución) sobre el historial de versiones
+(`duct_notebook_versions` ya guarda el autor y el hash):
+- **Revisión:** cuenta como revisado lo que guardó el propio lector, lo que guardó cualquier usuario *de su mismo rol* (mismos privilegios: no hay nada que
+  escalar) y toda versión cuyo hash el lector marcó con **«Confiar en esta versión»**. Los *autores sin revisar* son los de las versiones posteriores a la
+  última revisión; sin ninguno, el código corre con el lector.
+- **Lector `duct_admin`, autores sin revisar de un solo rol no admin:** el kernel recibe el **token del último de esos autores** (su código, su acceso a datos),
+  la página muestra un banner con quién escribió y con qué permisos corre, y el botón «Confiar en esta versión». Con varios roles no admin: hay que confiar.
+- **Lector de otro rol:** los autores admin se ignoran (correr su código con menos permisos no escala nada); un autor de un tercer rol no es comparable (con el
+  token del lector el autor leería datos del lector; con el del autor, el lector vería datos del autor): **no se abre hasta que el lector confíe**.
+  Esto se aparta del texto «gana el rol del autor» solo en este caso, porque no hay orden total entre roles no admin y ambas salidas filtran datos.
+- **Autoría no atribuible exige confiar:** usuario borrado o deshabilitado, o la marca `?editores` (el archivo cambió con varios editores vivos y no se sabe cuál
+  escribió). Los cambios fuera de Duct (`externo`: git, una shell) y la línea base `sistema` son código del repositorio: fuera de esta frontera, corren con el lector.
+- **Confianza** por (usuario, notebook, hash del contenido) en `duct_notebook_trust` (migración 14); una edición nueva cambia el hash y la revoca sola. Auditada:
+  `NOTEBOOK trust name=... hash=...`; la apertura limitada se audita con `runas=<usuario> (role ...) authors=...`, y el token lleva la etiqueta
+  `notebook <n> (<modo>) opened by <lector>`. El hash que se confía es el que mostró la página (si el archivo cambió, se rechaza).
+- **Un kernel no sobrevive a su veredicto:** si cambia el usuario del token o, en modo ejecución, el contenido, el proceso se reemplaza al reabrir; el proxy
+  comprueba mtime/tamaño del archivo en cada petición (y el janitor cada 2 s) y mata un kernel de ejecución cuyo notebook cambió, porque marimo puede releer el archivo
+  para una sesión nueva. Confiar mata los procesos del lector sobre ese notebook.
+- **El código de un editor en el sandbox de edición puede escribir *cualquier* `notebooks/*.py`** (la carpeta está montada): el janitor y cada apertura revisan
+  los archivos que cambiaron y los atribuyen al dueño del candado de ese archivo, al único editor vivo, o a `?editores` si hay varios; así la regla también cubre
+  un notebook que el código de un editor reescribió.
+- **Jobs (tareas `notebook`):** corren sin nadie delante, con la identidad del token de jobs (`DUCT_JOBS_TOKEN`/`DUCT_TOKEN`). **Decisión: fallan cerradas.** La tarea
+  no arranca si el veredicto para esa identidad no es «corre con sus propios permisos» (un autor de otro rol modificó el notebook después de la última revisión de
+  esa identidad); el error dice quién y el comando para aprobarlo: `duct notebook approve <nombre> --user <identidad del job>` (registra la confianza sobre el hash
+  actual, auditada por la CLI). Una edición posterior la vuelve a bloquear. Nunca corre «con el rol del autor» sin supervisión. Solo se miran los archivos de
+  `notebooks/`; un notebook que Duct nunca guardó (solo git) corre como siempre.
+
+**2. Sandbox de tareas y workers** (`core/contract/v1/sandbox`, antes `core/notebooks/sandbox.go`; lo usan notebooks, `taskrun`, `core/udf` y el protocolo `notebook`).
+- Mismo perfil de bubblewrap (sistema y venv de solo lectura, `/tmp` y home privados, `/proc` propio, red compartida para llegar a `DUCT_URL`, `--cap-drop ALL`),
+  con una variante «proyecto de solo lectura»: la raíz del proyecto montada de solo lectura **menos** `.duct/`, `duct.toml`, `.git`, `.env*` y el lake local (directorios
+  cubiertos por un tmpfs de solo lectura, archivos por `/dev/null`), más un único directorio escribible explícito (`params.writable`, relativo al proyecto, sin symlinks que salgan).
+  El venv de Python que esté dentro de un directorio oculto (`.duct/venv`) se monta aparte, después de la capa que lo oculta.
+- Tareas **`python` y `notebook`** de `jobs/*.yaml` y **workers de UDF Python** (y la carga de `functions/*.py`, que también ejecuta código de usuario): sandbox por defecto.
+  Los workers ven `functions/` de solo lectura (es parte del proyecto de solo lectura). **`shell` es opt-in** (`[sandbox] shell = "auto"|"bwrap"` o `sandbox: true` en la tarea):
+  son pegamento de despliegue que escribe en el proyecto y usa herramientas del host; los tests y `examples/nyc-taxi` dependen de eso. Cada tarea puede salirse con
+  `sandbox: false` (el yaml de jobs es código del repositorio) o entrar con `sandbox: true`.
+- **Config** (`duct.toml`): `[sandbox] mode = "auto"|"bwrap"|"none"` (global; por defecto `auto`) y anulaciones por función: `notebooks` (la clave `[notebooks] sandbox` sigue
+  mandando), `jobs` (python/notebook), `udf`, `shell` (por defecto `none`). Semántica: `none` = decisión explícita; `bwrap` = error de arranque si falta (y la tarea/worker falla
+  en vez de correr sin aislar); `auto` = bwrap si funciona. **Sin bwrap**, `auto` cae a sin aislar con un aviso (notebooks: solo `duct_admin` edita, como antes; tareas y workers:
+  el código es del repositorio y los notebooks de no admin los frena igualmente la regla de autores). `uv run` no cabe en el sandbox (necesita su caché y red): con `bwrap` la
+  tarea o el worker fallan con el motivo; con `auto` el worker arranca sin aislar con un aviso (`[python] command` con un intérprete directo lo arregla).
+- Los workers **conservan la red** (igual que los notebooks): una UDF puede llamar a una API externa; aislarla del todo exigiría quitar `--share-net` para UDFs sin `DUCT_URL`.
+  No cubierto: UDFs ejecutables (`functions/*.toml`, `command = [...]`), que ya corrían con entorno mínimo pero sin bubblewrap.
+- **Protocolo `notebook`** (montaje ASGI, rol único): su app Python corre en bubblewrap con solo `notebooks/` (lectura). No aplica la regla de autores, porque todos los
+  visitantes usan la identidad del protocolo: el arranque avisa si hay editores de la consola de un rol menor que el del protocolo (`duct_admin`).
+- **CLI `duct notebook`: sin sandbox, a propósito.** Corre como el desarrollador con su propia sesión (necesita navegador, home y todo el proyecto) y quien la ejecuta ya es
+  dueño del directorio del proyecto, de `.duct/` y del lake: no hay frontera de privilegios que defender. Los notebooks que corren para otros (consola, jobs, protocolo) sí están aislados.
+
+**Residuales (2026-10-18, tras este cierre):** la regla compara *roles*, no permisos: dos roles no admin son «no comparables» y piden confianza, aunque uno sea subconjunto del otro;
+la confianza es ciega para un visor (no ve el código, solo un editor ve el diff); un guardado de un usuario del mismo rol cuenta como revisión aunque no leyera todo;
+una ventana de ≤ 2 s entre un cambio hecho desde un sandbox de edición y su atribución (la apertura atribuye antes de decidir, el job no: ahí manda el último
+registro); el archivo puede cambiar entre la comprobación de un job y el arranque de la tarea; el resto de los residuales de arriba (red compartida, un origen para todos los notebooks).
+- Evidencia: `TestNotebooksAuthorTrust` (analista edita y admin abre: token y banner del analista, `Confiar` pasa al rol del admin y queda auditado, una edición nueva lo revoca,
+  mismo rol corre como él mismo, rol no comparable debe confiar, un guardado del admin es revisión), `TestNotebooksSandboxWriteIsAttributed`, `TestNotebookJobGuard` (tarea
+  `notebook` modificada por un no admin después de la aprobación: `duct jobs run` falla cerrado y `duct notebook approve` la libera), `TestJobSandbox` (tarea `python` sin
+  `.duct/`, lake ni `duct.toml`, proyecto de solo lectura, `writable` y consulta por `DUCT_URL` con el rol del job; `sandbox: false` y `[sandbox] jobs = "none"` la desactivan),
+  `core/contract/v1/sandbox/sandbox_test.go`, `TestPythonSandboxedTypesAndTableFunctions` (las pruebas de tipos y funciones de tabla con el worker en bwrap),
+  `TestPythonSandboxedWorkerIsolation`, `TestPythonSandboxUvFailsClosed`.

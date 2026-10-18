@@ -6,7 +6,7 @@
   `core/governance` wraps it to audit (`NOTEBOOK ...`), `modules/web` renders it and proxies `/nb/...`.
 - **Config** (`[notebooks]` in `duct.toml`, `core/project/notebooksconfig.go`): `editors` (roles; default `duct_admin`),
   `idle_timeout` (30m), `max_age` (12h, also the token's lifetime), `max_kernels` (8), `sandbox` (`auto` | `bwrap` | `none`).
-- **Sandbox** (`sandbox.go`): with `bwrap` every process runs inside bubblewrap: system dirs and the Python venv read-only, private
+- **Sandbox** (implementation in `core/contract/v1/sandbox`, shared with tasks and UDF workers; `sandbox.go` here only maps the setting): with `bwrap` every process runs inside bubblewrap: system dirs and the Python venv read-only, private
   tmpfs `/tmp` and home, own `/proc`, `notebooks/` the only project path (rw in edit mode, ro in run mode), no lake, no `.duct/`,
   no `duct.toml`, network shared (needs DUCT_URL on loopback), `--die-with-parent --new-session --cap-drop ALL`. `auto` without a
   working bwrap: `cmd/duct/notebooks_serve.go` restricts editors to `duct_admin`. Never bind a path that contains the project root.
@@ -22,5 +22,9 @@
   microseconds. Names are `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (also the guard against path traversal).
 - **Security:** authorization lives here (editor roles, admin-only delete, comment resolve = author or editor); history
   and diffs are editors-only because they show code. The notebooks have their own origin
-  (`modules/web/nbauth.go`). Residual risks (editor code runs with the viewer's token, jobs' `notebook` tasks unsandboxed): see the ADR.
+  (`modules/web/nbauth.go`). Residual risks: see the ADR.
+- **Least privilege of the authors** (`trust.go`): `Policy.Evaluate` decides whose token a notebook's code gets (the reader's, the last
+  unreviewed author's when the reader is `duct_admin`, or "needs trust"); `duct_notebook_trust` (migration 14) holds "Confiar en esta versión"
+  per (user, notebook, content hash); `attribute` records changes to files behind an editor's back (author = lock holder / the only live editor /
+  `?editores`); a run kernel is stopped when its file changes; `CheckForJob` is the orchestrator's guard (fail closed, `duct notebook approve`).
 - **Tests:** `diff_test.go` (pure), `sandbox_test.go` (real bwrap, skipped without it); the service against a real engine and the console in `cmd/duct/notebooks_console_test.go`.

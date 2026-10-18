@@ -5,4 +5,5 @@
 - **Contract:** `core/contract/v1` `TaskType`; registers as `task/notebook`.
 - **Params:** `notebook` (required), `args` (map), `uv` (bool), `python`, `cwd`, `env`.
 - **Credentials:** same as `task-python`: `DUCT_URL`/`DUCT_TOKEN` only.
+- **Sandbox:** when the orchestrator adds `params.sandbox` the process runs in bubblewrap through `taskrun.Cmd.Sandbox` (project read-only without `.duct/`, lake, `duct.toml`; optional `params.writable`); see ADR 0006.
 - **Status:** experimental (idempotency is the user's, ADR 0005).

@@ -7,4 +7,5 @@
 - **Params:** `command` (list, required), `cwd` (relative to the project), `env` (map). The
   orchestrator passes the whole child environment (allow-list + `DUCT_URL`/`DUCT_TOKEN` + `env`);
   lake and catalog credentials are never in it.
+- **Sandbox:** when the orchestrator adds `params.sandbox` the process runs in bubblewrap through `taskrun.Cmd.Sandbox` (project read-only without `.duct/`, lake, `duct.toml`; optional `params.writable`); see ADR 0006.
 - **Status:** experimental.

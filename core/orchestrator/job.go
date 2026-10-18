@@ -275,6 +275,16 @@ func validateParams(t *Task) error {
 			return fmt.Errorf("params.%s must be a list, not %T", k, v)
 		}
 	}
+	if v, ok := t.Params["sandbox"]; ok {
+		if _, isBool := v.(bool); !isBool {
+			return fmt.Errorf("params.sandbox must be true or false, not %T", v)
+		}
+	}
+	if v, ok := t.Params["writable"]; ok {
+		if s, isStr := v.(string); !isStr || s == "" || filepath.IsAbs(s) || strings.HasPrefix(filepath.Clean(s), "..") {
+			return errors.New("params.writable must be a directory inside the project (relative path)")
+		}
+	}
 	switch t.Type {
 	case TypeShell:
 		l, ok := t.Params["command"].([]any)

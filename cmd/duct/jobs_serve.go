@@ -44,7 +44,12 @@ func startJobs(ctx context.Context, p *project.Project, httpURL string, noJobs b
 	if v := firstNonEmpty(os.Getenv("DUCT_JOBS_TOKEN"), os.Getenv("DUCT_TOKEN")); v != "" {
 		env["DUCT_TOKEN"] = v
 	}
-	js := &jobsServer{ctx: ctx, p: p, log: logger, holder: holder, opt: orchestrator.Options{Root: p.Root, Env: env, Logger: logger, HistoryRetention: retention}}
+	ts, err := taskSandbox(p)
+	if err != nil {
+		close(done)
+		return done, err
+	}
+	js := &jobsServer{ctx: ctx, p: p, log: logger, holder: holder, opt: orchestrator.Options{Root: p.Root, Env: env, Logger: logger, HistoryRetention: retention, Sandbox: ts}}
 	if len(jobs) > 0 {
 		if err := js.start(jobs); err != nil {
 			close(done)
@@ -86,7 +91,9 @@ func (j *jobsServer) start(jobs []orchestrator.Job) error {
 	if err != nil {
 		return err
 	}
-	o, err := orchestrator.New(eng, jobs, j.opt)
+	opt := j.opt
+	opt.NotebookGuard = notebookGuard(eng, opt.Env["DUCT_TOKEN"])
+	o, err := orchestrator.New(eng, jobs, opt)
 	if err != nil {
 		_ = eng.Close()
 		return err

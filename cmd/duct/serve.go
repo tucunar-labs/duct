@@ -247,6 +247,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 		return err
 	}
 	defer stopNotebooks()
+	fnBaseline := functionsSignature(p) // before Ready: a function file written right after it must count as a change
 	if opt.Ready != nil {
 		addrs := map[string]string{}
 		for i, proto := range protocols {
@@ -268,7 +269,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	}
 	mlflowSyncDone := startMLflowSync(sctx, p) // [mlflow] sync = true
 	semanticDone := startSemantic(sctx, p, live, handler)
-	functionsDone := startFunctionsReload(sctx, p, udfs, handler)
+	functionsDone := startFunctionsReload(sctx, p, udfs, handler, fnBaseline)
 	streamingDone := func() error { return nil }
 	if !opt.NoStream {
 		streamingDone = startStreaming(sctx, cancel, p) // [stream] / [alerts] in duct.toml

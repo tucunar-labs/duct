@@ -81,6 +81,9 @@ func TestValidationErrors(t *testing.T) {
 		"bad name":     {"name: Bad-Name\ntasks:\n - {id: a, type: pipeline}\n", "name"},
 		"glob escape":  {"name: j\ntriggers: {on_file: \"../x/*\"}\ntasks:\n - {id: a, type: pipeline}\n", "inside"},
 		"python":       {"name: j\ntasks:\n - {id: a, type: python}\n", "script"},
+		"sandbox type": {"name: j\ntasks:\n - {id: a, type: python, params: {script: x.py, sandbox: yes please}}\n", "sandbox"},
+		"writable abs": {"name: j\ntasks:\n - {id: a, type: python, params: {script: x.py, writable: /etc}}\n", "writable"},
+		"writable up":  {"name: j\ntasks:\n - {id: a, type: python, params: {script: x.py, writable: ../out}}\n", "writable"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := Parse([]byte(tc.yaml))

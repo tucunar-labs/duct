@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,7 +35,10 @@ type kernel struct {
 	started time.Time
 	last    atomic.Int64 // unix nanos of the latest request through the proxy
 	stopped atomic.Bool
-	stamp   string // mtime and size at the last capture (janitor only)
+	runAs   string // user whose token the process holds (the reader unless the rule limited it)
+	hash    string // content the process was started on
+	smu     sync.Mutex
+	stamp   string // run mode: mtime and size of the file when started or last checked (see stale)
 }
 
 func (k *kernel) session() contract.NotebookSession {
@@ -85,12 +89,19 @@ func (s *Service) OpenNotebook(ctx context.Context, id contract.Identity, name s
 			return contract.NotebookSession{}, err
 		}
 	}
+	v, err := s.verdict(ctx, id, name)
+	if err != nil {
+		return contract.NotebookSession{}, err
+	}
+	if v.NeedTrust {
+		return contract.NotebookSession{}, &contract.NotebookUntrustedError{Notebook: name, Hash: v.Hash, Authors: v.Authors, Reason: v.Reason}
+	}
 	mode, lockedBy := contract.NotebookRun, ""
 	if edit {
 		mode = contract.NotebookEdit
 	}
 	for {
-		k, holder, err := s.acquire(ctx, id, name, mode)
+		k, holder, err := s.acquire(ctx, id, name, mode, v)
 		if err != nil {
 			return contract.NotebookSession{}, err
 		}
@@ -112,13 +123,17 @@ func (s *Service) OpenNotebook(ctx context.Context, id contract.Identity, name s
 		k.last.Store(s.now().UnixNano())
 		ses := k.session()
 		ses.LockedBy = lockedBy
+		ses.Hash, ses.Trusted = v.Hash, v.Trusted
+		if v.Limited {
+			ses.RunAs, ses.RunAsRole, ses.Authors = v.RunAs, v.RunAsRole, v.Authors
+		}
 		return ses, nil
 	}
 }
 
 // acquire returns the user's kernel for (mode, name), starting it if needed.
 // For edit mode held by another user it returns (nil, holder, nil).
-func (s *Service) acquire(ctx context.Context, id contract.Identity, name, mode string) (*kernel, string, error) {
+func (s *Service) acquire(ctx context.Context, id contract.Identity, name, mode string, v Verdict) (*kernel, string, error) {
 	key := kkey{mode, id.User, name}
 	s.mu.Lock()
 	if s.closed {
@@ -134,6 +149,13 @@ func (s *Service) acquire(ctx context.Context, id contract.Identity, name, mode 
 		}
 	}
 	if k, ok := s.kernels[key]; ok {
+		// A process started under another verdict (the reader's role changed what runs, a new edit, a trust) is
+		// replaced: its token and its code are not the ones the rule now allows.
+		if k.runAs != v.RunAs || (mode == contract.NotebookRun && k.hash != v.Hash) {
+			s.mu.Unlock()
+			s.stop(k, "verdict changed")
+			return s.acquire(ctx, id, name, mode, v)
+		}
 		s.mu.Unlock()
 		return k, "", nil
 	}
@@ -141,7 +163,8 @@ func (s *Service) acquire(ctx context.Context, id contract.Identity, name, mode 
 		s.mu.Unlock()
 		return nil, "", fmt.Errorf("%w: %d notebook processes are running (max_kernels); try again when someone closes theirs", contract.ErrNotebookInvalid, s.o.MaxKernels)
 	}
-	k := &kernel{key: key, user: id.User, name: name, mode: mode, ready: make(chan struct{}), started: s.now(), pass: randHex(24)}
+	k := &kernel{key: key, user: id.User, name: name, mode: mode, ready: make(chan struct{}), started: s.now(), pass: randHex(24), runAs: v.RunAs, hash: v.Hash}
+	k.stamp = s.fileStamp(name)
 	k.last.Store(s.now().UnixNano())
 	s.kernels[key] = k
 	s.mu.Unlock()
@@ -170,7 +193,11 @@ func (s *Service) start(k *kernel, id contract.Identity) {
 		env["DUCT_URL"] = u
 	}
 	if s.o.Tokens != nil {
-		tok, tid, err := s.o.Tokens.CreateToken(ctx, id.User, "notebook "+k.name+" ("+k.mode+")", s.o.MaxAge+time.Minute)
+		label := "notebook " + k.name + " (" + k.mode + ")"
+		if k.runAs != id.User { // the audit shows whose rights the code had and who opened it
+			label += " opened by " + id.User
+		}
+		tok, tid, err := s.o.Tokens.CreateToken(ctx, k.runAs, label, s.o.MaxAge+time.Minute)
 		if err != nil {
 			fail(fmt.Errorf("token for the notebook: %w", err))
 			return
@@ -227,6 +254,7 @@ func (s *Service) stop(k *kernel, why string) {
 		if _, err := s.sync(ctx, k.name, k.user, "save"); err != nil {
 			slog.Warn("notebooks: recording the final save failed", "notebook", k.name, "err", err)
 		}
+		s.attribute(ctx, k) // what its code wrote into the other notebooks
 		cancel()
 	}
 	if k.tokenID != "" && s.o.Tokens != nil {
@@ -278,8 +306,44 @@ func (s *Service) NotebookTarget(_ context.Context, id contract.Identity, name, 
 	if k.err != nil || k.stopped.Load() {
 		return contract.NotebookSession{}, contract.ErrNotebookNotFound
 	}
+	if s.stale(k) {
+		return contract.NotebookSession{}, contract.ErrNotebookNotFound
+	}
 	k.last.Store(s.now().UnixNano())
 	return k.session(), nil
+}
+
+// fileStamp is mtime/size of the notebook file ("" if it is not there).
+func (s *Service) fileStamp(name string) string {
+	st, err := os.Stat(s.path(name))
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d", st.ModTime().UnixNano(), st.Size())
+}
+
+// stale reports (and handles) a run-mode process whose notebook changed under it: marimo may read the file again
+// for a new session, which would run the new code with the token chosen for the old one. The process ends; the
+// next open evaluates the rule again. Edit processes change their own file and are checked when reopened.
+func (s *Service) stale(k *kernel) bool {
+	if k.mode != contract.NotebookRun {
+		return false
+	}
+	now := s.fileStamp(k.name)
+	k.smu.Lock()
+	same := now == k.stamp
+	k.smu.Unlock()
+	if same {
+		return false
+	}
+	if h, err := s.fileHash(k.name); err == nil && h == k.hash {
+		k.smu.Lock()
+		k.stamp = now
+		k.smu.Unlock()
+		return false
+	}
+	go s.stop(k, "notebook changed")
+	return true
 }
 
 // janitor ends processes that are idle or too old and records the saves of
@@ -315,22 +379,20 @@ func (s *Service) janitor(ctx context.Context) {
 				s.stop(k, "idle")
 			case now.Sub(k.started) > s.o.MaxAge:
 				s.stop(k, "max age")
-			case k.mode == contract.NotebookEdit:
-				st, err := os.Stat(s.path(k.name))
-				if err != nil {
-					continue
-				}
-				stamp := fmt.Sprintf("%d/%d", st.ModTime().UnixNano(), st.Size())
-				if stamp == k.stamp {
-					continue
-				}
-				k.stamp = stamp
-				cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				if _, err := s.sync(cctx, k.name, k.user, "save"); err != nil {
-					slog.Warn("notebooks: recording a save failed", "notebook", k.name, "err", err)
-				}
-				cancel()
+			case k.mode == contract.NotebookRun:
+				s.stale(k)
 			}
+		}
+		s.mu.Lock()
+		edits := false
+		for _, k := range s.kernels {
+			edits = edits || k.mode == contract.NotebookEdit
+		}
+		s.mu.Unlock()
+		if edits { // saves, and what the editors' code wrote into other notebooks
+			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			s.attribute(cctx)
+			cancel()
 		}
 	}
 }

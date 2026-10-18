@@ -38,6 +38,12 @@ type Options struct {
 	// are deleted at start and hourly (0 keeps everything). `duct gc` applies
 	// the same setting.
 	HistoryRetention time.Duration
+	// Sandbox says which user-code tasks run inside bubblewrap (see TaskSandbox).
+	Sandbox TaskSandbox
+	// NotebookGuard, when set, is asked before a notebook task starts with the notebook's absolute path; an error
+	// stops the task without running any code (ADR 0006: a notebook an author with fewer privileges changed
+	// since the job identity last reviewed it does not run unattended).
+	NotebookGuard func(ctx context.Context, job, task, path string) error
 	// Now is the clock of the cron scheduler (default time.Now).
 	Now func() time.Time
 	// Logger receives the operational log (default slog.Default()).
@@ -45,6 +51,14 @@ type Options struct {
 	// Notify delivers an alert; the default instantiates the KindAlertChannel
 	// module named in the spec.
 	Notify func(ctx context.Context, spec AlertSpec, a contract.Alert) error
+}
+
+// TaskSandbox is the isolation of the user-code tasks (ADR 0006, "Sandbox"): the resolved mode of each task type
+// ("bwrap" or "none"; a missing type is "none") and the paths under the project the child must not see. A task
+// overrides its type with `sandbox: true|false` and may name one writable project directory with `writable:`.
+type TaskSandbox struct {
+	Modes map[string]string
+	Hide  []string
 }
 
 func (o Options) withDefaults() Options {

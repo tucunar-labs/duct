@@ -39,6 +39,7 @@ func (a *app) notebooksRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /notebooks/{name}/rename", a.authed(a.notebookRename))
 	mux.HandleFunc("POST /notebooks/{name}/delete", a.authed(a.notebookDelete))
 	mux.HandleFunc("POST /notebooks/{name}/restore", a.authed(a.notebookRestore))
+	mux.HandleFunc("POST /notebooks/{name}/trust", a.authed(a.notebookTrust))
 	mux.HandleFunc("POST /notebooks/{name}/comments", a.authed(a.commentAdd))
 	mux.HandleFunc("POST /notebooks/{name}/comments/{id}/{action}", a.authed(a.commentResolve))
 }
@@ -152,6 +153,13 @@ type notebookView struct {
 	Admin    bool
 	Src      string
 	Now      time.Time
+	// Least privilege of the authors (ADR 0006): RunAs is set when the code runs with another user's rights than
+	// the reader's; Untrusted when it does not run until the reader trusts the version with this Hash.
+	RunAs, RunAsRole string
+	Authors          []string
+	Hash             string
+	Trusted          bool
+	Untrusted        *contract.NotebookUntrustedError
 }
 
 func (a *app) notebookView(w http.ResponseWriter, r *http.Request, sess session) {
@@ -189,11 +197,15 @@ func (a *app) notebookView(w http.ResponseWriter, r *http.Request, sess session)
 		a.forbidden(w, r, sess, "Tu rol no puede editar notebooks (ver [notebooks] editors en duct.toml). Puedes ejecutarlo.")
 		return
 	}
-	if err != nil {
+	var untrusted *contract.NotebookUntrustedError
+	if errors.As(err, &untrusted) {
+		v.Untrusted = untrusted // the page asks the reader to trust this version instead of opening it
+	} else if err != nil {
 		slog.Warn("web: opening a notebook failed", "user", sess.who.User, "notebook", name, "err", err)
 		v.Err, status = "No se pudo abrir el notebook: "+nbMessage(err), nbStatus(err)
 	} else {
 		v.Mode, v.LockedBy = ses.Mode, ses.LockedBy
+		v.RunAs, v.RunAsRole, v.Authors, v.Hash, v.Trusted = ses.RunAs, ses.RunAsRole, ses.Authors, ses.Hash, ses.Trusted
 		if v.Src = a.ticketURL(r, sess, ses.Mode, name); v.Src == "" {
 			v.Err, status = "Los notebooks no tienen origen propio en este servidor: configura [serve.web] notebooks_listen (y notebooks_url tras un proxy).", http.StatusServiceUnavailable
 		} else {
@@ -267,6 +279,20 @@ func (a *app) notebookHistory(w http.ResponseWriter, r *http.Request, sess sessi
 // notebookDiff is the old address of one diff: it redirects into the history page.
 func (a *app) notebookDiff(w http.ResponseWriter, r *http.Request, _ session) {
 	http.Redirect(w, r, "/notebooks/"+url.PathEscape(r.PathValue("name"))+"/history?"+r.URL.RawQuery, http.StatusSeeOther)
+}
+
+// notebookTrust records "Confiar en esta versión" for the version (hash) the page showed.
+func (a *app) notebookTrust(w http.ResponseWriter, r *http.Request, sess session) {
+	name := r.PathValue("name")
+	dest := "/notebooks/" + url.PathEscape(name)
+	c, ok := a.notebooksConsole()
+	if !ok {
+		a.nbDone(w, r, sess, dest, contract.ErrConsoleUnavailable, "")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.queryTimeout)
+	defer cancel()
+	a.nbDone(w, r, sess, dest, c.TrustNotebook(ctx, sess.who, name, r.PostFormValue("hash")), "Confías en esta versión: el notebook corre con tu propio rol hasta que alguien lo modifique.")
 }
 
 func (a *app) notebookRestore(w http.ResponseWriter, r *http.Request, sess session) {

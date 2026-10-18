@@ -403,6 +403,23 @@ var Migrations = []Migration{
 			)`,
 		},
 	},
+	{
+		// Notebook trust (ADR 0006, "Menor privilegio de los autores"): a user's explicit "Confiar en esta
+		// versión" of the content of a notebook (SHA-256), which lets the code another author wrote run with that
+		// user's own role. A new edit changes the hash, so the trust does not carry over. Instants are epoch
+		// microseconds (BIGINT).
+		Version: 14,
+		Name:    "notebook_trust",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_notebook_trust (
+				user_name VARCHAR NOT NULL,
+				notebook VARCHAR NOT NULL,
+				content_hash VARCHAR NOT NULL,
+				created_at_us BIGINT NOT NULL,
+				PRIMARY KEY (user_name, notebook, content_hash)
+			)`,
+		},
+	},
 }
 
 const createMigrations = `CREATE TABLE IF NOT EXISTS duct.duct_migrations (

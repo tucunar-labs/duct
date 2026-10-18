@@ -17,6 +17,7 @@ import (
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/contract/v1/sandbox"
 	"github.com/alonsoburon/duct/core/udf"
 )
 
@@ -64,15 +65,21 @@ func (l *execLauncher) Launch(ctx context.Context, spec LaunchSpec) (Process, st
 	argv := append([]string{py[0]}, args...)
 	dir := l.Dir
 	if l.Sandbox == SandboxBwrap {
-		bw, err := BwrapAvailable()
+		bw, err := sandbox.Available()
 		if err != nil {
 			return nil, "", err
 		}
 		nbDir := filepath.Dir(spec.File)
-		if argv, err = bwrapArgv(sandboxSpec{Bwrap: bw, Python: py, ProjectRoot: l.Dir, NotebooksDir: nbDir, Writable: spec.Mode == contract.NotebookEdit}, argv); err != nil {
+		sp := sandbox.Spec{Bwrap: bw, Python: py[0], Root: l.Dir}
+		if spec.Mode == contract.NotebookEdit {
+			sp.Writable = []string{nbDir}
+		} else {
+			sp.ReadOnly = []string{nbDir}
+		}
+		if argv, err = sandbox.Argv(sp, argv); err != nil {
 			return nil, "", err
 		}
-		env, dir = sandboxEnv(env), "" // inside, the working directory is the notebooks dir (bwrap --chdir)
+		env, dir = sandbox.Env(env), "" // inside, the working directory is the notebooks dir (bwrap --chdir)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // interpreter from duct.toml / the managed venv, behind bwrap when sandboxed
 	cmd.Dir = dir

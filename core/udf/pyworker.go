@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
+	"github.com/alonsoburon/duct/core/contract/v1/sandbox"
 )
 
 // registrySnapshot is the JSON of `python -m duct.registry --json` (schema 3).
@@ -43,9 +45,13 @@ func discoverPython(ctx context.Context, opt Options) ([]Spec, error) {
 	argv := append(append([]string{}, opt.Python...), "-m", "duct.registry", "--json", "--load", filepath.Join(opt.Root, DirName))
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	argv, env, err := opt.sandboxed(argv)
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...) //nolint:gosec // argv is the project's own interpreter setting
 	cmd.Dir = opt.Root
-	cmd.Env = SafeEnv(opt.ExtraEnv)
+	cmd.Env = env
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -240,9 +246,13 @@ type pyWorker struct {
 
 func startWorker(ctx context.Context, opt Options) (*pyWorker, error) {
 	argv := append(append([]string{}, opt.Python...), "-m", "duct.udf.worker", "--load", filepath.Join(opt.Root, DirName))
+	argv, env, err := opt.sandboxed(argv)
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv is the project's own interpreter setting
 	cmd.Dir = opt.Root
-	cmd.Env = SafeEnv(opt.ExtraEnv)
+	cmd.Env = env
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -398,4 +408,43 @@ func decodeTable(body []byte) ([]arrow.RecordBatch, error) {
 		return nil, fmt.Errorf("python worker: %w", err)
 	}
 	return out, nil
+}
+
+var sandboxWarned sync.Once
+
+// sandboxed returns the command line and environment of a Python process of the project: wrapped in bubblewrap
+// when Options.Sandbox asks for it (the project read-only minus its secrets, see sandbox.ProjectHide).
+func (o Options) sandboxed(argv []string) ([]string, []string, error) {
+	env := SafeEnv(o.ExtraEnv)
+	if o.Sandbox != sandbox.Bwrap {
+		return argv, env, nil
+	}
+	wrapped, err := o.wrap(argv)
+	if err != nil {
+		if o.SandboxAuto {
+			sandboxWarned.Do(func() {
+				slog.Warn("udf: Python workers run without the sandbox (sandbox = auto): " + err.Error())
+			})
+			return argv, env, nil
+		}
+		return nil, nil, fmt.Errorf("udf: %w", err)
+	}
+	return wrapped, sandbox.Env(env), nil
+}
+
+func (o Options) wrap(argv []string) ([]string, error) {
+	bw, err := sandbox.Available()
+	if err != nil {
+		return nil, err
+	}
+	if b := filepath.Base(argv[0]); b == "uv" || b == "uvx" {
+		return nil, errors.New("`uv run` cannot run inside the sandbox: set [python] command to a direct interpreter (a venv's bin/python), or [sandbox] udf = \"none\"")
+	}
+	py := argv[0]
+	if strings.Contains(py, "/") && !filepath.IsAbs(py) {
+		py = filepath.Join(o.Root, py)
+		argv = append([]string{py}, argv[1:]...)
+	}
+	return sandbox.Argv(sandbox.Spec{Bwrap: bw, Python: py, Root: o.Root, ProjectRO: true,
+		Hide: sandbox.ProjectHide(o.Root, o.SandboxHide...), Chdir: o.Root}, argv)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
@@ -27,6 +28,11 @@ func (p *protocolHandler) nb() (contract.NotebooksConsole, error) {
 
 // nbAudited runs fn and records "NOTEBOOK <what>" for id.
 func (p *protocolHandler) nbAudited(ctx context.Context, id contract.Identity, what string, fn func(contract.NotebooksConsole) error) error {
+	return p.nbAuditedMore(ctx, id, what, nil, fn)
+}
+
+// nbAuditedMore is nbAudited with a suffix computed after fn ran (what the action turned out to do).
+func (p *protocolHandler) nbAuditedMore(ctx context.Context, id contract.Identity, what string, more func() string, fn func(contract.NotebooksConsole) error) error {
 	start := time.Now()
 	rec := contract.AuditRecord{At: start.UTC(), User: id.User, Role: id.Role, Protocol: p.name, SQL: "NOTEBOOK " + what}
 	err := func() error {
@@ -37,6 +43,9 @@ func (p *protocolHandler) nbAudited(ctx context.Context, id contract.Identity, w
 		return fn(c)
 	}()
 	rec.Duration = time.Since(start)
+	if more != nil {
+		rec.SQL += more()
+	}
 	if err != nil {
 		rec.Err = err.Error()
 	}
@@ -74,7 +83,13 @@ func (p *protocolHandler) OpenNotebook(ctx context.Context, id contract.Identity
 	if edit {
 		mode = contract.NotebookEdit
 	}
-	err = p.nbAudited(ctx, id, fmt.Sprintf("open mode=%s name=%s", mode, name), func(c contract.NotebooksConsole) (e error) {
+	more := func() string { // the code runs with another user's rights (least privilege of the authors)
+		if ses.RunAs != "" {
+			return " runas=" + ses.RunAs + " (role " + ses.RunAsRole + ") authors=" + strings.Join(ses.Authors, ",")
+		}
+		return ""
+	}
+	err = p.nbAuditedMore(ctx, id, fmt.Sprintf("open mode=%s name=%s", mode, name), more, func(c contract.NotebooksConsole) (e error) {
 		ses, e = c.OpenNotebook(ctx, id, name, edit)
 		return e
 	})
@@ -160,4 +175,13 @@ func (p *protocolHandler) ResolveNotebookComment(ctx context.Context, id contrac
 	return p.nbAudited(ctx, id, fmt.Sprintf("%s comment name=%s id=%d", verb, name, comment), func(c contract.NotebooksConsole) error {
 		return c.ResolveNotebookComment(ctx, id, name, comment, resolved)
 	})
+}
+
+// TrustNotebook implements contract.NotebooksConsole (audited: it lets another author's code run with the user's role).
+func (p *protocolHandler) TrustNotebook(ctx context.Context, id contract.Identity, name, hash string) error {
+	short := hash
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	return p.nbAudited(ctx, id, "trust name="+name+" hash="+short, func(c contract.NotebooksConsole) error { return c.TrustNotebook(ctx, id, name, hash) })
 }

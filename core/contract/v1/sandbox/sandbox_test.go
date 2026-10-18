@@ -1,4 +1,4 @@
-package notebooks
+package sandbox
 
 import (
 	"net"
@@ -32,17 +32,23 @@ func sandboxProject(t *testing.T) (root, nbDir string) {
 // sbRun runs `sh -c script` inside the sandbox and returns the combined output.
 func sbRun(t *testing.T, root, nbDir string, writable bool, env []string, script string) (string, error) {
 	t.Helper()
-	bw, err := BwrapAvailable()
+	bw, err := Available()
 	if err != nil {
 		t.Skip("bubblewrap not usable here: ", err)
 	}
 	sh, _ := exec.LookPath("sh")
-	argv, err := bwrapArgv(sandboxSpec{Bwrap: bw, Python: []string{sh}, ProjectRoot: root, NotebooksDir: nbDir, Writable: writable}, []string{sh, "-c", script})
+	sp := Spec{Bwrap: bw, Python: sh, Root: root}
+	if writable {
+		sp.Writable = []string{nbDir}
+	} else {
+		sp.ReadOnly = []string{nbDir}
+	}
+	argv, err := Argv(sp, []string{sh, "-c", script})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // test
-	cmd.Env = sandboxEnv(append([]string{"PATH=/usr/bin:/bin"}, env...))
+	cmd.Env = Env(append([]string{"PATH=/usr/bin:/bin"}, env...))
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -192,17 +198,90 @@ func TestPythonBindsRefuseTheProject(t *testing.T) {
 	}
 }
 
-func TestResolveSandbox(t *testing.T) {
-	if _, _, _, err := ResolveSandbox("none"); err != nil {
-		t.Error(err)
+func TestResolve(t *testing.T) {
+	if m, fb, _, err := Resolve("none"); err != nil || m != None || fb {
+		t.Error(m, fb, err)
 	}
-	mode, adminOnly, _, err := ResolveSandbox("")
+	if _, _, _, err := Resolve("bogus"); err == nil {
+		t.Error("an unknown mode was accepted")
+	}
+	mode, fallback, _, err := Resolve("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, e := BwrapAvailable(); e == nil && (mode != SandboxBwrap || adminOnly) {
-		t.Errorf("bwrap works but auto gave %s adminOnly=%v", mode, adminOnly)
-	} else if e != nil && (mode != SandboxNone || !adminOnly) {
-		t.Errorf("no bwrap: auto must restrict editors, got %s adminOnly=%v", mode, adminOnly)
+	if _, e := Available(); e == nil && (mode != Bwrap || fallback) {
+		t.Errorf("bwrap works but auto gave %s fallback=%v", mode, fallback)
+	} else if e != nil && (mode != None || !fallback) {
+		t.Errorf("no bwrap: auto must report the fallback, got %s fallback=%v", mode, fallback)
+	}
+}
+
+// projectRun runs a script inside the sandbox with the whole project read-only (job tasks, UDF workers).
+func projectRun(t *testing.T, root string, writable []string, script string) (string, error) {
+	t.Helper()
+	bw, err := Available()
+	if err != nil {
+		t.Skip("bubblewrap not usable here: ", err)
+	}
+	sh, _ := exec.LookPath("sh")
+	sp := Spec{Bwrap: bw, Python: sh, Root: root, ProjectRO: true, Hide: ProjectHide(root, filepath.Join(root, "lake")), Writable: writable}
+	argv, err := Argv(sp, []string{sh, "-c", script})
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // test
+	cmd.Env = Env([]string{"PATH=/usr/bin:/bin"})
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestProjectReadOnlyHidesSecrets(t *testing.T) {
+	root, _ := sandboxProject(t)
+	for f, c := range map[string]string{".env": "TOKEN=x", ".git/config": "[core]", "functions/f.py": "pass", "work/keep": ""} {
+		p := filepath.Join(root, f)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"lake/secret.parquet", ".duct/state.db", ".duct/web_session.key", "duct.toml", ".env", ".git/config"} {
+		if out, err := projectRun(t, root, nil, "cat "+filepath.Join(root, f)); strings.Contains(out, "lake-data") || strings.Contains(out, "password-hashes") || strings.Contains(out, "TOKEN") || strings.Contains(out, "[core]") || strings.Contains(out, "[secret]") {
+			t.Errorf("read %s: err=%v out=%q", f, err, out)
+		}
+	}
+	// what is not secret is there, read-only; the hidden directories cannot be written either
+	if out, err := projectRun(t, root, nil, "cat "+filepath.Join(root, "functions/f.py")+" && pwd"); err != nil || !strings.Contains(out, "pass") {
+		t.Errorf("functions/ is not visible: %v %q", err, out)
+	}
+	for _, w := range []string{"functions/new.py", "notebooks/a.py", ".duct/x", "lake/x", "x"} {
+		if out, err := projectRun(t, root, nil, "echo x > "+filepath.Join(root, w)); err == nil {
+			t.Errorf("wrote %s in a read-only project: %q", w, out)
+		}
+	}
+	// the explicit work directory is the only writable place
+	if out, err := projectRun(t, root, []string{filepath.Join(root, "work")}, "echo ok > "+filepath.Join(root, "work/out.txt")); err != nil {
+		t.Fatalf("the work dir is not writable: %v %s", err, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "work/out.txt")); !strings.Contains(string(b), "ok") {
+		t.Errorf("the write did not reach the host: %q", b)
+	}
+	// a writable path may not contain what is hidden, nor be the root
+	for _, w := range []string{root, filepath.Join(root, ".duct"), filepath.Join(root, ".duct", "sub")} {
+		if _, err := projectRun(t, root, []string{w}, "true"); err == nil {
+			t.Errorf("writable %s accepted", w)
+		}
+	}
+}
+
+func TestProjectHideList(t *testing.T) {
+	root, _ := sandboxProject(t)
+	h := ProjectHide(root, filepath.Join(root, "lake"), "s3://bucket/lake", "/elsewhere/lake")
+	var rel []string
+	for _, p := range h {
+		r, _ := filepath.Rel(root, p)
+		rel = append(rel, r)
+	}
+	if got := strings.Join(rel, " "); got != ".duct duct.toml lake" {
+		t.Errorf("hide = %q", got)
 	}
 }
