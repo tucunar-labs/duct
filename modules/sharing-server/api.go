@@ -313,9 +313,7 @@ func (a *api) listTables(w http.ResponseWriter, r *http.Request, rcp, share, sch
 
 func (a *api) tableOp(w http.ResponseWriter, r *http.Request, rcp, share, schema, table, op string) (result, *apiError) {
 	switch {
-	case op == "version" && isRead(r), op == "metadata" && isRead(r), op == "query" && r.Method == http.MethodPost:
-	case op == "changes":
-		return result{}, &apiError{http.StatusNotImplemented, "UNIMPLEMENTED", "change data feed is not supported"}
+	case (op == "version" || op == "metadata" || op == "changes") && isRead(r), op == "query" && r.Method == http.MethodPost:
 	default:
 		return result{}, notFound("path")
 	}
@@ -331,31 +329,114 @@ func (a *api) tableOp(w http.ResponseWriter, r *http.Request, rcp, share, schema
 			}
 		}
 	}
-	c, err := a.svc.Resolve(r.Context(), rcp, share, schema, table)
+	ctx := r.Context()
+	c, err := a.svc.Resolve(ctx, rcp, share, schema, table)
 	if err != nil {
 		if errors.Is(err, sharing.ErrNotFound) {
 			return result{}, notFound("table")
 		}
 		return result{}, internal(err)
 	}
-	w.Header().Set(hdrVersion, strconv.FormatInt(c.Version, 10))
 	w.Header().Set(hdrCapabilities, "responseformat=parquet")
-	if op == "version" {
+	switch op {
+	case "version":
+		v := c.Version
+		if ts := r.URL.Query().Get("startingTimestamp"); ts != "" {
+			t, e := parseTimestamp("startingTimestamp", ts)
+			if e != nil {
+				return result{}, e
+			}
+			if v, err = a.svc.VersionByTimestamp(ctx, c, t, false); err != nil {
+				return result{}, historyErr(err)
+			}
+		}
+		w.Header().Set(hdrVersion, strconv.FormatInt(v, 10))
 		w.WriteHeader(http.StatusOK)
 		return result{}, nil
+	case "changes":
+		return a.changes(w, r, c, table, changeRange{
+			startVersion: queryInt(r, "startingVersion"), endVersion: queryInt(r, "endingVersion"),
+			startTS: r.URL.Query().Get("startingTimestamp"), endTS: r.URL.Query().Get("endingTimestamp"),
+		})
 	}
-	if op == "query" {
-		if req.Version != nil && *req.Version != c.Version {
-			return result{}, badParam(fmt.Sprintf("version %d is not available: only the current version (%d) is served", *req.Version, c.Version))
+	if req.StartingVersion != nil {
+		return a.changes(w, r, c, table, changeRange{startVersion: req.StartingVersion, endVersion: req.EndingVersion})
+	}
+	target := c
+	timeTravel := false
+	switch {
+	case req.Version != nil && req.Timestamp != "":
+		return result{}, badParam("version and timestamp cannot be combined")
+	case req.Version != nil:
+		timeTravel = true
+		if target, err = a.svc.Version(ctx, c, *req.Version); err != nil {
+			return result{}, historyErr(err)
 		}
-		if req.Timestamp != "" || req.StartingVersion != nil || req.EndingVersion != nil {
-			return result{}, badParam("time travel and incremental reads are not supported: only the current version is served")
+	case req.Timestamp != "":
+		timeTravel = true
+		t, e := parseTimestamp("timestamp", req.Timestamp)
+		if e != nil {
+			return result{}, e
+		}
+		n, err := a.svc.VersionByTimestamp(ctx, c, t, true)
+		if err != nil {
+			return result{}, historyErr(err)
+		}
+		if target, err = a.svc.Version(ctx, c, n); err != nil {
+			return result{}, historyErr(err)
 		}
 	}
+	w.Header().Set(hdrVersion, strconv.FormatInt(target.Version, 10))
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	enc := json.NewEncoder(w)
+	writeHead(enc, target, table, true)
+	if op == "metadata" {
+		return result{rows: 1}, nil
+	}
+	urls, err := a.svc.FileURLs(ctx, target)
+	if err != nil {
+		// The status line is already out: nothing honest is left but to cut it.
+		slog.Error("sharing: cannot sign file URLs", "error", err)
+		panic(http.ErrAbortHandler)
+	}
+	// Hints only ever drop files the statistics prove cannot match; the limit
+	// is applied after them, as the protocol asks.
+	pred := sharing.ParseHints(req.jsonHints(), req.PredicateHints)
+	var sent int64
+	for i, f := range target.Files {
+		if req.LimitHint != nil && *req.LimitHint > 0 && sent >= *req.LimitHint {
+			break
+		}
+		if !pred.MayMatch(f.Stats) {
+			continue
+		}
+		sent += f.Rows
+		file := map[string]any{
+			"url":             urls[i],
+			"id":              f.ID,
+			"partitionValues": map[string]string{},
+			"size":            f.Size,
+			"stats":           fileStats(f),
+		}
+		if timeTravel && target.TimestampMS > 0 {
+			file["version"], file["timestamp"] = target.Version, target.TimestampMS
+		}
+		_ = enc.Encode(map[string]any{"file": file})
+	}
+	return result{rows: sent}, nil
+}
+
+func fileStats(f sharing.CopyFile) string {
+	if f.Stats != "" {
+		return f.Stats
+	}
+	return fmt.Sprintf(`{"numRecords":%d}`, f.Rows)
+}
+
+// writeHead writes the protocol and metaData lines of a table at a version.
+func writeHead(enc *json.Encoder, c *sharing.Copy, table string, withSize bool) {
 	_ = enc.Encode(map[string]any{"protocol": map[string]any{"minReaderVersion": 1}})
-	_ = enc.Encode(map[string]any{"metaData": map[string]any{
+	meta := map[string]any{
 		"id":               c.TableID,
 		"name":             table,
 		"format":           map[string]string{"provider": "parquet"},
@@ -363,42 +444,148 @@ func (a *api) tableOp(w http.ResponseWriter, r *http.Request, rcp, share, schema
 		"partitionColumns": []string{},
 		"configuration":    map[string]string{},
 		"version":          c.Version,
-		"size":             c.TotalBytes,
-		"numFiles":         len(c.Files),
-	}})
-	if op == "metadata" {
-		return result{rows: 1}, nil
 	}
-	urls, err := a.svc.FileURLs(r.Context(), c)
-	if err != nil {
-		// The status line is already out: nothing honest is left but to cut it.
-		slog.Error("sharing: cannot sign file URLs", "error", err)
-		panic(http.ErrAbortHandler)
+	if withSize {
+		meta["size"], meta["numFiles"] = c.TotalBytes, len(c.Files)
+	} else if c.History {
+		meta["configuration"] = map[string]string{"enableChangeDataFeed": "true"}
 	}
-	var sent int64
-	for i, f := range c.Files {
-		if req.LimitHint != nil && *req.LimitHint > 0 && sent >= *req.LimitHint {
-			break
+	_ = enc.Encode(map[string]any{"metaData": meta})
+}
+
+// changeRange is what a change feed request asks for.
+type changeRange struct {
+	startVersion, endVersion *int64
+	startTS, endTS           string
+}
+
+// changes serves the change feed (GET .../changes, or a query with
+// startingVersion): the files of every version in the range, inclusive. A
+// version with change files gives "cdf" files (rows with _change_type;
+// _commit_version and _commit_timestamp are the file's version and timestamp);
+// the first version of a copy gives its rows as "add" files (all inserts).
+func (a *api) changes(w http.ResponseWriter, r *http.Request, c *sharing.Copy, table string, rg changeRange) (result, *apiError) {
+	ctx := r.Context()
+	if !c.History {
+		return result{}, badParam("the change feed is not available: this table is shared without history (duct share history)")
+	}
+	var from, to int64
+	switch {
+	case rg.startVersion != nil:
+		from = *rg.startVersion
+	case rg.startTS != "":
+		t, e := parseTimestamp("startingTimestamp", rg.startTS)
+		if e != nil {
+			return result{}, e
 		}
-		sent += f.Rows
-		_ = enc.Encode(map[string]any{"file": map[string]any{
-			"url":             urls[i],
-			"id":              f.ID,
-			"partitionValues": map[string]string{},
-			"size":            f.Size,
-			"stats":           fmt.Sprintf(`{"numRecords":%d}`, f.Rows),
-		}})
+		n, err := a.svc.VersionByTimestamp(ctx, c, t, false)
+		if err != nil {
+			return result{}, historyErr(err)
+		}
+		from = n
+	default:
+		return result{}, badParam("startingVersion or startingTimestamp is required")
 	}
-	return result{rows: sent}, nil
+	to = c.Version
+	switch {
+	case rg.endVersion != nil:
+		to = *rg.endVersion
+	case rg.endTS != "":
+		t, e := parseTimestamp("endingTimestamp", rg.endTS)
+		if e != nil {
+			return result{}, e
+		}
+		n, err := a.svc.VersionByTimestamp(ctx, c, t, true)
+		if err != nil {
+			return result{}, historyErr(err)
+		}
+		to = n
+	}
+	if to > c.Version {
+		return result{}, badParam(fmt.Sprintf("endingVersion %d is after the latest version (%d)", to, c.Version))
+	}
+	chg, end, err := a.svc.Changes(ctx, c, from, to)
+	if err != nil {
+		return result{}, historyErr(err)
+	}
+	urls := make([]string, len(chg))
+	for i, fc := range chg {
+		if urls[i], err = a.svc.KeyURL(ctx, fc.File.Key); err != nil {
+			return result{}, internal(err)
+		}
+	}
+	w.Header().Set(hdrVersion, strconv.FormatInt(from, 10))
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	enc := json.NewEncoder(w)
+	writeHead(enc, end, table, false)
+	var rows int64
+	for i, fc := range chg {
+		act := map[string]any{
+			"url": urls[i], "id": fc.File.ID, "partitionValues": map[string]string{}, "size": fc.File.Size,
+			"timestamp": fc.TimestampMS, "version": fc.Version,
+		}
+		if fc.Kind == "add" {
+			act["stats"] = fileStats(fc.File)
+		}
+		_ = enc.Encode(map[string]any{fc.Kind: act})
+		rows += fc.File.Rows
+	}
+	return result{rows: rows}, nil
+}
+
+func historyErr(err error) *apiError {
+	var u *sharing.Unavailable
+	if errors.As(err, &u) {
+		return badParam(u.Msg)
+	}
+	return internal(err)
+}
+
+func queryInt(r *http.Request, key string) *int64 {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		n = -1 // reported as an unavailable version
+	}
+	return &n
+}
+
+func parseTimestamp(name, v string) (time.Time, *apiError) {
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, badParam(name + " must be an ISO 8601 UTC timestamp such as 2022-01-01T00:00:00Z")
+	}
+	return t, nil
 }
 
 type queryRequest struct {
-	PredicateHints  []string `json:"predicateHints"`
-	LimitHint       *int64   `json:"limitHint"`
-	Version         *int64   `json:"version"`
-	Timestamp       string   `json:"timestamp"`
-	StartingVersion *int64   `json:"startingVersion"`
-	EndingVersion   *int64   `json:"endingVersion"`
+	PredicateHints     []string        `json:"predicateHints"`
+	JSONPredicateHints json.RawMessage `json:"jsonPredicateHints"`
+	LimitHint          *int64          `json:"limitHint"`
+	Version            *int64          `json:"version"`
+	Timestamp          string          `json:"timestamp"`
+	StartingVersion    *int64          `json:"startingVersion"`
+	EndingVersion      *int64          `json:"endingVersion"`
+}
+
+// jsonHints is jsonPredicateHints as text: the protocol sends a JSON string
+// holding the tree, but the tree itself is accepted too.
+func (q queryRequest) jsonHints() string {
+	raw := strings.TrimSpace(string(q.JSONPredicateHints))
+	if strings.HasPrefix(raw, `"`) {
+		var s string
+		if json.Unmarshal(q.JSONPredicateHints, &s) == nil {
+			return s
+		}
+		return ""
+	}
+	if raw == "null" {
+		return ""
+	}
+	return raw
 }
 
 // ---- files (local storage) ----

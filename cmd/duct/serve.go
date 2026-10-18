@@ -16,6 +16,7 @@ import (
 	contract "github.com/alonsoburon/duct/core/contract/v1"
 	"github.com/alonsoburon/duct/core/dashboards"
 	"github.com/alonsoburon/duct/core/governance"
+	"github.com/alonsoburon/duct/core/notebooks"
 	"github.com/alonsoburon/duct/core/project"
 	"github.com/alonsoburon/duct/core/registry"
 	"github.com/alonsoburon/duct/core/semantic"
@@ -28,6 +29,8 @@ type serveOptions struct {
 	Listen    map[string]string // protocol -> address
 	NoJobs    bool              // do not run the jobs/ orchestrator in this process
 	NoStream  bool              // do not run [stream] / [alerts] in this process (embedded server of `duct notebook`)
+	// NotebookLauncher replaces the marimo launcher of the web console's notebooks (tests).
+	NotebookLauncher notebooks.Launcher
 	// Ready is called once every protocol is bound, with protocol -> address.
 	Ready func(addrs map[string]string)
 }
@@ -238,6 +241,8 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	}
 	mountOperability(p, eng, handler, auth, byName)  // /admin/v1, /readyz, DB-backed metrics
 	jobsHolder := wireConsole(p, eng, handler, auth) // web console: admin API and jobs (console.go)
+	// web console: notebooks, one marimo process per user (notebooks_serve.go)
+	defer wireNotebooks(p, handler, auth, eng, httpURLOf(p, names, protocols), byName["web"] != nil, opt.NotebookLauncher)()
 	if opt.Ready != nil {
 		addrs := map[string]string{}
 		for i, proto := range protocols {
@@ -254,6 +259,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	if err != nil {
 		return fmt.Errorf("jobs: %w", err)
 	}
+	mlflowSyncDone := startMLflowSync(sctx, p) // [mlflow] sync = true
 	semanticDone := startSemantic(sctx, p, live, handler)
 	functionsDone := startFunctionsReload(sctx, p, udfs, handler)
 	streamingDone := func() error { return nil }
@@ -286,6 +292,7 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	wg.Wait()
 	cancel()
 	semanticDone()
+	mlflowSyncDone()
 	functionsDone()
 	<-jobsDone // running tasks are cancelled and recorded before the engine closes
 	if err := streamingDone(); err != nil && firstErr == nil {

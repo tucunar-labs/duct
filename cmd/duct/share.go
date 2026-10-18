@@ -170,11 +170,13 @@ func dropWord(pos []string, word string) []string {
 	return pos
 }
 
-// cmdShare is `duct share create|list|add|remove|drop|grant|revoke|refresh|gc`.
+// cmdShare is `duct share create|list|add|history|remove|drop|grant|revoke|refresh|gc`.
 func cmdShare(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs, dir := newFlags("share", stderr)
 	as := fs.String("as", "", "add: name of the table inside the share (default: the table name)")
 	pfilter := fs.String("partition-filter", "", "add: predicate every recipient's copy of the table must satisfy")
+	history := fs.Bool("history", false, "add: keep the versions of the table (time travel and change data feed)")
+	histOff := fs.Bool("off", false, "history: turn the history of the table off")
 	table := fs.String("table", "", "grant: table (alias) the --row-filter / --mask apply to")
 	rowFilter := fs.String("row-filter", "", "grant: predicate over the table's columns limiting the recipient's rows")
 	masks := maskFlags{}
@@ -184,7 +186,7 @@ func cmdShare(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	if len(pos) == 0 {
-		return usageErr("share needs a subcommand: create <share> | list | add <share> <schema.table> | remove <share> <table> | drop <share> | grant <share> to <recipient> | revoke <share> from <recipient> | refresh [share] | gc")
+		return usageErr("share needs a subcommand: create <share> | list | add <share> <schema.table> | remove <share> <table> | history <share> <table> [--off] | drop <share> | grant <share> to <recipient> | revoke <share> from <recipient> | refresh [share] | gc")
 	}
 	p, st, eng, done, err := shareSession(ctx, *dir)
 	if err != nil {
@@ -204,13 +206,36 @@ func cmdShare(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return nil
 	case "add":
 		if len(pos) != 3 {
-			return usageErr("share add <share> <schema.table> [--as alias] [--partition-filter expr]")
+			return usageErr("share add <share> <schema.table> [--as alias] [--partition-filter expr] [--history]")
 		}
 		if err := st.AddTable(ctx, pos[1], pos[2], *as, *pfilter); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(stdout, "share %s: added %s\n", pos[1], pos[2])
+		if *history {
+			alias := *as
+			if alias == "" {
+				_, alias, _ = strings.Cut(pos[2], ".")
+			}
+			if err := st.SetHistory(ctx, pos[1], strings.ToLower(alias), true); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(stdout, "share %s: history on for %s\n", pos[1], alias)
+		}
 		return regen(ctx, gov, stdout)
+	case "history":
+		if len(pos) != 3 {
+			return usageErr("share history <share> <table> [--off]")
+		}
+		if err := st.SetHistory(ctx, pos[1], strings.ToLower(pos[2]), !*histOff); err != nil {
+			return err
+		}
+		if *histOff {
+			_, _ = fmt.Fprintf(stdout, "share %s: history off for %s (retained versions forgotten; `duct share gc` frees their files)\n", pos[1], pos[2])
+		} else {
+			_, _ = fmt.Fprintf(stdout, "share %s: history on for %s (versions and the change feed start from the next change)\n", pos[1], pos[2])
+		}
+		return nil
 	case "remove":
 		if len(pos) != 3 {
 			return usageErr("share remove <share> <table>")
@@ -273,7 +298,18 @@ func cmdShare(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		h := governance.NewHandler(eng, governance.HandlerOptions{Timeout: 30 * time.Minute})
 		defer func() { _ = h.Close() }()
-		svc := sharing.NewService(eng, h.ForProtocol("sharing"), files, sharing.Options{})
+		scfg := p.Config.Serve.Modules[sharingConfigKey]
+		keep, err := sharing.KeepVersionsFrom(scfg)
+		if err != nil {
+			return err
+		}
+		opt := sharing.Options{KeepVersions: keep}
+		if g, _ := scfg["grace"].(string); g != "" {
+			if opt.Grace, err = time.ParseDuration(g); err != nil || opt.Grace <= 0 {
+				return fmt.Errorf("[serve.sharing] grace %q is not a positive duration (e.g. 1h)", g)
+			}
+		}
+		svc := sharing.NewService(eng, h.ForProtocol("sharing"), files, opt)
 		if pos[0] == "gc" {
 			n, err := svc.GC(ctx)
 			if err != nil {
@@ -307,6 +343,9 @@ func shareList(ctx context.Context, st *sharing.Store, stdout io.Writer) error {
 			}
 			if t.PartitionFilter != "" {
 				_, _ = fmt.Fprintf(stdout, "  where %s", t.PartitionFilter)
+			}
+			if t.History {
+				_, _ = fmt.Fprint(stdout, "  [history]")
 			}
 			_, _ = fmt.Fprintln(stdout)
 		}

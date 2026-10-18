@@ -1,0 +1,432 @@
+package web
+
+import (
+	"net/url"
+	"strconv"
+
+	contract "github.com/alonsoburon/duct/core/contract/v1"
+)
+
+// ---- helpers ----
+
+func nbURL(name string, rest ...string) string {
+	u := "/notebooks/" + url.PathEscape(name)
+	for _, r := range rest {
+		u += "/" + r
+	}
+	return u
+}
+
+// nbSignals are the page's Datastar signals: _csrf stays in the browser, the
+// comment draft goes with each comment POST.
+type nbSignals struct {
+	CSRF string `json:"_csrf"`
+	Ref  string `json:"cref"`
+	Body string `json:"cbody"`
+}
+
+func actionLabel(a string) string {
+	switch a {
+	case "baseline":
+		return "Versión inicial"
+	case "save":
+		return "Guardado"
+	case "create":
+		return "Creado"
+	case "restore":
+		return "Restaurado"
+	case "rename":
+		return "Renombrado"
+	case "delete":
+		return "Eliminado"
+	case "external":
+		return "Cambio externo"
+	}
+	return a
+}
+
+func ordinalLabel(i, n int) string { return "#" + strconv.Itoa(n-i) }
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return strconv.Itoa(n) + " " + many
+}
+
+func authorLabel(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+func diffClass(op byte) string {
+	switch op {
+	case '+':
+		return "bg-success-bg text-success"
+	case '-':
+		return "bg-danger-bg text-danger"
+	case '@':
+		return "bg-surface2 text-muted italic"
+	}
+	return "text-ink"
+}
+
+func diffMark(op byte) string {
+	switch op {
+	case '+', '-':
+		return string(op)
+	}
+	return " "
+}
+
+func openComments(cs []contract.NotebookComment) (open, done []contract.NotebookComment) {
+	for _, c := range cs {
+		if c.Resolved {
+			done = append(done, c)
+		} else {
+			open = append(open, c)
+		}
+	}
+	return open, done
+}
+
+// ---- list ----
+
+templ notebooksPage(p pageData, v notebooksView) {
+	@layout(p) {
+		<div class="mx-auto max-w-6xl space-y-4">
+			<div class="flex flex-wrap items-baseline justify-between gap-2">
+				<div>
+					<h1 class="text-xl font-semibold">Notebooks</h1>
+					<p class="text-sm text-muted">marimo conectado a Duct: tus consultas corren con tu rol, nunca con credenciales del lago</p>
+				</div>
+				<div class="flex items-center gap-2">
+					<span class="badge badge-muted">{ plural(len(v.Notebooks), "notebook", "notebooks") }</span>
+					if !v.CanEdit {
+						<span class="badge badge-muted" title="Tu rol puede ejecutar y comentar; editar requiere un rol de [notebooks] editors">solo ejecución</span>
+					}
+				</div>
+			</div>
+			@flashBanner(v.Flash)
+			if v.CanEdit && v.Err == "" {
+				<form method="post" action="/notebooks" class="card-flat flex flex-wrap items-end gap-2 p-3">
+					@hiddenCSRF(v.CSRF)
+					<label class="block">
+						<span class="label">Nuevo notebook</span>
+						<input name="name" type="text" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,63}" placeholder="ventas_mensuales" class="input w-64" autocomplete="off"/>
+					</label>
+					<button type="submit" class="btn btn-primary">
+						@icon("plus", "h-3.5 w-3.5")
+						Crear desde plantilla
+					</button>
+					<p class="text-xs text-muted">Letras, dígitos, - o _. La plantilla ya se conecta con <span class="font-mono">duct.connect()</span>.</p>
+				</form>
+			}
+			if v.Err != "" {
+				<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+			} else if len(v.Notebooks) == 0 {
+				@emptyState("notebooks", "No hay notebooks", "Los notebooks son archivos marimo en notebooks/*.py del proyecto. Crea uno con la plantilla o copia tus .py ahí.")
+			} else {
+				<div class="card overflow-x-auto">
+					<table class="data-table">
+						<thead>
+							<tr>
+								<th scope="col">Notebook</th>
+								<th scope="col">Modificado</th>
+								<th scope="col">Creado por</th>
+								<th scope="col">Último editor</th>
+								<th scope="col">Versiones</th>
+								<th scope="col">Comentarios</th>
+								<th scope="col">Estado</th>
+								<th scope="col"><span class="sr-only">Acciones</span></th>
+							</tr>
+						</thead>
+						<tbody>
+							for _, n := range v.Notebooks {
+								<tr>
+									<td><a href={ templ.URL(nbURL(n.Name)) } class="font-medium text-brand-strong hover:underline">{ n.Name }</a></td>
+									<td><span title={ fmtTime(n.Modified) + " UTC" }>{ relTime(n.Modified, v.Now) }</span></td>
+									<td>{ authorLabel(n.Creator) }</td>
+									<td>{ authorLabel(n.LastEditor) }</td>
+									<td>{ strconv.Itoa(n.Versions) }</td>
+									<td>
+										if n.Comments > 0 {
+											<span class="badge badge-info">{ strconv.Itoa(n.Comments) } abiertos</span>
+										} else {
+											<span class="text-muted">—</span>
+										}
+									</td>
+									<td>
+										if n.LockedBy != "" {
+											<span class="badge badge-warn" title="Edición exclusiva: los demás lo ven en modo ejecución">Editando: { n.LockedBy }</span>
+										} else {
+											<span class="badge badge-success">Libre</span>
+										}
+									</td>
+									<td>
+										<div class="flex items-center justify-end gap-1.5">
+											if n.CanEdit {
+												<a href={ templ.URL(nbURL(n.Name)) } class="btn btn-secondary btn-sm">Editar</a>
+												<a href={ templ.URL(nbURL(n.Name, "history")) } class="btn btn-ghost btn-sm">Historial</a>
+											} else {
+												<a href={ templ.URL(nbURL(n.Name)) } class="btn btn-secondary btn-sm">Abrir</a>
+											}
+										</div>
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			}
+		</div>
+	}
+}
+
+// ---- the notebook page: marimo embedded + comments ----
+
+templ notebookPage(p pageData, v notebookView) {
+	@layout(p) {
+		<div class="flex h-full min-h-0 flex-col gap-3" data-signals={ templ.JSONString(nbSignals{CSRF: v.CSRF}) }>
+			<div class="card-flat flex flex-none flex-wrap items-center gap-2 p-2">
+				<span class="font-mono text-sm font-medium">{ v.Info.Name }</span>
+				switch v.Mode {
+					case "edit":
+						<span class="badge badge-brand" title="Estás editando: nadie más puede editar este archivo mientras tanto">Edición</span>
+					case "run":
+						<span class="badge badge-muted" title="El código está oculto; ejecutas el notebook con tu rol">Solo ejecución</span>
+				}
+				<span class="ml-auto flex flex-wrap items-center gap-1.5">
+					if v.CanEdit {
+						if v.Mode == "run" && v.LockedBy == "" {
+							<a href={ templ.URL(nbURL(v.Info.Name) + "?mode=edit") } class="btn btn-secondary btn-sm">Editar</a>
+						}
+						if v.Mode == "edit" {
+							<a href={ templ.URL(nbURL(v.Info.Name) + "?mode=run") } class="btn btn-ghost btn-sm">Ver como ejecución</a>
+						}
+						<a href={ templ.URL(nbURL(v.Info.Name, "history")) } class="btn btn-ghost btn-sm">
+							@icon("history", "h-3.5 w-3.5")
+							Historial
+						</a>
+						<details class="relative">
+							<summary class="btn btn-ghost btn-sm cursor-pointer list-none">Renombrar</summary>
+							<form method="post" action={ templ.URL(nbURL(v.Info.Name, "rename")) } class="absolute right-0 z-20 mt-1 w-72 space-y-2 rounded-lg border border-line bg-surface p-3 shadow-lg">
+								@hiddenCSRF(v.CSRF)
+								<label class="block">
+									<span class="label">Nuevo nombre</span>
+									<input name="to" type="text" required value={ v.Info.Name } pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,63}" class="input" autocomplete="off"/>
+								</label>
+								<p class="whitespace-normal text-xs text-muted">Cierra tu sesión de edición; el historial y los comentarios se mudan con el notebook. Falla si otro usuario lo está editando.</p>
+								<button type="submit" class="btn btn-secondary btn-sm w-full">Renombrar</button>
+							</form>
+						</details>
+					}
+					if v.Admin {
+						<details class="relative">
+							<summary class="btn btn-ghost btn-sm cursor-pointer list-none text-danger">Eliminar</summary>
+							<form method="post" action={ templ.URL(nbURL(v.Info.Name, "delete")) } class="absolute right-0 z-20 mt-1 w-72 space-y-2 rounded-lg border border-line bg-surface p-3 shadow-lg">
+								@hiddenCSRF(v.CSRF)
+								<p class="whitespace-normal text-xs text-muted">Se borra el archivo notebooks/{ v.Info.Name }.py. El historial y los comentarios se conservan: una versión se puede restaurar después.</p>
+								<button type="submit" class="btn btn-danger btn-sm w-full">Confirmar eliminación</button>
+							</form>
+						</details>
+					}
+				</span>
+			</div>
+			@flashBanner(v.Flash)
+			if v.LockedBy != "" {
+				<p role="status" class="flex flex-none items-start gap-2 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-warn">
+					@icon("alert", "mt-0.5 h-4 w-4 flex-none")
+					<span>Solo lectura: <strong>{ v.LockedBy }</strong> está editando este notebook. Lo ves en modo ejecución (con la versión guardada); podrás editar cuando termine o se quede inactivo.</span>
+				</p>
+			}
+			if v.Err != "" {
+				<p role="alert" class="flex flex-none items-start gap-2 rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">
+					@icon("alert", "mt-0.5 h-4 w-4 flex-none")
+					<span class="whitespace-pre-wrap break-words">{ v.Err }</span>
+				</p>
+			}
+			<div class="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+				<div class="card-flat min-h-[24rem] min-w-0 flex-1 overflow-hidden">
+					if v.Src != "" {
+						<iframe src={ v.Src } title={ "Notebook " + v.Info.Name } class="h-full w-full border-0 bg-surface" allow="clipboard-read; clipboard-write"></iframe>
+					} else {
+						<div class="p-6">
+							@emptyState("notebooks", "No se pudo abrir", "Revisa el mensaje de arriba. Si marimo no está instalado, agrega duct-data[marimo] al entorno de Python del proyecto.")
+						</div>
+					}
+				</div>
+				<aside class="flex max-h-[40vh] min-h-0 flex-none flex-col lg:max-h-none lg:w-80" aria-label="Comentarios del notebook">
+					@commentsPanel(v)
+				</aside>
+			</div>
+		</div>
+	}
+}
+
+templ commentsPanel(v notebookView) {
+	<section id="nb-comments" class="card-flat flex min-h-0 flex-1 flex-col">
+		{{ open, done := openComments(v.Comments) }}
+		<div class="flex flex-none items-center justify-between border-b border-line px-3 py-2">
+			<h2 class="text-sm font-semibold">Comentarios</h2>
+			<span class="badge badge-muted">{ strconv.Itoa(len(open)) } abiertos</span>
+		</div>
+		<div class="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+			if v.Err != "" {
+				<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+			}
+			if len(v.Comments) == 0 {
+				<p class="text-sm text-muted">Aún no hay comentarios. Anota dudas, revisiones o pendientes del notebook.</p>
+			}
+			for _, c := range open {
+				@commentItem(v, c)
+			}
+			if len(done) > 0 {
+				<details>
+					<summary class="cursor-pointer text-xs text-muted">Resueltos ({ strconv.Itoa(len(done)) })</summary>
+					<div class="mt-2 space-y-2">
+						for _, c := range done {
+							@commentItem(v, c)
+						}
+					</div>
+				</details>
+			}
+		</div>
+		<form class="flex-none space-y-2 border-t border-line p-3" data-on:submit__prevent={ "@post('" + nbURL(v.Info.Name, "comments") + "', {headers: {'X-CSRF-Token': $_csrf}})" }>
+			<input data-bind:cref type="text" maxlength="80" placeholder="Celda o referencia (opcional)" aria-label="Celda o referencia" class="input"/>
+			<textarea data-bind:cbody rows="3" maxlength="4000" required placeholder="Escribe un comentario…" aria-label="Comentario" class="input"></textarea>
+			<button type="submit" class="btn btn-primary btn-sm w-full">Comentar</button>
+		</form>
+	</section>
+}
+
+templ commentItem(v notebookView, c contract.NotebookComment) {
+	<article class={ "rounded-lg border border-line p-2 text-sm", templ.KV("opacity-70", c.Resolved) } id={ "nb-comment-" + strconv.FormatInt(c.ID, 10) }>
+		<header class="flex flex-wrap items-center gap-1.5 text-xs text-muted">
+			<strong class="text-ink">{ c.Author }</strong>
+			<span title={ fmtTime(c.At) + " UTC" }>{ relTime(c.At, v.Now) }</span>
+			if c.Ref != "" {
+				<span class="badge badge-muted">{ c.Ref }</span>
+			}
+		</header>
+		<p class="mt-1 whitespace-pre-wrap break-words">{ c.Body }</p>
+		<footer class="mt-1.5 flex items-center justify-between gap-2 text-xs">
+			if c.Resolved {
+				<span class="text-muted">Resuelto por { c.ResolvedBy }</span>
+				if v.CanEdit || c.Author == v.Me {
+					<button type="button" class="btn btn-ghost btn-sm" data-on:click={ "@post('" + nbURL(v.Info.Name, "comments", strconv.FormatInt(c.ID, 10), "reopen") + "', {headers: {'X-CSRF-Token': $_csrf}})" }>Reabrir</button>
+				}
+			} else if v.CanEdit || c.Author == v.Me {
+				<span></span>
+				<button type="button" class="btn btn-secondary btn-sm" data-on:click={ "@post('" + nbURL(v.Info.Name, "comments", strconv.FormatInt(c.ID, 10), "resolve") + "', {headers: {'X-CSRF-Token': $_csrf}})" }>Resolver</button>
+			}
+		</footer>
+	</article>
+}
+
+// ---- history ----
+
+templ historyPage(p pageData, v historyView) {
+	@layout(p) {
+		<div class="mx-auto max-w-5xl space-y-4">
+			<div class="flex flex-wrap items-baseline justify-between gap-2">
+				<div>
+					<h1 class="text-xl font-semibold">Historial de <span class="font-mono">{ v.Name }</span></h1>
+					<p class="text-sm text-muted">Cada guardado de marimo queda como una versión (hash, autor, hora, líneas cambiadas). Restaurar crea una versión nueva: nada se pierde.</p>
+				</div>
+				<a href={ templ.URL(nbURL(v.Name)) } class="btn btn-secondary btn-sm">Volver al notebook</a>
+			</div>
+			@flashBanner(v.Flash)
+			if v.Locked != "" {
+				<p role="status" class="rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-warn">{ v.Locked } está editando este notebook: no se puede restaurar hasta que termine.</p>
+			}
+			if v.Err != "" {
+				<p role="alert" class="rounded-lg border border-danger/40 bg-danger-bg px-3 py-2 text-sm text-danger">{ v.Err }</p>
+			} else if len(v.Versions) == 0 {
+				@emptyState("history", "Sin versiones", "Se registran al abrir el notebook en modo edición y con cada guardado.")
+			} else {
+				<div class="card overflow-x-auto">
+					<table class="data-table">
+						<thead>
+							<tr>
+								<th scope="col">Versión</th>
+								<th scope="col">Fecha (UTC)</th>
+								<th scope="col">Autor</th>
+								<th scope="col">Acción</th>
+								<th scope="col">Cambios</th>
+								<th scope="col">Tamaño</th>
+								<th scope="col">Hash</th>
+								<th scope="col"><span class="sr-only">Acciones</span></th>
+							</tr>
+						</thead>
+						<tbody>
+							for i, ver := range v.Versions {
+								<tr>
+									<td class="font-mono">{ ordinalLabel(i, len(v.Versions)) }</td>
+									<td><span title={ relTime(ver.At, v.Now) }>{ fmtTime(ver.At) }</span></td>
+									<td>{ ver.Author }</td>
+									<td>
+										{ actionLabel(ver.Action) }
+										if ver.RestoredFrom > 0 {
+											<span class="text-xs text-muted">(de otra versión)</span>
+										}
+									</td>
+									<td>
+										<span class="text-success">+{ strconv.Itoa(ver.Added) }</span>
+										<span class="text-danger">−{ strconv.Itoa(ver.Removed) }</span>
+									</td>
+									<td>{ strconv.FormatInt(ver.Size, 10) } B</td>
+									<td class="font-mono text-xs text-muted" title={ ver.Hash }>{ ver.Hash[:10] }</td>
+									<td>
+										<div class="flex items-center justify-end gap-1.5">
+											<a href={ templ.URL(nbURL(v.Name, "history") + "?to=" + strconv.FormatInt(ver.ID, 10)) } class="btn btn-ghost btn-sm">Ver cambios</a>
+											<a href={ templ.URL(nbURL(v.Name, "history") + "?from=" + strconv.FormatInt(ver.ID, 10)) } class="btn btn-ghost btn-sm" title="Qué cambió desde esta versión hasta hoy">Comparar con actual</a>
+											<details class="relative">
+												<summary class="btn btn-secondary btn-sm cursor-pointer list-none">Restaurar</summary>
+												<form method="post" action={ templ.URL(nbURL(v.Name, "restore")) } class="absolute right-0 z-10 mt-1 w-64 space-y-2 rounded-lg border border-line bg-surface p-3 shadow-lg">
+													@hiddenCSRF(v.CSRF)
+													<input type="hidden" name="version" value={ strconv.FormatInt(ver.ID, 10) }/>
+													<p class="whitespace-normal text-xs text-muted">El archivo vuelve a esta versión; el estado actual queda guardado como versión.</p>
+													<button type="submit" class="btn btn-danger btn-sm w-full">Confirmar restauración</button>
+												</form>
+											</details>
+										</div>
+									</td>
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			}
+			if v.ShowDiff {
+				<div class="card-flat overflow-hidden">
+					<div class="border-b border-line px-3 py-2 text-sm font-semibold">
+						if v.DiffTo == 0 {
+							Cambios desde la versión elegida hasta el archivo actual
+						} else if v.DiffFrom == 0 {
+							Cambios de la versión elegida respecto de la anterior
+						} else {
+							Comparación de dos versiones
+						}
+					</div>
+					if v.DiffErr != "" {
+						<p role="alert" class="px-3 py-2 text-sm text-danger">{ v.DiffErr }</p>
+					} else if len(v.Diff) == 0 {
+						<p class="px-3 py-2 text-sm text-muted">Sin diferencias.</p>
+					} else {
+						<div class="overflow-x-auto py-1 font-mono text-xs" role="region" aria-label="Diferencias" tabindex="0">
+							for _, l := range v.Diff {
+								<div class={ "flex whitespace-pre px-3 leading-5", diffClass(l.Op) }>
+									<span class="w-4 flex-none select-none" aria-hidden="true">{ diffMark(l.Op) }</span>
+									<span>{ l.Text }</span>
+								</div>
+							}
+						</div>
+					}
+				</div>
+			}
+		</div>
+	}
+}

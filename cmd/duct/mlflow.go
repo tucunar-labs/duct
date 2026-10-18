@@ -96,6 +96,16 @@ func createMLflowSchema(ctx context.Context, p *project.Project) error {
 // cmdMLflow is `duct mlflow`: `mlflow server` on loopback with the metadata in the
 // catalog database and the artifacts under <lake>/_mlflow.
 func cmdMLflow(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "sync":
+			return cmdMLflowSync(ctx, args[1:], stdout, stderr)
+		case "serve-model":
+			return cmdServeModel(ctx, args[1:], stdout, stderr)
+		default:
+			return usageErr("unknown mlflow command %q (sync, serve-model; no command runs the MLflow server)", args[0])
+		}
+	}
 	fs, dir := newFlags("mlflow", stderr)
 	printOnly := fs.Bool("print", false, "print the command and the non-secret settings, do not start anything")
 	if err := parse(fs, args); err != nil {

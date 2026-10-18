@@ -89,6 +89,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /dashboards/{name}", a.authed(a.dashView))
 	mux.HandleFunc("POST /dashboards/{name}/data", a.authed(a.dashData))
 	a.jobsRoutes(mux)
+	a.notebooksRoutes(mux)
 	a.adminRoutes(mux)
 	return securityHeaders(sameOrigin(mux))
 }
@@ -99,6 +100,14 @@ func (a *app) routes() http.Handler {
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
+		if isNBPath(r.URL.Path) { // the embedded marimo: its own policy, set by notebookProxy
+			h.Set("Content-Security-Policy", nbCSP)
+			h.Set("X-Frame-Options", "SAMEORIGIN")
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("Referrer-Policy", "same-origin")
+			next.ServeHTTP(w, r)
+			return
+		}
 		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
@@ -296,6 +305,9 @@ func logUser(u string) string {
 }
 
 func (a *app) logout(w http.ResponseWriter, r *http.Request, sess session) {
+	if c, ok := a.notebooksConsole(); ok { // the user's marimo processes die with the session
+		c.StopNotebooks(r.Context(), sess.who.User)
+	}
 	a.store.revoke(sess)
 	a.setCookie(w, r, sessionCookie, "", -1)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)

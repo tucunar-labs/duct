@@ -1,5 +1,8 @@
 # notebook
 
+- **Not the console's notebooks:** the Notebooks section of the web console (edit mode, history, comments) is
+  `core/notebooks` + `modules/web` (ADR 0006, "Implementado 2026-10-18"). This protocol is the older, run-only mount with its
+  own loopback listener and one shared identity; it stays for deployments that want notebooks without the console.
 - **Purpose:** `Protocol` of `duct serve` that serves the project's marimo notebooks (ADR 0006)
   as a web app, behind Duct authentication. Not started by default: name it in
   `[serve].protocols` or `--protocols`.

@@ -253,6 +253,14 @@ func (r *Registry) WriteText(w io.Writer) {
 	}
 }
 
+// WriteCollectors renders only the given collectors (a server's own series).
+func WriteCollectors(w io.Writer, collectors []func(*Writer)) {
+	cw := &Writer{w: w, seen: map[string]bool{}}
+	for _, c := range collectors {
+		c(cw)
+	}
+}
+
 func (f *family) write(w io.Writer) {
 	f.mu.Lock()
 	rows := make([]series, 0, len(f.series))

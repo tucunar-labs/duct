@@ -17,9 +17,9 @@
   `dashboards_dir` (folder with `dashboards/*.yaml`; `duct serve` passes `<project>/dashboards`; unset: none).
 - **Routes:** `/login` (GET/POST), `/logout` (POST), `/catalog`, `/catalog/{schema}/{table}`,
   `/sql`, `GET /catalog.json` (role-visible schemas/tables/columns for drag & drop and autocompletion), `POST /sql/run` (Datastar SSE), `/dashboards`, `/dashboards/{name}`,
-  `POST /dashboards/{name}/data` (SSE), `/jobs...`, `/admin...` (below), `/static/*`.
+  `POST /dashboards/{name}/data` (SSE), `/jobs...`, `/notebooks...` and `/nb/...` (below), `/admin...` (below), `/static/*`.
 - **Shell:** server-rendered frame (templ) with a collapsible sidebar (Catalog, SQL editor,
-  Dashboards, Trabajos, Admin — Admin only for role `duct_admin`), breadcrumbs, a user
+  Dashboards, Notebooks, Trabajos, Admin — Admin only for role `duct_admin`), breadcrumbs, a user
   menu and a light/dark/system toggle. The `static/shell.js` island (a classic script loaded in
   `<head>` so the theme applies before first paint) persists the theme and sidebar in
   `localStorage`, filters the schema trees client-side, drives the tabs and the editor/results
@@ -54,6 +54,15 @@
   checks and audits again). The DAG is a server-rendered SVG layered graph (`layoutDAG`): no xyflow, no JS;
   nodes link to the task row (`#task-<id>`). Cron wording is `humanSchedule` (anything unknown shows
   as "Cron: ..."). Run ids are shown shortened (`runLabel`); the full id is the URL.
+- **Notebooks (`notebooks.go`, `notebooks.templ`; ADR 0006):** `/notebooks` (list, create form for editor roles),
+  `/notebooks/{name}` (marimo embedded in an `<iframe>` + comments side panel; `?mode=run|edit`), `.../history` (+ diff via
+  `?to=`/`?from=`), POSTs `.../rename|delete|restore`, Datastar POSTs `.../comments` and `.../comments/{id}/resolve|reopen`.
+  Everything comes through the OPTIONAL `contract.NotebooksConsole` (`core/notebooks` does the authorization — editor roles,
+  admin-only delete, the per-file lock — and `core/governance` audits). `/nb/{mode}/{name}/...` is a reverse proxy
+  (`httputil.ReverseProxy`, http AND websocket) to the user's own marimo process: needs a session cookie but no CSRF token
+  (marimo sends none), refuses cross-site `Sec-Fetch-Site`/`Origin` (upgrades too), 403 before the upgrade without session,
+  strips the browser's `Cookie`/`Authorization`/`Referer`, injects marimo's password and drops its `Set-Cookie`/CSP/CORS. `/nb/`
+  has its own CSP (`nbCSP`, `frame-ancestors 'self'`); everything else keeps the strict one. Logout stops the user's processes.
 - **Admin (`admin.go`, `admin.templ`):** `/admin` (status), `/admin/users`, `/admin/roles[/{role}]`
   (grants, row filters, masks, quota), `/admin/tokens`, `/admin/audit` (filters + pagination). 403 page for
   non-admins on every verb. Reads and changes go through the OPTIONAL `contract.AdminCaller` (the same code
@@ -100,5 +109,6 @@
   (fake SemanticQuerier: render, filters, cross-filter, cache by snapshot/role, role without access, LRU); `console_test.go`
   (fake JobsConsole/AdminCaller/AuditReader: read-only jobs for non-admins, 403 on actions and /admin, CSRF, actions reach the core,
   secrets shown once and not to another session, governance errors with draft, audit filters/paging, cron wording, DAG layout, SSE) and
-  `cmd/duct/console_test.go` (`TestE2EWebConsole` against a real `duct serve`).
-- **Status:** experimental (M5 web + dashboards + Jobs/Admin; no notebooks yet).
+  `cmd/duct/console_test.go` (`TestE2EWebConsole` against a real `duct serve`), `cmd/duct/notebooks_console_test.go`
+  (`TestNotebooksConsole` with a fake marimo, `TestNotebooksIdle`, `TestNotebooksMarimo` with the real one).
+- **Status:** experimental (M5 web + dashboards + Jobs/Admin + Notebooks).

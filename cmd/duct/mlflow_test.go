@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -187,5 +188,186 @@ duct.mlflow.score(
 	if got != "i,s\n0,10\n1,12\n2,14" {
 		t.Fatalf("score: %q", got)
 	}
+
+	mlflowSyncStage(t, root, py, addr)
+	mlflowServeStage(t, root, py, addr)
 	stop()
+}
+
+// runPy runs a Python snippet with the tracking URI of `duct mlflow`.
+func runPy(t *testing.T, root, py, addr, code string) {
+	t.Helper()
+	cmd := exec.Command(py, "-c", code)
+	cmd.Dir = filepath.Join(root, ".duct")
+	cmd.Env = append(os.Environ(), "MLFLOW_TRACKING_URI=http://"+addr)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("python: %v\n%s", err, b)
+	}
+}
+
+// mlflowSyncStage: `duct mlflow sync` copies experiments, runs, params, tags and metrics to
+// Bronze; a second pass copies nothing; later runs and a run that finishes are picked up
+// without duplicates; --full is idempotent too.
+func mlflowSyncStage(t *testing.T, root, py, addr string) {
+	t.Helper()
+	// Cold start: demo has one run (auc, alpha); the model registry also logged its own rows.
+	out := mustDuct(t, "mlflow", "sync", "--project", root)
+	if !strings.Contains(out, "runs=1") || !strings.Contains(out, "metrics=1") || !strings.Contains(out, "params=1") {
+		t.Fatalf("first sync: %q", out)
+	}
+	if got := queryCSV(t, root, "SELECT key, value FROM bronze.mlflow_metrics"); got != "key,value\nauc,0.91" {
+		t.Fatalf("bronze.mlflow_metrics: %q", got)
+	}
+	if got := queryCSV(t, root, "SELECT e.name, r.status, p.key FROM bronze.mlflow_runs r JOIN bronze.mlflow_experiments e USING (experiment_id) JOIN bronze.mlflow_params p USING (run_uuid)"); got != "name,status,key\ndemo,FINISHED,alpha" {
+		t.Fatalf("bronze join: %q", got)
+	}
+	if out := mustDuct(t, "mlflow", "sync", "--project", root); !strings.Contains(out, "experiments=0 runs=0 params=0 tags=0 metrics=0") {
+		t.Fatalf("second sync must copy nothing: %q", out)
+	}
+	snap := queryCSV(t, root, "SELECT max(snapshot_id) FROM ducklake_snapshots('lake')")
+	mustDuct(t, "mlflow", "sync", "--project", root)
+	if got := queryCSV(t, root, "SELECT max(snapshot_id) FROM ducklake_snapshots('lake')"); got != snap {
+		t.Fatalf("a no-op sync committed a snapshot: %s -> %s", snap, got)
+	}
+
+	// New run with 3 metric points and a tag, plus a run left RUNNING.
+	runPy(t, root, py, addr, `
+import mlflow
+from mlflow import MlflowClient
+mlflow.set_experiment("demo")
+with mlflow.start_run():
+    mlflow.log_param("alpha", 0.7)
+    mlflow.set_tag("team", "a")
+    for step, v in enumerate([0.5, 0.6, 0.7]):
+        mlflow.log_metric("loss", v, step=step)
+c = MlflowClient()
+r = c.create_run(mlflow.get_experiment_by_name("demo").experiment_id, run_name="long")
+c.log_param(r.info.run_id, "alpha", 0.9)
+open("run_id.txt", "w").write(r.info.run_id)
+`)
+	out = mustDuct(t, "mlflow", "sync", "--project", root)
+	if !strings.Contains(out, "runs=2") || !strings.Contains(out, "metrics=3") || !strings.Contains(out, "tags=") {
+		t.Fatalf("incremental sync: %q", out)
+	}
+	if got := queryCSV(t, root, "SELECT count(*) FROM bronze.mlflow_runs"); got != "count_star()\n3" {
+		t.Fatalf("runs after incremental sync: %q", got)
+	}
+	// The long run finishes and a tag changes: runs is updated in place, not duplicated.
+	runPy(t, root, py, addr, `
+from mlflow import MlflowClient
+c = MlflowClient()
+rid = open("run_id.txt").read()
+c.set_tag(rid, "team", "b")
+c.log_metric(rid, "auc", 0.99)
+c.set_terminated(rid, "FINISHED")
+`)
+	mustDuct(t, "mlflow", "sync", "--project", root)
+	if got := queryCSV(t, root, "SELECT status, count(*) AS n FROM bronze.mlflow_runs GROUP BY status ORDER BY status"); got != "status,n\nFINISHED,3" {
+		t.Fatalf("run statuses: %q", got)
+	}
+	if got := queryCSV(t, root, "SELECT value FROM bronze.mlflow_tags WHERE key = 'team' ORDER BY value"); got != "value\na\nb" {
+		t.Fatalf("tags: %q", got)
+	}
+	if got := queryCSV(t, root, "SELECT count(*) FROM bronze.mlflow_metrics"); got != "count_star()\n5" {
+		t.Fatalf("metrics: %q", got)
+	}
+	// Identical to the source, and --full repeats nothing.
+	if got := queryCSV(t, root, "SELECT (SELECT count(*) FROM mlflow.metrics) = (SELECT count(*) FROM bronze.mlflow_metrics) AND (SELECT count(*) FROM mlflow.runs) = (SELECT count(*) FROM bronze.mlflow_runs) AS same"); got != "same\ntrue" {
+		t.Fatalf("bronze differs from mlflow: %q", got)
+	}
+	if out := mustDuct(t, "mlflow", "sync", "--full", "--project", root); !strings.Contains(out, "experiments=0 runs=0 params=0 tags=0 metrics=0") {
+		t.Fatalf("--full on a synced lake: %q", out)
+	}
+}
+
+// syncBuf is a goroutine-safe buffer.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+// mlflowServeStage: `duct mlflow serve-model` + the proxy of `duct serve` with the real
+// `mlflow models serve`: 200 with the right role, 401 without a token, 403 with another
+// role, and the periodic sync of `[mlflow] sync = true` inside serve.
+func mlflowServeStage(t *testing.T, root, py, addr string) {
+	t.Helper()
+	port := freePort(t)
+	port = port[strings.LastIndex(port, ":")+1:]
+	cfg, _ := os.ReadFile(filepath.Join(root, "duct.toml"))
+	writeFile(t, filepath.Join(root, "duct.toml"), string(cfg)+"\nsync = true\nsync_interval = \"10s\"\n[mlflow.serving]\nroles = [\"scoring\"]\n[mlflow.serving.models.churn]\nport = "+port+"\n")
+	mustDuct(t, "role", "create", "scoring", "--project", root)
+	mustDuct(t, "role", "create", "otro", "--project", root)
+	mustDuct(t, "user", "create", "sam", "--role", "scoring", "--password", "pw-sam-123", "--project", root)
+	mustDuct(t, "user", "create", "ota", "--role", "otro", "--password", "pw-ota-123", "--project", root)
+	sam := strings.TrimSpace(mustDuct(t, "token", "create", "--user", "sam", "--project", root))
+	ota := strings.TrimSpace(mustDuct(t, "token", "create", "--user", "ota", "--project", root))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var out, errb syncBuf
+	done := make(chan error, 1)
+	go func() {
+		done <- cmdMLflow(ctx, []string{"serve-model", "models:/churn/1", "--project", root}, &out, &errb)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(60 * time.Second):
+			t.Error("serve-model did not stop")
+		}
+	}()
+	for deadline := time.Now().Add(3 * time.Minute); !strings.Contains(out.String(), "ready on"); time.Sleep(500 * time.Millisecond) {
+		select {
+		case err := <-done:
+			t.Fatalf("serve-model exited: %v\n%s", err, errb.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("model not ready:\n%s\n%s", out.String(), errb.String())
+		}
+	}
+	// The model server is on loopback only.
+	if resp, err := http.Get("http://127.0.0.1:" + port + "/ping"); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("direct /ping: %v", err)
+	} else {
+		_ = resp.Body.Close()
+	}
+
+	srv := startServe(t, root, nil)
+	const inv = "/models/churn/invocations"
+	body := `{"dataframe_split":{"columns":["tenure","spend"],"data":[[1,2],[3,4]]}}`
+	if code, _ := callModel(t, srv.http, "POST", inv, "", body); code != 401 {
+		t.Errorf("without token: %d, want 401", code)
+	}
+	if code, _ := callModel(t, srv.http, "POST", inv, ota, body); code != 403 {
+		t.Errorf("wrong role: %d, want 403", code)
+	}
+	code, resp := callModel(t, srv.http, "POST", inv, sam, body)
+	if code != 200 || !strings.Contains(resp, "4.0") || !strings.Contains(resp, "10.0") {
+		t.Errorf("invoke: %d %s", code, resp)
+	}
+	if code, _ := callModel(t, srv.http, "GET", "/models/churn/health", sam, ""); code != 200 {
+		t.Errorf("health: %d", code)
+	}
+
+	// [mlflow] sync = true: a run logged now reaches Bronze without running `duct mlflow sync`.
+	before := queryCSV(t, root, "SELECT count(*) FROM bronze.mlflow_runs")
+	runPy(t, root, py, addr, `
+import mlflow
+mlflow.set_experiment("demo")
+with mlflow.start_run():
+    mlflow.log_metric("auc", 0.5)
+`)
+	for deadline := time.Now().Add(90 * time.Second); ; time.Sleep(2 * time.Second) {
+		if queryCSV(t, root, "SELECT count(*) FROM bronze.mlflow_runs") != before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("serve did not sync the new run to bronze in 90 s")
+		}
+	}
+	srv.stop()
 }

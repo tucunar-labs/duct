@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -86,6 +87,16 @@ func TestMLflowOnPostgresCatalog(t *testing.T) {
 	}
 	if r := duct(t, root, pwEnv, "query", "DELETE FROM mlflow.runs"); r.err == nil {
 		t.Fatal("mlflow must be read only")
+	}
+	// Sync to Bronze from the Postgres schema: copies the run, then nothing.
+	if out := mustDuct(t, root, pwEnv, "mlflow", "sync"); !strings.Contains(out, "runs=1") || !strings.Contains(out, "metrics=1") {
+		t.Fatalf("sync: %q", out)
+	}
+	if got := csvQuery(t, root, pwEnv, "SELECT key, value FROM bronze.mlflow_metrics"); got != "key,value\nauc,0.8" {
+		t.Fatalf("bronze.mlflow_metrics: %q", got)
+	}
+	if out := mustDuct(t, root, pwEnv, "mlflow", "sync"); !strings.Contains(out, "runs=0 params=0 tags=0 metrics=0") {
+		t.Fatalf("second sync: %q", out)
 	}
 	if _, err := os.Stat(filepath.Join(root, "lake", "_mlflow")); err != nil {
 		t.Fatalf("artifacts folder: %v", err)

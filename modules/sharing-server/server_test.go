@@ -329,8 +329,8 @@ func TestProtocol(t *testing.T) {
 	if resp, _ = f.do("POST", "/shares/ventas/schemas/gold/tables/sales/query", f.token, `{"version": 1}`); resp.StatusCode != 400 {
 		t.Errorf("old version: %d", resp.StatusCode)
 	}
-	if resp, _ = f.do("GET", "/shares/ventas/schemas/gold/tables/sales/changes", f.token, ""); resp.StatusCode != 501 {
-		t.Errorf("changes: %d", resp.StatusCode)
+	if resp, b = f.do("GET", "/shares/ventas/schemas/gold/tables/sales/changes?startingVersion=1", f.token, ""); resp.StatusCode != 400 || !strings.Contains(b, "without history") {
+		t.Errorf("changes without history: %d %s", resp.StatusCode, b)
 	}
 
 	// Every call is audited under the sharing protocol, with the recipient as user.

@@ -337,6 +337,72 @@ var Migrations = []Migration{
 			)`,
 		},
 	},
+	{
+		// Notebooks (ADR 0006): every version Duct saw of a notebook file (with its
+		// content, so it can be restored) and the comments on notebooks. Instants
+		// are epoch microseconds (BIGINT). Notebook names are file names without
+		// ".py"; the rows outlive the file (a deleted notebook keeps its history).
+		Version: 12,
+		Name:    "notebooks",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_notebook_versions (
+				id BIGINT PRIMARY KEY,
+				notebook VARCHAR NOT NULL,
+				content_hash VARCHAR NOT NULL,
+				author VARCHAR NOT NULL,
+				action VARCHAR NOT NULL,
+				created_at_us BIGINT NOT NULL,
+				size_bytes BIGINT NOT NULL,
+				lines_added INTEGER NOT NULL,
+				lines_removed INTEGER NOT NULL,
+				restored_from BIGINT,
+				content VARCHAR NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_notebook_comments (
+				id BIGINT PRIMARY KEY,
+				notebook VARCHAR NOT NULL,
+				ref VARCHAR,
+				author VARCHAR NOT NULL,
+				body VARCHAR NOT NULL,
+				created_at_us BIGINT NOT NULL,
+				resolved BOOLEAN NOT NULL,
+				resolved_by VARCHAR,
+				resolved_at_us BIGINT
+			)`,
+		},
+	},
+	{
+		// Sharing history (ADR 0014): which shared tables keep their versions
+		// (time travel and change data feed) and, per recipient copy, every
+		// retained version with its files and change files. Instants are epoch
+		// milliseconds (BIGINT).
+		Version: 13,
+		Name:    "sharing_history",
+		SQL: []string{
+			`CREATE TABLE IF NOT EXISTS duct.duct_share_history (
+				share VARCHAR NOT NULL,
+				alias VARCHAR NOT NULL,
+				enabled_at TIMESTAMP NOT NULL,
+				PRIMARY KEY (share, alias)
+			)`,
+			`CREATE TABLE IF NOT EXISTS duct.duct_share_versions (
+				share VARCHAR NOT NULL,
+				recipient VARCHAR NOT NULL,
+				alias VARCHAR NOT NULL,
+				version BIGINT NOT NULL,
+				source_snapshot BIGINT NOT NULL,
+				ts_ms BIGINT NOT NULL,
+				kind VARCHAR NOT NULL,
+				policy_hash VARCHAR NOT NULL,
+				schema_string VARCHAR NOT NULL,
+				files VARCHAR NOT NULL,
+				cdf_files VARCHAR NOT NULL,
+				num_rows BIGINT NOT NULL,
+				total_bytes BIGINT NOT NULL,
+				PRIMARY KEY (share, recipient, alias, version)
+			)`,
+		},
+	},
 }
 
 const createMigrations = `CREATE TABLE IF NOT EXISTS duct.duct_migrations (

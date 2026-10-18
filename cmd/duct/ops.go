@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/alonsoburon/duct/core/admin"
@@ -37,34 +36,35 @@ func mountOperability(p *project.Project, eng contract.Engine, h *governance.Han
 	})
 	m.Mount(admin.Prefix+"/", api)
 	m.Mount("/readyz", &admin.Ready{Engine: eng, Project: p})
-	registerDBMetrics(eng)
+	mountModels(p, m, h, auth) // /models/<name>/invocations of [mlflow.serving]
+	if ch, ok := protocols["http"].(collectorHost); ok {
+		registerDBMetrics(ch, eng)
+	}
 }
 
-var (
-	dbMetricsOnce sync.Once
-	dbMetricsEng  atomic.Pointer[contract.Engine]
-)
+// collectorHost is implemented by the HTTP protocol (its /metrics renders it).
+type collectorHost interface {
+	AddCollector(fn func(*metrics.Writer))
+}
 
 // registerDBMetrics adds the series that live in the shared state tables, so
 // they count work done by any process (a cron `duct run`, another server):
 // pipeline runs, job and task runs by status, alerts firing, the lake snapshot.
-// One query round per 10 s at most.
-func registerDBMetrics(eng contract.Engine) {
-	dbMetricsEng.Store(&eng)
-	dbMetricsOnce.Do(func() {
-		var (
-			mu    sync.Mutex
-			at    time.Time
-			cache func(*metrics.Writer)
-		)
-		metrics.Default().AddCollector(func(w *metrics.Writer) {
-			mu.Lock()
-			defer mu.Unlock()
-			if cache == nil || time.Since(at) > 10*time.Second {
-				cache, at = collectDBMetrics(*dbMetricsEng.Load()), time.Now()
-			}
-			cache(w)
-		})
+// The collector belongs to this server's /metrics (no process-wide state) and
+// runs one query round per 10 s at most.
+func registerDBMetrics(host collectorHost, eng contract.Engine) {
+	var (
+		mu    sync.Mutex
+		at    time.Time
+		cache func(*metrics.Writer)
+	)
+	host.AddCollector(func(w *metrics.Writer) {
+		mu.Lock()
+		defer mu.Unlock()
+		if cache == nil || time.Since(at) > 10*time.Second {
+			cache, at = collectDBMetrics(eng), time.Now()
+		}
+		cache(w)
 	})
 }
 

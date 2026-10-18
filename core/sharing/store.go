@@ -105,6 +105,7 @@ func retryLocked(fn func() error) error {
 type TableDef struct {
 	Share, Alias, Relation string // Relation is schema.table in the lake
 	PartitionFilter        string // extra predicate applied for every recipient
+	History                bool   // keep versions: time travel and change data feed
 }
 
 // Schema is the schema the table is exposed under (the lake schema).
@@ -183,6 +184,19 @@ func (s *Store) Shares(ctx context.Context) ([]ShareInfo, error) {
 			out[i].Tables = append(out[i].Tables, TableDef{Share: t[0], Alias: t[1], Relation: t[2], PartitionFilter: t[3]})
 		}
 	}
+	hs, err := s.rows(ctx, `SELECT share, alias FROM duct.duct_share_history`)
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range hs {
+		if i, ok := idx[h[0]]; ok {
+			for j := range out[i].Tables {
+				if out[i].Tables[j].Alias == h[1] {
+					out[i].Tables[j].History = true
+				}
+			}
+		}
+	}
 	gs, err := s.rows(ctx, `SELECT share, recipient FROM duct.duct_share_grants ORDER BY share, recipient`)
 	if err != nil {
 		return nil, err
@@ -201,11 +215,43 @@ func (s *Store) Tables(ctx context.Context, share string) ([]TableDef, error) {
 	if err != nil {
 		return nil, err
 	}
+	hs, err := s.rows(ctx, `SELECT alias FROM duct.duct_share_history WHERE share = ?`, share)
+	if err != nil {
+		return nil, err
+	}
+	hist := map[string]bool{}
+	for _, h := range hs {
+		hist[h[0]] = true
+	}
 	out := make([]TableDef, len(rs))
 	for i, r := range rs {
-		out[i] = TableDef{Share: share, Alias: r[0], Relation: r[1], PartitionFilter: r[2]}
+		out[i] = TableDef{Share: share, Alias: r[0], Relation: r[1], PartitionFilter: r[2], History: hist[r[0]]}
 	}
 	return out, nil
+}
+
+// SetHistory turns the version history of a shared table on or off. With it
+// on, every new version of each recipient's copy is kept (see Options.KeepVersions)
+// and served by version, timestamp and change feed; changes made before it was
+// turned on are not available. Turning it off deletes the retained versions
+// from the state (their files go with the next `duct share gc`).
+func (s *Store) SetHistory(ctx context.Context, share, alias string, on bool) error {
+	ts, err := s.Tables(ctx, share)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, t := range ts {
+		found = found || t.Alias == alias
+	}
+	if !found {
+		return fmt.Errorf("share %s has no table %q", share, alias)
+	}
+	del := "DELETE FROM duct.duct_share_history WHERE share = " + lit(share) + " AND alias = " + lit(alias)
+	if !on {
+		return s.execTx(ctx, del, "DELETE FROM duct.duct_share_versions WHERE share = "+lit(share)+" AND alias = "+lit(alias))
+	}
+	return s.execTx(ctx, del, "INSERT INTO duct.duct_share_history (share, alias, enabled_at) VALUES ("+lit(share)+", "+lit(alias)+", now())")
 }
 
 // Table finds a table by the schema and name it is exposed under.
@@ -311,6 +357,8 @@ func (s *Store) RemoveTable(ctx context.Context, share, alias string) ([]string,
 	}
 	if err := s.execTx(ctx,
 		"DELETE FROM duct.duct_share_tables WHERE share = "+lit(share)+" AND alias = "+lit(alias),
+		"DELETE FROM duct.duct_share_history WHERE share = "+lit(share)+" AND alias = "+lit(alias),
+		"DELETE FROM duct.duct_share_versions WHERE share = "+lit(share)+" AND alias = "+lit(alias),
 		"DELETE FROM duct.duct_share_copies WHERE share = "+lit(share)+" AND alias = "+lit(alias)); err != nil {
 		return nil, err
 	}
@@ -342,6 +390,8 @@ func (s *Store) DropShare(ctx context.Context, share string) ([]string, error) {
 	}
 	if err := s.execTx(ctx,
 		"DELETE FROM duct.duct_share_copies WHERE share = "+lit(share),
+		"DELETE FROM duct.duct_share_versions WHERE share = "+lit(share),
+		"DELETE FROM duct.duct_share_history WHERE share = "+lit(share),
 		"DELETE FROM duct.duct_share_grants WHERE share = "+lit(share),
 		"DELETE FROM duct.duct_share_tables WHERE share = "+lit(share),
 		"DELETE FROM duct.duct_shares WHERE name = "+lit(share)); err != nil {
@@ -490,6 +540,7 @@ func (s *Store) DropRecipient(ctx context.Context, name string) ([]string, error
 	}
 	if err := s.execTx(ctx,
 		"DELETE FROM duct.duct_share_copies WHERE recipient = "+lit(name),
+		"DELETE FROM duct.duct_share_versions WHERE recipient = "+lit(name),
 		"DELETE FROM duct.duct_share_grants WHERE recipient = "+lit(name),
 		"DELETE FROM duct.duct_recipients WHERE name = "+lit(name)); err != nil {
 		return nil, err
@@ -633,6 +684,7 @@ func (s *Store) Revoke(ctx context.Context, share, recipient string) ([]string, 
 	}
 	if err := s.execTx(ctx,
 		"DELETE FROM duct.duct_share_copies WHERE share = "+lit(share)+" AND recipient = "+lit(recipient),
+		"DELETE FROM duct.duct_share_versions WHERE share = "+lit(share)+" AND recipient = "+lit(recipient),
 		"DELETE FROM duct.duct_share_grants WHERE share = "+lit(share)+" AND recipient = "+lit(recipient)); err != nil {
 		return nil, err
 	}
@@ -682,4 +734,27 @@ func (s *Store) Policy(ctx context.Context, recipient, relation string) (rowFilt
 	}
 	sort.Strings(masks)
 	return rowFilter, masks, nil
+}
+
+// policyOf returns what the recipient's role applies to a relation: the row
+// filter and the masks (column, lowercase, to expression).
+func (s *Store) policyOf(ctx context.Context, recipient, relation string) (filter string, masks map[string]string, err error) {
+	role := RoleOf(recipient)
+	roles, err := s.gov.Roles(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	masks = map[string]string{}
+	for _, r := range roles {
+		if r.Name != role {
+			continue
+		}
+		filter = r.Filters[relation]
+		for k, e := range r.Masks {
+			if c, ok := strings.CutPrefix(k, relation+"."); ok {
+				masks[strings.ToLower(c)] = e
+			}
+		}
+	}
+	return filter, masks, nil
 }

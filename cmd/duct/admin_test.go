@@ -64,8 +64,7 @@ func (a api) query(token, user, pass, sql string) (int, string) {
 }
 
 func TestE2EAdminAPI(t *testing.T) {
-	// Not parallel: /metrics reads the process-wide DB collector, which follows the last `serve`
-	// started in the process, so no other server may start while this one is scraped.
+	t.Parallel() // the DB collector belongs to each server (TestMetricsCollectorPerServer)
 	root := governedProject(t)
 	mustDuct(t, "sql", "--project", root, "CREATE ROLE duct_admin")
 	mustDuct(t, "user", "create", "jefa", "--role", "duct_admin", "--password", "pw-jefa-123", "--project", root)
@@ -352,4 +351,33 @@ func grep(text, words string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// Two servers in one process each scrape their own project's state tables: the DB-backed
+// collector is per server, not a global that follows the last `serve` started.
+func TestMetricsCollectorPerServer(t *testing.T) {
+	t.Parallel()
+	withRuns := governedProject(t) // has a successful pipeline run
+	empty := newProject(t)         // never ran a pipeline
+	a := startServe(t, withRuns, nil)
+	b := startServe(t, empty, nil)
+	scrape := func(addr string) string { return scrapeMetrics(t, addr) }
+	const series = `duct_pipeline_runs_total{status="success"}`
+	if m := scrape(a.http); !strings.Contains(m, series) {
+		t.Errorf("server A lacks %s", series)
+	}
+	if m := scrape(b.http); strings.Contains(m, series) || !strings.Contains(m, "duct_build_info") {
+		t.Errorf("server B sees A's collector or has none:\n%s", grep(m, "duct_pipeline|duct_build"))
+	}
+}
+
+func scrapeMetrics(t *testing.T, addr string) string {
+	t.Helper()
+	resp, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
 }

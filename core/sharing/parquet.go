@@ -109,19 +109,22 @@ func schemaString(cols []column) string {
 
 // localFile is a Parquet file written to a temporary folder.
 type localFile struct {
-	Path string
-	Rows int64
-	Size int64
+	Path  string
+	Rows  int64
+	Size  int64
+	Stats string // Delta statistics JSON
 }
 
 // writeParquet drains rdr into Parquet files of up to rowsPerFile rows (zstd),
-// in dir. It returns the files; with no rows it returns none.
-func writeParquet(rdr array.RecordReader, dir string, rowsPerFile int64) ([]localFile, error) {
+// in dir. It returns the files; with no rows it returns none. observe, if not
+// nil, sees every non-empty batch written.
+func writeParquet(rdr array.RecordReader, dir string, rowsPerFile int64, observe func(arrow.RecordBatch)) ([]localFile, error) {
 	var (
 		files []localFile
 		cur   *os.File
 		w     *pqarrow.FileWriter
 		rows  int64
+		stats *fileStats
 	)
 	props := parquet.NewWriterProperties(parquet.WithCompression(compress.Codecs.Zstd))
 	closeCur := func() error {
@@ -138,7 +141,7 @@ func writeParquet(rdr array.RecordReader, dir string, rowsPerFile int64) ([]loca
 		if err != nil {
 			return err
 		}
-		files = append(files, localFile{Path: cur.Name(), Rows: rows, Size: st.Size()})
+		files = append(files, localFile{Path: cur.Name(), Rows: rows, Size: st.Size(), Stats: stats.JSON()})
 		rows = 0
 		return nil
 	}
@@ -166,9 +169,14 @@ func writeParquet(rdr array.RecordReader, dir string, rowsPerFile int64) ([]loca
 				return fail(err)
 			}
 			w = nw
+			stats = newFileStats(rdr.Schema())
 		}
 		if err := w.Write(rec); err != nil {
 			return fail(err)
+		}
+		stats.add(rec)
+		if observe != nil {
+			observe(rec)
 		}
 		rows += rec.NumRows()
 		if rows >= rowsPerFile {

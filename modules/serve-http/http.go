@@ -49,8 +49,18 @@ type Server struct {
 	sem     chan struct{}
 	metrics metrics
 
-	mu     sync.Mutex
-	mounts []mount
+	mu         sync.Mutex
+	mounts     []mount
+	collectors []func(*ductmetrics.Writer)
+}
+
+// AddCollector adds a collector that only this server's /metrics renders (after
+// the process-wide registry). `duct serve` uses it for the series read from the
+// state tables, so two servers in one process never see each other's.
+func (s *Server) AddCollector(fn func(*ductmetrics.Writer)) {
+	s.mu.Lock()
+	s.collectors = append(s.collectors, fn)
+	s.mu.Unlock()
 }
 
 type mount struct {
@@ -142,7 +152,15 @@ func (s *Server) Serve(ctx context.Context, h contract.QueryHandler, auth contra
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "ok\n")
 	})
-	mux.HandleFunc("/metrics", s.metrics.serve)
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		s.metrics.serve(w, r)
+		s.mu.Lock()
+		cs := append([]func(*ductmetrics.Writer){}, s.collectors...)
+		s.mu.Unlock()
+		if len(cs) > 0 {
+			ductmetrics.WriteCollectors(w, cs)
+		}
+	})
 	s.mu.Lock()
 	for _, m := range s.mounts {
 		mux.Handle(m.pattern, m.h)

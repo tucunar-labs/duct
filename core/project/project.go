@@ -68,6 +68,8 @@ type Config struct {
 	Jobs JobsSettings `toml:"jobs"`
 	// Backup configures backup encryption (backupconfig.go; ADR 0013).
 	Backup BackupSettings `toml:"backup"`
+	// Notebooks configures the web console's notebooks (notebooksconfig.go; ADR 0006).
+	Notebooks NotebooksSettings `toml:"notebooks"`
 }
 
 // S3Config is the [s3] table of duct.toml, used when storage is s3://...:
@@ -156,6 +158,9 @@ func Load(dir string) (*Project, error) {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
 	if _, err := cfg.Jobs.RetentionDuration(); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
+	}
+	if _, _, err := cfg.Notebooks.Durations(); err != nil {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
 	return &Project{Root: root, Config: cfg}, nil

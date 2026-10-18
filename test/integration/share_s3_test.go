@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -249,5 +250,124 @@ func TestShareS3RustFS(t *testing.T) {
 	}
 	if _, errs, ok = readShare(t, py, profile); ok || !strings.Contains(errs, "404") {
 		t.Errorf("revoked grant: ok=%v %s", ok, errs)
+	}
+}
+
+const historyScript = `
+import json, sys
+import delta_sharing
+url = sys.argv[1] + "#ventas.gold.sales"
+try:
+    if sys.argv[2] == "changes":
+        df = delta_sharing.load_table_changes_as_pandas(url, starting_version=int(sys.argv[3]))
+        df = df.sort_values(["_commit_version", "id", "_change_type"])
+    else:
+        df = delta_sharing.load_as_pandas(url, version=int(sys.argv[3])).sort_values("id")
+    print(json.dumps(json.loads(df.to_json(orient="records"))))
+except Exception as e:
+    print(type(e).__name__ + ": " + str(e), file=sys.stderr)
+    sys.exit(3)
+`
+
+func runHistory(t *testing.T, py, profile string, args ...string) ([]map[string]any, string, bool) {
+	t.Helper()
+	cmd := exec.Command(py, append([]string{"-c", historyScript, profile}, args...)...)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		return nil, errb.String(), false
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("python output %q: %v", out.String(), err)
+	}
+	return rows, "", true
+}
+
+// TestShareHistoryS3RustFS: versions and the change feed over S3 storage, read
+// with the official client through presigned URLs; retention deletes the files
+// of the versions it forgets once the grace period has passed.
+func TestShareHistoryS3RustFS(t *testing.T) {
+	py := deltaSharingPython(t)
+	s3 := startRustFS(t)
+	const bucket = "lake-share-hist"
+	s3.createBucket(t, bucket)
+	env := s3.env()
+	root := filepath.Join(t.TempDir(), "proj")
+	mustDuct(t, t.TempDir(), env, append([]string{"init", root}, s3.initFlags("s3://"+bucket+"/proj")...)...)
+	f, err := os.OpenFile(filepath.Join(root, "duct.toml"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("\n[serve.sharing]\nlisten = \"127.0.0.1:0\"\nkeep_versions = 2\ngrace = \"1s\"\n")
+	_ = f.Close()
+
+	d := func(args ...string) string { return mustDuct(t, root, env, args...) }
+	d("query", "CREATE SCHEMA gold")
+	d("query", "CREATE TABLE gold.sales AS SELECT i AS id, CASE WHEN i % 2 = 0 THEN 'cl' ELSE 'pe' END AS country, 'u' || i || '@x.com' AS email FROM range(1, 11) t(i)")
+	d("share", "create", "ventas")
+	d("share", "add", "ventas", "gold.sales", "--history")
+	d("recipient", "create", "acme", "--profile", filepath.Join(root, "acme.share"))
+	d("share", "grant", "ventas", "to", "acme", "--row-filter", "country = 'cl'", "--mask", "email='***'")
+
+	addr := startSharing(t, root, env)
+	profile := filepath.Join(root, "acme2.share")
+	d("recipient", "token", "acme", "--rotate", "--endpoint", "http://"+addr+"/delta-sharing", "--profile", profile)
+
+	if rows, errs, ok := runHistory(t, py, profile, "version", "1"); !ok || len(rows) != 5 {
+		t.Fatalf("version 1: ok=%v rows=%d %s", ok, len(rows), errs)
+	}
+	d("query", "INSERT INTO gold.sales VALUES (12, 'cl', 'n@x.com'), (13, 'pe', 'm@x.com')")
+	d("share", "refresh")
+	d("query", "UPDATE gold.sales SET country = 'pe' WHERE id = 2")
+	d("query", "DELETE FROM gold.sales WHERE id = 4")
+	d("share", "refresh")
+
+	feed, errs, ok := runHistory(t, py, profile, "changes", "2")
+	if !ok {
+		t.Fatalf("change feed over S3: %s", errs)
+	}
+	got := map[string]bool{}
+	for _, r := range feed {
+		got[fmt.Sprintf("%v/%v/%v", r["_commit_version"], r["id"], r["_change_type"])] = true
+		if r["email"] != "***" || r["country"] != "cl" {
+			t.Errorf("feed row not filtered or masked: %v", r)
+		}
+	}
+	for _, w := range []string{"2/12/insert", "3/2/delete", "3/4/delete"} {
+		if !got[w] {
+			t.Errorf("feed lacks %s: %v", w, feed)
+		}
+	}
+	if len(feed) != 3 {
+		t.Errorf("feed = %v, want 3 rows", feed)
+	}
+	// Time travel to a retained version (keep_versions = 2: versions 2 and 3).
+	if rows, errs, ok := runHistory(t, py, profile, "version", "2"); !ok || len(rows) != 6 {
+		t.Errorf("version 2: ok=%v rows=%d %s", ok, len(rows), errs)
+	}
+	if _, errs, ok := runHistory(t, py, profile, "version", "1"); ok || !strings.Contains(errs, "400") {
+		t.Errorf("version 1 was pruned, yet: ok=%v %s", ok, errs)
+	}
+	// Versions 2 and 3 hold copies and a feed; version 1's files go after the grace period.
+	time.Sleep(2 * time.Second)
+	d("share", "gc")
+	keys := s3.keys(t, bucket, "proj.shares/ventas/acme/sales/")
+	var parts, cdfs int
+	for _, k := range keys {
+		switch {
+		case strings.Contains(k, "/cdf-"):
+			cdfs++
+		case strings.Contains(k, "/part-"):
+			parts++
+		}
+	}
+	if parts != 2 || cdfs != 2 {
+		t.Errorf("objects after gc = %v, want 2 copies and 2 feed files", keys)
+	}
+	// `duct gc` of the lake does not touch them.
+	d("gc", "--keep-snapshots", "1s")
+	if got := s3.keys(t, bucket, "proj.shares/ventas/acme/sales/"); len(got) != len(keys) {
+		t.Errorf("after duct gc: %v", got)
 	}
 }

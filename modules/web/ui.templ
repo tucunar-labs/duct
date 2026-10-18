@@ -11,7 +11,7 @@ type crumb struct {
 
 type pageData struct {
 	Title   string
-	Active  string // "catalog" | "dashboards" | "sql" | "jobs" | "admin" | ""
+	Active  string // "catalog" | "dashboards" | "sql" | "notebooks" | "jobs" | "admin" | ""
 	User    string
 	Role    string
 	CSRF    string
@@ -106,6 +106,7 @@ templ sidebar(p pageData) {
 			@navItem("/catalog", "catalog", "Catálogo", p.Active == "catalog")
 			@navItem("/sql", "sql", "Editor SQL", p.Active == "sql")
 			@navItem("/dashboards", "dashboards", "Dashboards", p.Active == "dashboards")
+			@navItem("/notebooks", "notebooks", "Notebooks", p.Active == "notebooks")
 			@navItem("/jobs", "jobs", "Trabajos", p.Active == "jobs")
 			if p.IsAdmin {
 				@navItem("/admin", "admin", "Admin", p.Active == "admin")
@@ -258,6 +259,11 @@ templ icon(name string, class string) {
 		case "dashboards":
 			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="M4 20V11M10 20V5M16 20v-6M3 20h18"></path>
+			</svg>
+		case "notebooks":
+			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="M6 3.5h11a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H6z"></path>
+				<path d="M6 3.5v17M9.5 8h5M9.5 12h5M9.5 16h3"></path>
 			</svg>
 		case "jobs":
 			<svg class={ class } xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

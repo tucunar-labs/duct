@@ -22,6 +22,8 @@ type AdminInvoker func(ctx context.Context, protocol string, id contract.Identit
 type consoleHooks struct {
 	admin atomic.Pointer[AdminInvoker]
 	jobs  atomic.Pointer[contract.JobsConsole]
+	// notebooks is the notebook service (notebooks.go in this package audits it).
+	notebooks atomic.Pointer[contract.NotebooksConsole]
 }
 
 // SetAdminInvoker plugs the admin API into the handler (contract.AdminCaller).

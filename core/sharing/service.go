@@ -38,6 +38,9 @@ type Options struct {
 	RowsPerFile int64
 	// TempDir is where files are staged before upload (default os.TempDir).
 	TempDir string
+	// KeepVersions is how many versions of a copy are retained for tables
+	// shared with history (default 10).
+	KeepVersions int
 }
 
 // Service materializes and serves the copies. It reads data only through the
@@ -80,6 +83,8 @@ type CopyFile struct {
 	Size int64  `json:"size"`
 	Rows int64  `json:"rows"`
 	ID   string `json:"id"`
+	// Stats is the Delta statistics JSON of the file (absent in older copies).
+	Stats string `json:"stats,omitempty"`
 }
 
 // Copy is the materialized, filtered and masked copy of one table for one
@@ -95,6 +100,8 @@ type Copy struct {
 	Files                   []CopyFile
 	NumRows, TotalBytes     int64
 	CreatedAt               time.Time
+	History                 bool  // the table is shared with history (versions, change feed)
+	TimestampMS             int64 // instant of Version, ms since the epoch (history tables only)
 }
 
 func tableID(share, recipient, alias string) string {
@@ -192,8 +199,23 @@ func identityOf(recipient string) contract.Identity {
 // Ensure brings the copy of def for recipient up to date with the lake: when
 // the lake snapshot moved it fingerprints what the recipient's view returns
 // and, only if that changed, writes a new compacted copy (a new version) and
-// drops the superseded ones once they are older than the grace period.
+// drops the superseded ones once they are older than the grace period. For
+// tables with history it also records the version and its change feed.
 func (s *Service) Ensure(ctx context.Context, recipient string, def TableDef) (*Copy, error) {
+	c, err := s.ensure(ctx, recipient, def)
+	if err != nil {
+		return nil, err
+	}
+	c.History = def.History
+	if def.History {
+		if err := s.currentVersion(ctx, recipient, def, c); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+func (s *Service) ensure(ctx context.Context, recipient string, def TableDef) (*Copy, error) {
 	snap, err := s.snapshot(ctx)
 	if err != nil {
 		return nil, err
@@ -208,12 +230,39 @@ func (s *Service) Ensure(ctx context.Context, recipient string, def TableDef) (*
 	mu := s.lock(def.Share + "/" + recipient + "/" + def.Alias)
 	mu.Lock()
 	defer mu.Unlock()
-	if c, err = s.loadCopy(ctx, def.Share, recipient, def.Alias); err != nil {
-		return nil, err
+	attempts := 1
+	if def.History {
+		attempts = 3 // a write to the table while it is copied is retried, see advance
 	}
-	if c != nil && c.SourceSnapshot >= snap {
-		return c, nil
+	for i := range attempts {
+		if i > 0 {
+			if snap, err = s.snapshot(ctx); err != nil {
+				return nil, err
+			}
+		}
+		if c, err = s.loadCopy(ctx, def.Share, recipient, def.Alias); err != nil {
+			return nil, err
+		}
+		if c != nil && c.SourceSnapshot >= snap {
+			return c, nil
+		}
+		next, retry, err := s.advance(ctx, recipient, def, c, snap, i == attempts-1)
+		if err != nil {
+			return nil, err
+		}
+		if !retry {
+			return next, nil
+		}
 	}
+	return nil, errors.New("sharing: unreachable")
+}
+
+// advance runs the slow path of Ensure at lake snapshot snap. With history, a
+// write to the table while the copy is being made would put the same change in
+// two versions (the copy already holds it, the next feed would repeat it), so it
+// returns retry=true to redo the copy at the newer snapshot; on the last attempt
+// the version is recorded without a feed instead.
+func (s *Service) advance(ctx context.Context, recipient string, def TableDef, c *Copy, snap int64, last bool) (*Copy, bool, error) {
 	_, tbl, _ := strings.Cut(def.Relation, ".")
 	id := identityOf(recipient)
 	from := " FROM " + quoteIdent(tbl)
@@ -223,17 +272,39 @@ func (s *Service) Ensure(ctx context.Context, recipient string, def TableDef) (*
 	}
 	cols, err := s.describe(ctx, id, from)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	schema := schemaString(cols)
 	sel := selectList(cols)
 	fp, err := s.fingerprint(ctx, id, sel, from+where, schema)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	var phash string
+	var prev *Version
+	if def.History {
+		if phash, err = s.policyHash(ctx, recipient, def, schema); err != nil {
+			return nil, false, err
+		}
+		if c != nil {
+			if prev, err = s.versionRow(ctx, def.Share, recipient, def.Alias, c.Version); err != nil {
+				return nil, false, err
+			}
+		}
 	}
 	if c != nil && c.Fingerprint == fp {
 		c.SourceSnapshot = snap
-		return c, s.saveCopy(ctx, c)
+		if err := s.saveCopy(ctx, c); err != nil {
+			return nil, false, err
+		}
+		if def.History && prev != nil && prev.PolicyHash != phash {
+			// Same rows under another policy: the next feed starts from here.
+			prev.PolicyHash, prev.SchemaString = phash, schema
+			if err := s.saveVersion(ctx, def.Share, recipient, def.Alias, *prev); err != nil {
+				return nil, false, err
+			}
+		}
+		return c, false, nil
 	}
 	next := &Copy{Share: def.Share, Recipient: recipient, Alias: def.Alias, Version: 1, SourceSnapshot: snap, Fingerprint: fp,
 		Prefix: def.Share + "/" + recipient + "/" + def.Alias, SchemaString: schema, TableID: tableID(def.Share, recipient, def.Alias), CreatedAt: time.Now().UTC()}
@@ -241,15 +312,60 @@ func (s *Service) Ensure(ctx context.Context, recipient string, def TableDef) (*
 		next.Version = c.Version + 1
 	}
 	if err := s.write(ctx, id, next, "SELECT "+sel+from+where); err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	var v Version
+	if def.History {
+		v = Version{Version: next.Version, SourceSnapshot: snap, TimestampMS: s.snapshotTime(ctx, snap), Kind: KindInitial, PolicyHash: phash,
+			SchemaString: schema, Files: next.Files, NumRows: next.NumRows, TotalBytes: next.TotalBytes}
+		if c != nil {
+			v.Kind = KindGap
+			if prev != nil && prev.PolicyHash == phash && prev.SchemaString == schema {
+				dir := fmt.Sprintf("%s/v%d", next.Prefix, snap)
+				cdf, delta, err := s.writeChanges(ctx, recipient, def, cols, c.SourceSnapshot+1, snap, dir)
+				switch {
+				case err != nil:
+					warnGap(next, "the changes could not be read", err)
+				case next.NumRows != c.NumRows+delta:
+					warnGap(next, fmt.Sprintf("the feed does not add up (%d rows + %d != %d)", c.NumRows, delta, next.NumRows), nil)
+				default:
+					v.Kind, v.CDF = KindDiff, cdf
+				}
+			}
+		}
+		after, err := s.snapshot(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		if after != snap && s.tableChanged(ctx, def, snap+1, after) {
+			if !last {
+				return nil, true, nil
+			}
+			v.Kind, v.CDF = KindGap, nil
+			if c == nil {
+				v.Kind = KindInitial // there is no earlier version to repeat a change from
+			}
+		}
+	}
+	if def.History {
+		if err := s.saveVersion(ctx, def.Share, recipient, def.Alias, v); err != nil {
+			return nil, false, err
+		}
+		if err := s.prune(ctx, def.Share, recipient, def.Alias, next.Version); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := s.saveCopy(ctx, next); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if err := s.sweep(ctx, next.Prefix+"/", liveKeys(next)); err != nil {
+	live, err := s.liveKeys(ctx, next)
+	if err == nil {
+		err = s.sweep(ctx, next.Prefix+"/", live)
+	}
+	if err != nil {
 		slog.Warn("sharing: cleaning old copies failed", "table", next.Prefix, "error", err)
 	}
-	return next, nil
+	return next, false, nil
 }
 
 // describe reads the column types of the recipient's view.
@@ -295,23 +411,35 @@ func (s *Service) write(ctx context.Context, id contract.Identity, c *Copy, quer
 	if err != nil {
 		return err
 	}
-	files, werr := writeParquet(st, tmp, s.opt.RowsPerFile)
+	files, werr := writeParquet(st, tmp, s.opt.RowsPerFile, nil)
 	st.Release()
 	if werr != nil {
 		return fmt.Errorf("sharing: write copy of %s: %w", c.Prefix, werr)
 	}
-	dir := fmt.Sprintf("%s/v%d", c.Prefix, c.SourceSnapshot)
-	for i, f := range files {
-		key := fmt.Sprintf("%s/part-%05d.parquet", dir, i)
-		if err := s.upload(ctx, key, f); err != nil {
-			return err
-		}
-		h := sha256.Sum256([]byte(key))
-		c.Files = append(c.Files, CopyFile{Key: key, Size: f.Size, Rows: f.Rows, ID: hex.EncodeToString(h[:16])})
+	out, err := s.putFiles(ctx, fmt.Sprintf("%s/v%d", c.Prefix, c.SourceSnapshot), "part", files)
+	if err != nil {
+		return err
+	}
+	c.Files = out
+	for _, f := range out {
 		c.NumRows += f.Rows
 		c.TotalBytes += f.Size
 	}
 	return nil
+}
+
+// putFiles uploads staged files as <dir>/<name>-NNNNN.parquet.
+func (s *Service) putFiles(ctx context.Context, dir, name string, files []localFile) ([]CopyFile, error) {
+	var out []CopyFile
+	for i, f := range files {
+		key := fmt.Sprintf("%s/%s-%05d.parquet", dir, name, i)
+		if err := s.upload(ctx, key, f); err != nil {
+			return nil, err
+		}
+		h := sha256.Sum256([]byte(key))
+		out = append(out, CopyFile{Key: key, Size: f.Size, Rows: f.Rows, ID: hex.EncodeToString(h[:16]), Stats: f.Stats})
+	}
+	return out, nil
 }
 
 func (s *Service) upload(ctx context.Context, key string, f localFile) error {
@@ -323,14 +451,18 @@ func (s *Service) upload(ctx context.Context, key string, f localFile) error {
 	return s.files.Put(ctx, key, r, f.Size)
 }
 
-func liveKeys(cs ...*Copy) map[string]bool {
-	m := map[string]bool{}
-	for _, c := range cs {
-		for _, f := range c.Files {
-			m[f.Key] = true
-		}
+func copyKeys(c *Copy, into map[string]bool) {
+	for _, f := range c.Files {
+		into[f.Key] = true
 	}
-	return m
+}
+
+// liveKeys are the files the state references for c's table: its current
+// copy and every retained version.
+func (s *Service) liveKeys(ctx context.Context, c *Copy) (map[string]bool, error) {
+	m := map[string]bool{}
+	copyKeys(c, m)
+	return m, s.retainedKeys(ctx, c.Share, c.Recipient, c.Alias, m)
 }
 
 // sweep deletes objects under prefix that no live copy references and that are
@@ -364,8 +496,9 @@ func (s *Service) GC(ctx context.Context) (int, error) {
 			return 0, err
 		}
 		if c != nil {
-			for k := range liveKeys(c) {
-				live[k] = true
+			copyKeys(c, live)
+			if err := s.retainedKeys(ctx, c.Share, c.Recipient, c.Alias, live); err != nil {
+				return 0, err
 			}
 		}
 	}
@@ -441,4 +574,9 @@ func (s *Service) FileURLs(ctx context.Context, c *Copy) ([]string, error) {
 		out[i] = u
 	}
 	return out, nil
+}
+
+// KeyURL returns a download URL for one stored file, valid for URLTTL.
+func (s *Service) KeyURL(ctx context.Context, key string) (string, error) {
+	return s.files.URL(ctx, key, s.opt.URLTTL)
 }

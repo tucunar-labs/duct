@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -335,5 +336,149 @@ func TestE2EShare(t *testing.T) {
 	}
 	if code, _ = httpQuery(t, httpAddr, token, "SELECT * FROM sales"); code == 200 {
 		t.Errorf("phase 1 view must go with the grant")
+	}
+}
+
+const historyScript = `
+import json, sys, datetime
+import delta_sharing
+profile = sys.argv[1]
+url = profile + "#ventas.gold.sales"
+mode = sys.argv[2]
+
+def rows(df, cols):
+    df = df.sort_values(cols)
+    return json.loads(df.to_json(orient="records"))
+
+def iso(ms):
+    return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+try:
+    if mode == "changes":
+        start = int(sys.argv[3])
+        df = delta_sharing.load_table_changes_as_pandas(url, starting_version=start)
+        print(json.dumps(rows(df, ["_commit_version", "id", "_change_type"])))
+    elif mode == "changes_ts":
+        df = delta_sharing.load_table_changes_as_pandas(url, starting_timestamp=sys.argv[3])
+        print(json.dumps(rows(df, ["_commit_version", "id", "_change_type"])))
+    elif mode == "version":
+        df = delta_sharing.load_as_pandas(url, version=int(sys.argv[3]))
+        print(json.dumps(rows(df, ["id"])))
+    elif mode == "timestamp":
+        df = delta_sharing.load_as_pandas(url, timestamp=sys.argv[3])
+        print(json.dumps(rows(df, ["id"])))
+    elif mode == "tsof":
+        df = delta_sharing.load_table_changes_as_pandas(url, starting_version=int(sys.argv[3]), ending_version=int(sys.argv[3]))
+        print(json.dumps(iso(int(df["_commit_timestamp"].iloc[0]))))
+except Exception as e:
+    print(type(e).__name__ + ": " + str(e), file=sys.stderr)
+    sys.exit(3)
+`
+
+func runHistory(t *testing.T, py, profile string, args ...string) ([]map[string]any, string, int) {
+	t.Helper()
+	cmd := exec.Command(py, append([]string{"-c", historyScript, profile}, args...)...)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		code := 1
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		return nil, errb.String(), code
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		var s string
+		if json.Unmarshal(out.Bytes(), &s) == nil {
+			return []map[string]any{{"ts": s}}, "", 0
+		}
+		t.Fatalf("python output %q: %v", out.String(), err)
+	}
+	return rows, "", 0
+}
+
+// TestE2EShareHistory: time travel and the change feed with the official
+// Python client, with the recipient's filter and masks.
+func TestE2EShareHistory(t *testing.T) {
+	t.Parallel()
+	py := deltaSharingPython(t)
+	root := newProject(t)
+	g := func(args ...string) string { return mustDuct(t, append(args, "--project", root)...) }
+	g("query", "CREATE SCHEMA gold")
+	g("query", "CREATE TABLE gold.sales AS SELECT i AS id, CASE WHEN i % 2 = 0 THEN 'cl' ELSE 'pe' END AS country, 'u' || i || '@x.com' AS email, CAST(i * 1.5 AS DOUBLE) AS amount FROM range(1, 11) t(i)")
+	g("share", "create", "ventas")
+	g("share", "add", "ventas", "gold.sales", "--history")
+	if list := g("share", "list"); !strings.Contains(list, "[history]") {
+		t.Errorf("share list lacks the history mark:\n%s", list)
+	}
+	profile := filepath.Join(root, "acme.share")
+	g("recipient", "create", "acme", "--profile", profile)
+	g("share", "grant", "ventas", "to", "acme", "--row-filter", "country = 'cl'", "--mask", "email='***'")
+	_, shareAddr := startShareServe(t, root, map[string]any{"listen": "127.0.0.1:0", "keep_versions": 5})
+	rewriteEndpoint(t, profile, "http://"+shareAddr+"/delta-sharing")
+
+	// Version 1.
+	if rows, errs, rc := runHistory(t, py, profile, "version", "1"); rc != 0 || len(rows) != 5 {
+		t.Fatalf("version 1: rc=%d rows=%v %s", rc, rows, errs)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	g("query", "INSERT INTO gold.sales VALUES (12, 'cl', 'n@x.com', 1.0), (13, 'pe', 'm@x.com', 2.0)")
+	g("share", "refresh")
+	time.Sleep(1100 * time.Millisecond)
+	g("query", "UPDATE gold.sales SET country = 'pe' WHERE id = 2")
+	g("query", "UPDATE gold.sales SET amount = 99.0 WHERE id = 4")
+	g("query", "UPDATE gold.sales SET country = 'cl' WHERE id = 3")
+	g("query", "DELETE FROM gold.sales WHERE id = 8")
+	g("share", "refresh")
+
+	feed, errs, rc := runHistory(t, py, profile, "changes", "2")
+	if rc != 0 {
+		t.Fatalf("load_table_changes_as_pandas: %s", errs)
+	}
+	got := map[string]bool{}
+	for _, r := range feed {
+		got[fmt.Sprintf("%v/%v/%v", r["_commit_version"], r["id"], r["_change_type"])] = true
+		if r["email"] != "***" || r["country"] != "cl" {
+			t.Errorf("feed row not filtered or masked: %v", r)
+		}
+		if ts, _ := r["_commit_timestamp"].(float64); ts < 1e12 {
+			t.Errorf("_commit_timestamp = %v", r["_commit_timestamp"])
+		}
+	}
+	for _, w := range []string{"2/12/insert", "3/2/delete", "3/3/insert", "3/4/update_preimage", "3/4/update_postimage", "3/8/delete"} {
+		if !got[w] {
+			t.Errorf("feed lacks %s: %v", w, feed)
+		}
+	}
+	if len(feed) != 6 {
+		t.Errorf("feed has %d rows, want 6: %v", len(feed), feed)
+	}
+	// From version 1: its rows are inserts.
+	if feed, errs, rc = runHistory(t, py, profile, "changes", "1"); rc != 0 || len(feed) != 11 {
+		t.Errorf("feed from version 1: rc=%d rows=%d %s", rc, len(feed), errs)
+	}
+
+	// Time travel by version and timestamp.
+	if rows, errs, rc := runHistory(t, py, profile, "version", "1"); rc != 0 || len(rows) != 5 {
+		t.Errorf("version 1 again: rc=%d rows=%d %s", rc, len(rows), errs)
+	}
+	if rows, errs, rc := runHistory(t, py, profile, "version", "2"); rc != 0 || len(rows) != 6 {
+		t.Errorf("version 2: rc=%d rows=%d %s", rc, len(rows), errs)
+	}
+	tsv, errs, rc := runHistory(t, py, profile, "tsof", "2")
+	if rc != 0 {
+		t.Fatalf("timestamp of version 2: %s", errs)
+	}
+	ts2, _ := tsv[0]["ts"].(string)
+	if rows, errs, rc := runHistory(t, py, profile, "timestamp", ts2); rc != 0 || len(rows) != 6 {
+		t.Errorf("timestamp %s: rc=%d rows=%d %s", ts2, rc, len(rows), errs)
+	}
+	if rows, errs, rc := runHistory(t, py, profile, "changes_ts", ts2); rc != 0 || len(rows) != 6 {
+		t.Errorf("changes since %s: rc=%d rows=%d %s", ts2, rc, len(rows), errs)
+	}
+	// A version that does not exist is an error the client shows.
+	if _, errs, rc := runHistory(t, py, profile, "version", "9"); rc == 0 || !strings.Contains(errs, "400") {
+		t.Errorf("version 9: rc=%d %s", rc, errs)
 	}
 }

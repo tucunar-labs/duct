@@ -188,10 +188,19 @@ Pendientes conocidos para v0.2:
 - [x] marimo integrado: `duct notebook` (servidor privado + token del usuario, entorno con lista blanca)
       y montaje ASGI con auth HTTP+WebSocket (protocolo `notebook`, `[serve.notebook]`). Evidencia:
       `TestNotebookScript`, `TestServeNotebookAuth` (WebSocket sin token: 403), `test_asgi.py`, `TestSDKTransports`
-      (`duct.connect` por ArrowStream y psycopg). Falta: modo edición en el montaje, comentarios e historial.
+      (`duct.connect` por ArrowStream y psycopg). 2026-10-18: sección «Notebooks» en la consola web (ADR 0006):
+      lista `notebooks/*.py`, edición (roles de `[notebooks] editors`) o ejecución embebida con un proceso marimo
+      por usuario detrás de la sesión de Duct (http y WebSocket), token propio de corta vida, bloqueo por archivo,
+      historial de versiones con diff y restauración, comentarios con resolver y auditoría, crear/renombrar/eliminar.
+      Evidencia: `TestNotebooksConsole` (marimo simulado), `TestNotebooksIdle`, `TestNotebooksMarimo` (marimo real
+      por el proxy), `core/notebooks` tests. Falta: RTC (colaboración en vivo), aislar el origen del notebook
+      (hoy mismo origen que la consola), anclar comentarios a celdas (marimo no guarda ids), bloqueo entre
+      varias instancias de `duct serve`.
 - [x] MLflow opcional (`duct enable mlflow`, `duct mlflow`, `mlflow.*` por `ATTACH` de solo lectura,
       `duct.mlflow.score`). Evidencia: `TestMLflowIntegration` (MLflow 3.17.0 real), `TestMLflowOnPostgresCatalog`
-      (`just test-integration`). Falta: copiar métricas a Bronze, serving online.
+      (`just test-integration`). 2026-10-18: `duct mlflow sync` y `[mlflow] sync = true` (a `bronze.mlflow_*`), serving online
+      (`duct mlflow serve-model` + proxy `/models/<nombre>/invocations` con token, rol y auditoría; ADR 0010). Evidencia:
+      `TestMLflowIntegration`, `TestModelProxyAuth`, `TestMLflowOnPostgresCatalog`. Falta: un entorno por modelo, límites de CPU/RAM propios.
 - [x] UDFs Python (`functions/*.py`, `@duct.function`, escalares y vectorizadas) y ejecutables stdin/stdout
       (`functions/*.toml`); solo `duct_admin` en `duct serve`. Evidencia: `TestE2EFunctions`,
       `TestE2EServeFunctionsAdminOnly`, `core/udf` tests; costo por lote en ADR 0005. 2026-10-12:
@@ -203,7 +212,12 @@ Pendientes conocidos para v0.2:
 - [x] OpenSharing fase 1 (por consulta) y fase 2 (servidor REST con copias Parquet filtradas y
       enmascaradas, URLs firmadas ~15 min, local y S3) (ADR 0014, sección Implementado).
       Evidencia: `TestE2EShare` (cliente oficial `delta-sharing`), `TestShareS3RustFS`,
-      `modules/sharing-server` tests. Falta: CDF, `predicateHints`, Iceberg REST, límite de intentos.
+      `modules/sharing-server` tests. 2026-10-18: historial por tabla (`--history`, `keep_versions`),
+      time travel por `version`/`timestamp`, CDF (`/changes`, `startingVersion`; `_change_type` neteado por fila
+      con el filtro y las máscaras del destinatario; huecos explícitos) y poda por estadísticas
+      (`jsonPredicateHints`/`predicateHints`). Evidencia: `TestTimeTravelAndChangeFeed`, `TestPredicateHints`,
+      `TestE2EShareHistory` (cliente oficial), `TestShareHistoryS3RustFS`. Iceberg REST evaluado y diferido
+      (diseño en ADR 0014: falta STS en RustFS/Garage). Falta: Iceberg REST, límite de intentos.
 - [x] Contrato de operabilidad (ADR 0013, 2026-10-07): `duct backup|restore` con manifiesto y
       verificación (catálogo SQLite o Postgres, lake local o S3, `--catalog-only`, `--keep`), API admin
       `/admin/v1` (+ `specs/admin.openapi.yaml`), cuotas por rol, `/readyz` y `/metrics` ampliado.
@@ -233,4 +247,7 @@ Pendientes conocidos para v0.2:
 - [ ] Semántica: preagregados incrementales (hoy reconstrucción completa por rol), dashboards YAML con
       filtros de métrica, `refresh` por horario.
 - [ ] Alertas: persistir los relojes de `FOR`/`RESOLVE_FOR`; silencios por etiqueta/severidad.
+- [ ] Un test de integración deja un contenedor RustFS vivo (`peaceful_mendel`, imagen rustfs, visto 2026-10-18): revisar cleanup en `test/integration/*s3*`.
+- [ ] Iceberg REST para OpenSharing: diferido por tamaño (~2.000 líneas), no por viabilidad: RustFS sí da STS (ADR 0007).
+- [ ] Notebooks: sandbox de kernels (bubblewrap, sin acceso al lake ni a `.duct/`) y origen separado de la consola, antes de permitir editores no admin.
 - [ ] Subir a DuckDB 2.0 (despriorizado por el usuario).

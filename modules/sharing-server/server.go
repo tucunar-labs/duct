@@ -53,7 +53,8 @@ func init() {
 // serve`), s3_public_endpoint (host[:port] recipients use for presigned S3
 // URLs), signing_key_file (HMAC key of local file URLs; `duct serve` fills
 // .duct/sharing.key), url_ttl (default "15m"), grace (default "1h"),
-// rows_per_file (default 2000000), refresh_interval (e.g. "5m"; default off:
+// rows_per_file (default 2000000), keep_versions (versions kept per copy of a
+// table shared with history, default 10), refresh_interval (e.g. "5m"; default off:
 // copies refresh when a client asks), tmp_dir.
 type Server struct {
 	ln      net.Listener
@@ -149,6 +150,9 @@ func (s *Server) Init(_ context.Context, cfg contract.Config) error {
 		s.opt.RowsPerFile = v
 	case float64:
 		s.opt.RowsPerFile = int64(v)
+	}
+	if s.opt.KeepVersions, err = sharing.KeepVersionsFrom(cfg); err != nil {
+		return err
 	}
 	s.opt.TempDir, _ = cfg["tmp_dir"].(string)
 

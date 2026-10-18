@@ -10,13 +10,14 @@
   `core/sharing`. This module is only the HTTP layer, auth and audit.
 - **Config** (`[serve.sharing]`): `listen` (default `127.0.0.1:8124`; non-loopback needs
   `tls_cert` + `tls_key`), `public_url`, `url_ttl` (15m), `grace` (1h), `rows_per_file`,
-  `refresh_interval` (off), `storage` (default `<project>/shares` or `<lake prefix>.shares`;
+  `keep_versions` (10, tables with history), `refresh_interval` (off), `storage` (default `<project>/shares` or `<lake prefix>.shares`;
   must not overlap the lake), `s3_public_endpoint`. Filled by `duct serve`: `signing_key_file`
   (`.duct/sharing.key`), `s3`, `data_path`. Starts only if `[serve.sharing]` exists or with
   `--protocols sharing`.
 - **API:** under `/delta-sharing`: `/shares`, `/shares/{s}[/schemas[/{sch}/tables]|/all-tables]`,
-  `…/tables/{t}/version|metadata|query`, `…/changes` (501), `/_files/<key>?exp&sig` (local
-  storage only). `/healthz`. Errors are `{"errorCode","message"}`.
+  `…/tables/{t}/version|metadata|query|changes`, `/_files/<key>?exp&sig` (local storage only).
+  `version`/`timestamp`/`startingVersion`/`changes` need `duct share add --history` (400 otherwise);
+  `jsonPredicateHints`/`predicateHints`/`limitHint` prune files by their stats. `/healthz`. Errors are `{"errorCode","message"}`.
 - **Auth:** `Authorization: Bearer <token>` from `duct recipient create|token`; 401 invalid,
   revoked or expired; 403 token of a non-recipient; 404 for what is not granted.
 - **Gotchas:** an error after the first NDJSON byte aborts the connection. A first request after
