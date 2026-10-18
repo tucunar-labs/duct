@@ -36,6 +36,8 @@ type appConfig struct {
 	minLoginTime  time.Duration // floor for failed-login latency
 	dashboardsDir string        // dashboards/*.yaml ("": none)
 	livePoll      time.Duration // how often a live run page refreshes (0: 1s)
+	nbURL         string        // public origin of the notebook listener (notebooks_url); "": derive it from the request
+	nbPort        string        // port of the notebook listener ("": notebooks are disabled)
 }
 
 type app struct {
@@ -49,6 +51,8 @@ type app struct {
 	chartCache *lru
 	// flash carries one-shot messages and secrets across a redirect (flash.go).
 	flash *flashes
+	// tickets remembers the notebook tickets already redeemed (single use).
+	tickets usedTickets
 }
 
 func newApp(q contract.QueryHandler, auth contract.AuthProvider, cfg appConfig) *app {
@@ -94,21 +98,20 @@ func (a *app) routes() http.Handler {
 	return securityHeaders(sameOrigin(mux))
 }
 
-// securityHeaders sets a strict CSP. Datastar evaluates its expressions with
-// Function(), hence 'unsafe-eval'; CodeMirror injects <style> elements, hence
-// 'unsafe-inline' for styles. Nothing is loaded from other origins.
+// consoleCSP is the strict policy of the Duct pages (extra: more directives, like frame-src).
+// Datastar evaluates its expressions with Function(), hence 'unsafe-eval';
+// CodeMirror injects <style> elements, hence 'unsafe-inline' for styles. Nothing is
+// loaded from other origins.
+func consoleCSP(extra string) string {
+	return "default-src 'self'; " + extra + "script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+}
+
+// securityHeaders sets the strict CSP of the console. Notebooks do not live here:
+// they have their own origin (nbauth.go).
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		if isNBPath(r.URL.Path) { // the embedded marimo: its own policy, set by notebookProxy
-			h.Set("Content-Security-Policy", nbCSP)
-			h.Set("X-Frame-Options", "SAMEORIGIN")
-			h.Set("X-Content-Type-Options", "nosniff")
-			h.Set("Referrer-Policy", "same-origin")
-			next.ServeHTTP(w, r)
-			return
-		}
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		h.Set("Content-Security-Policy", consoleCSP(""))
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "same-origin")
@@ -121,10 +124,18 @@ func securityHeaders(next http.Handler) http.Handler {
 
 // sameOrigin rejects state-changing requests that a browser marks as
 // cross-site (Sec-Fetch-Site) or whose Origin is another host. It is a second
-// layer: every POST also needs its CSRF token.
+// layer: every POST also needs its CSRF token. Reads are also refused when
+// another origin makes them as a script or subresource (anything but a
+// navigation): the notebook origin is same-site, so the session cookie does
+// travel with its requests, but nothing it can do with them may succeed.
 func sameOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" && s != "none" && r.Header.Get("Sec-Fetch-Mode") != "navigate" {
+				http.Error(w, "cross-site request rejected", http.StatusForbidden)
+				return
+			}
+		} else {
 			if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" && s != "none" {
 				http.Error(w, "cross-site request rejected", http.StatusForbidden)
 				return

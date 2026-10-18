@@ -193,9 +193,16 @@ Pendientes conocidos para v0.2:
       por usuario detrás de la sesión de Duct (http y WebSocket), token propio de corta vida, bloqueo por archivo,
       historial de versiones con diff y restauración, comentarios con resolver y auditoría, crear/renombrar/eliminar.
       Evidencia: `TestNotebooksConsole` (marimo simulado), `TestNotebooksIdle`, `TestNotebooksMarimo` (marimo real
-      por el proxy), `core/notebooks` tests. Falta: RTC (colaboración en vivo), aislar el origen del notebook
-      (hoy mismo origen que la consola), anclar comentarios a celdas (marimo no guarda ids), bloqueo entre
-      varias instancias de `duct serve`.
+      por el proxy), `core/notebooks` tests. Falta: RTC (colaboración en vivo), anclar comentarios a celdas
+      (marimo no guarda ids), bloqueo entre varias instancias de `duct serve`.
+- [x] Notebooks seguros (2026-10-18, ADR 0006 «Sandbox y origen aparte»): cada proceso marimo corre en bubblewrap
+      (solo `notebooks/` y el venv; sin `lake/`, `.duct/` ni `duct.toml`; `[notebooks] sandbox`) y se sirve desde un origen
+      aparte (`[serve.web] notebooks_listen` / `notebooks_url`) al que se entra con un ticket de un solo uso; la cookie de la
+      consola no vale allí. Con ambos activos, `editors = ["duct_admin", "analistas"]` es seguro para el kernel y el HTML/JS.
+      Evidencia: `core/notebooks/sandbox_test.go`, `modules/web/nbauth_test.go`, `TestNotebooksOrigin`, `TestNotebooksMarimo`
+      (sandbox con marimo real) y comprobación en Chromium (marimo en edición dentro del iframe, `.duct/` y lake inexistentes,
+      JS del notebook sin acceso a la consola). Residuales: ver ADR 0006 (código de un editor corre con el token de quien
+      lo ejecuta; tareas `notebook` de jobs y workers de UDF sin sandbox).
 - [x] MLflow opcional (`duct enable mlflow`, `duct mlflow`, `mlflow.*` por `ATTACH` de solo lectura,
       `duct.mlflow.score`). Evidencia: `TestMLflowIntegration` (MLflow 3.17.0 real), `TestMLflowOnPostgresCatalog`
       (`just test-integration`). 2026-10-18: `duct mlflow sync` y `[mlflow] sync = true` (a `bronze.mlflow_*`), serving online
@@ -249,5 +256,8 @@ Pendientes conocidos para v0.2:
 - [ ] Alertas: persistir los relojes de `FOR`/`RESOLVE_FOR`; silencios por etiqueta/severidad.
 - [ ] Un test de integración deja un contenedor RustFS vivo (`peaceful_mendel`, imagen rustfs, visto 2026-10-18): revisar cleanup en `test/integration/*s3*`.
 - [ ] Iceberg REST para OpenSharing: diferido por tamaño (~2.000 líneas), no por viabilidad: RustFS sí da STS (ADR 0007).
-- [ ] Notebooks: sandbox de kernels (bubblewrap, sin acceso al lake ni a `.duct/`) y origen separado de la consola, antes de permitir editores no admin.
+- [ ] Notebooks, residuales del sandbox (2026-10-18): tareas `notebook`/`python` de jobs y workers de UDF Python siguen sin
+      bubblewrap (código del repo, no de la consola; pero un editor puede cambiar un notebook que un job ejecuta: revisar o
+      sandboxear en `taskrun`); un origen por notebook (hoy uno para todos); ejecutar los notebooks de no admin con el rol
+      del autor en vez del de quien los abre.
 - [ ] Subir a DuckDB 2.0 (despriorizado por el usuario).

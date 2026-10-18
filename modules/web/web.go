@@ -13,9 +13,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	contract "github.com/alonsoburon/duct/core/contract/v1"
@@ -34,7 +37,11 @@ func init() {
 
 // Web implements contract.Protocol.
 //
-// Config keys (all optional): "listen" (address, default "127.0.0.1:8484";
+// Config keys (all optional): "notebooks_listen" (address of the separate origin that serves the
+// notebooks, default: the console's host with port+1, i.e. 127.0.0.1:8485; "off" disables notebooks),
+// "notebooks_url" (public origin of that listener, like "https://nb.example.com", for use behind a
+// proxy; give it a host name of its own, a sibling subdomain of the console's),
+// "listen" (address, default "127.0.0.1:8484";
 // "addr" is accepted as an alias; use port 0 for a random one, see Addr), "secure_cookies" (bool; default: set the Secure flag
 // when the request is HTTPS or X-Forwarded-Proto says so), "session_ttl"
 // (absolute session timeout, Go duration, default 12h), "session_idle_timeout"
@@ -52,6 +59,8 @@ func init() {
 type Web struct {
 	ln           net.Listener
 	addr         string
+	nbLn         net.Listener // the notebook origin (nbauth.go); nil: notebooks are disabled
+	nbURL        string
 	secure       *bool
 	sessionTTL   time.Duration
 	idleTimeout  time.Duration
@@ -133,7 +142,56 @@ func (w *Web) Init(_ context.Context, cfg contract.Config) error {
 		return fmt.Errorf("web: %w", err)
 	}
 	w.ln = ln
+	return w.initNotebooks(cfg, ln)
+}
+
+// initNotebooks binds the notebook origin. An explicit notebooks_listen that cannot be bound is an
+// error; the derived default (the console's port + 1) only disables notebooks with a warning.
+func (w *Web) initNotebooks(cfg contract.Config, console net.Listener) error {
+	if s, ok := cfg["notebooks_url"].(string); ok && s != "" {
+		u, err := url.Parse(s)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+			return fmt.Errorf("web: notebooks_url %q must look like https://nb.example.com", s)
+		}
+		if safeOrigin(u.Scheme+"://"+u.Host) == "" {
+			return fmt.Errorf("web: notebooks_url %q has characters not allowed in an origin", s)
+		}
+		w.nbURL = u.Scheme + "://" + u.Host
+	}
+	addr, explicit := "", false
+	if s, ok := cfg["notebooks_listen"].(string); ok && s != "" {
+		if s == "off" {
+			return nil
+		}
+		addr, explicit = s, true
+	} else {
+		host, port, _ := net.SplitHostPort(console.Addr().String())
+		if _, reqPort, err := net.SplitHostPort(w.addr); err == nil && reqPort != "0" {
+			p, _ := strconv.Atoi(port)
+			port = strconv.Itoa(p + 1)
+		} else {
+			port = "0"
+		}
+		addr = net.JoinHostPort(host, port)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		if explicit {
+			return fmt.Errorf("web: notebooks_listen: %w", err)
+		}
+		slog.Warn("web: the notebook origin could not listen, notebooks are disabled (set notebooks_listen)", "addr", addr, "err", err)
+		return nil
+	}
+	w.nbLn = ln
 	return nil
+}
+
+// NotebooksAddr is the bound address of the notebook origin ("" if disabled).
+func (w *Web) NotebooksAddr() string {
+	if w.nbLn == nil {
+		return ""
+	}
+	return w.nbLn.Addr().String()
 }
 
 // Addr implements contract.Addresser: the bound "host:port" after Init.
@@ -175,6 +233,13 @@ func durationCfg(cfg contract.Config, key string, def time.Duration) (time.Durat
 // Handler returns the HTTP handler of the UI. Exposed so `duct serve` (or a
 // test) can mount it without opening a listener.
 func (w *Web) Handler(h contract.QueryHandler, auth contract.AuthProvider) http.Handler {
+	console, _ := w.Handlers(h, auth)
+	return console
+}
+
+// Handlers returns the handler of the console and the one of the notebook origin; they share the
+// sessions (the notebook origin only honours tickets minted by the console).
+func (w *Web) Handlers(h contract.QueryHandler, auth contract.AuthProvider) (console, notebooks http.Handler) {
 	limit, timeout, ttl := w.rowLimit, w.queryTimeout, w.sessionTTL
 	if limit == 0 {
 		limit = 1000
@@ -185,11 +250,17 @@ func (w *Web) Handler(h contract.QueryHandler, auth contract.AuthProvider) http.
 	if ttl == 0 {
 		ttl = 12 * time.Hour
 	}
-	return newApp(h, auth, appConfig{
+	cfg := appConfig{
 		rowLimit: limit, queryTimeout: timeout, sessionTTL: ttl, secure: w.secure,
 		idleTimeout: w.idleTimeout, keys: w.keys, trustProxy: w.trustProxy,
 		userMax: w.userMax, ipMax: w.ipMax, lockout: w.lockout, minLoginTime: 200 * time.Millisecond, dashboardsDir: w.dashDir,
-	}).routes()
+		nbURL: w.nbURL,
+	}
+	if w.nbLn != nil {
+		_, cfg.nbPort, _ = net.SplitHostPort(w.nbLn.Addr().String())
+	}
+	a := newApp(h, auth, cfg)
+	return a.routes(), a.nbRoutes()
 }
 
 // Serve implements contract.Protocol: it blocks until ctx is cancelled.
@@ -198,30 +269,49 @@ func (w *Web) Serve(ctx context.Context, h contract.QueryHandler, auth contract.
 	if ln == nil {
 		return errors.New("web: Serve before Init")
 	}
-	srv := &http.Server{
-		Handler:           w.Handler(h, auth),
-		ReadHeaderTimeout: 10 * time.Second,
-		BaseContext:       func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
+	console, nbHandler := w.Handlers(h, auth)
+	newSrv := func(h http.Handler) *http.Server {
+		return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return context.WithoutCancel(ctx) }}
 	}
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(ln) }()
+	srvs := map[*http.Server]net.Listener{newSrv(console): ln}
+	if w.nbLn != nil {
+		if w.nbURL == "" {
+			slog.Warn("web: the notebook origin shares the console's host name (cookies ignore ports): fine to try out, but set notebooks_url to a host name of its own in production")
+		}
+		srvs[newSrv(nbHandler)] = w.nbLn
+	}
+	done := make(chan error, len(srvs))
+	for srv, l := range srvs {
+		go func() { done <- srv.Serve(l) }()
+	}
+	var first error
 	select {
 	case err := <-done:
-		return fmt.Errorf("web: %w", err)
+		first = fmt.Errorf("web: %w", err)
 	case <-ctx.Done():
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		_ = srv.Close()
+	for srv := range srvs {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			_ = srv.Close()
+		}
 	}
-	<-done
-	return nil
+	for range srvs {
+		select {
+		case <-done:
+		case <-time.After(6 * time.Second):
+		}
+	}
+	return first
 }
 
 // Close implements contract.Module: it releases the listener if Serve never
 // ran (or already stopped); closing twice is fine.
 func (w *Web) Close() error {
+	if w.nbLn != nil {
+		_ = w.nbLn.Close()
+	}
 	if w.ln == nil {
 		return nil
 	}

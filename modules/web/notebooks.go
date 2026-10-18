@@ -17,15 +17,15 @@ import (
 )
 
 // Notebooks (ADR 0006, 0012): the list, the page that embeds a user's marimo
-// process (same origin, behind the session), version history with diffs and
+// process (an iframe on the separate notebook origin, entered with a ticket), version history with diffs and
 // restore, comments, and create / rename / delete. Everything comes through
 // the optional contract.NotebooksConsole of the QueryHandler, which does the
 // authorization (editor roles, lock) and the auditing.
 //
-// The embedded marimo is reached through /nb/{mode}/{name}/..., a reverse
-// proxy for http AND websocket that is only answered for a valid session whose
-// user has a running process for that notebook; the browser never learns the
-// port or marimo's password.
+// The embedded marimo is reached through /nb/{mode}/{name}/... on the notebook
+// origin (nbauth.go), a reverse proxy for http AND websocket that is only
+// answered for a valid notebook cookie whose user has a running process for that
+// notebook; the browser never learns the port or marimo's password.
 
 // the first start may create the virtualenv
 const openTimeout = 3 * time.Minute
@@ -41,7 +41,6 @@ func (a *app) notebooksRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /notebooks/{name}/restore", a.authed(a.notebookRestore))
 	mux.HandleFunc("POST /notebooks/{name}/comments", a.authed(a.commentAdd))
 	mux.HandleFunc("POST /notebooks/{name}/comments/{id}/{action}", a.authed(a.commentResolve))
-	mux.HandleFunc("/nb/{mode}/{name}/", a.notebookProxy)
 }
 
 func (a *app) notebooksConsole() (contract.NotebooksConsole, bool) {
@@ -194,7 +193,12 @@ func (a *app) notebookView(w http.ResponseWriter, r *http.Request, sess session)
 		slog.Warn("web: opening a notebook failed", "user", sess.who.User, "notebook", name, "err", err)
 		v.Err, status = "No se pudo abrir el notebook: "+nbMessage(err), nbStatus(err)
 	} else {
-		v.Mode, v.LockedBy, v.Src = ses.Mode, ses.LockedBy, "/nb/"+ses.Mode+"/"+url.PathEscape(name)+"/"
+		v.Mode, v.LockedBy = ses.Mode, ses.LockedBy
+		if v.Src = a.ticketURL(r, sess, ses.Mode, name); v.Src == "" {
+			v.Err, status = "Los notebooks no tienen origen propio en este servidor: configura [serve.web] notebooks_listen (y notebooks_url tras un proxy).", http.StatusServiceUnavailable
+		} else {
+			w.Header().Set("Content-Security-Policy", consoleCSP("frame-src "+a.nbOrigin(r)+"; "))
+		}
 	}
 	if cm, err := c.NotebookComments(qctx, sess.who, name); err == nil {
 		v.Comments = cm
@@ -384,42 +388,59 @@ func (a *app) commentResolve(w http.ResponseWriter, r *http.Request, sess sessio
 	_ = sse.PatchElementTempl(commentsPanel(a.commentsPanel(r, sess, c, name, msg)), datastar.WithMode(datastar.ElementPatchModeReplace))
 }
 
-// ---- the proxy ----
+// ---- the proxy (notebook origin) ----
 
 // nbCSP is the policy of the embedded marimo: it ships inline scripts, workers
 // from blob: and evaluates code, so it cannot live under the CSP of the Duct
-// pages; it may only be framed by Duct itself.
+// pages; it may only be framed by the console that opened it (the ticket carries its origin).
 const nbCSP = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; " +
 	"img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' ws: wss: blob: data:; frame-src 'self' blob: data:; " +
-	"object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
+	"object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors "
 
 func isNBPath(p string) bool { return strings.HasPrefix(p, "/nb/") }
 
-// notebookProxy forwards /nb/{mode}/{name}/... (http and websocket) to the
-// marimo process the console started for this session's user. It needs the
-// session cookie but not the CSRF token (marimo's own requests carry none): a
-// cross-site request is stopped by SameSite=Strict, by the Sec-Fetch-Site and
-// Origin checks below (websocket upgrades included) and by marimo's custom
-// headers. The browser's credentials never reach marimo.
+// notebookProxy forwards /nb/{mode}/{name}/... (http and websocket) on the
+// notebook origin to the marimo process the console started for the user of the
+// notebook cookie. That cookie (duct_nb, see nbauth.go) is the only credential
+// accepted here: it is bound to one user, notebook and mode, expires with the
+// console session and is checked on every request and upgrade. A cross-site
+// request is stopped by SameSite=Strict, by the Sec-Fetch-Site and Origin
+// checks below (websocket upgrades included) and by marimo's custom headers.
+// The browser's credentials never reach marimo.
 func (a *app) notebookProxy(w http.ResponseWriter, r *http.Request) {
-	var sess session
+	mode, name := r.PathValue("mode"), r.PathValue("name")
+	var g grant
 	ok := false
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		sess, ok = a.store.get(c.Value)
+	if c, err := r.Cookie(nbCookie); err == nil {
+		g, ok = a.store.openGrant(nbGrant, c.Value)
+	}
+	now := a.store.now()
+	if ok {
+		ok = g.Mode == mode && g.Name == name && now.Before(time.Unix(g.SessExp, 0)) &&
+			now.Sub(time.Unix(g.Seen, 0)) <= a.store.idle && !a.store.revoked(g.Sid)
 	}
 	if !ok {
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") { // refused before the upgrade, like the notebook protocol
 			http.Error(w, "authentication required", http.StatusForbidden)
 			return
 		}
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+		http.Error(w, "authentication required: open the notebook from Duct", http.StatusUnauthorized)
 		return
 	}
-	if s2, fresh, renewed := a.store.touch(sess); renewed {
-		sess = s2
-		a.setCookie(w, r, sessionCookie, fresh, a.remaining(sess))
+	if now.Sub(time.Unix(g.Seen, 0)) >= min(a.store.idle/4, time.Minute) {
+		g.Seen = now.Unix()
+		a.setNBCookie(w, r, g)
 	}
-	if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" && s != "none" {
+	// Only the notebook's own pages and scripts may call it. The one cross-origin request
+	// allowed is the console's iframe navigating to it.
+	switch s := r.Header.Get("Sec-Fetch-Site"); s {
+	case "", "same-origin", "none":
+	case "same-site":
+		if r.Method != http.MethodGet || r.Header.Get("Sec-Fetch-Mode") != "navigate" || r.Header.Get("Sec-Fetch-Dest") != "iframe" {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+			return
+		}
+	default:
 		http.Error(w, "cross-site request rejected", http.StatusForbidden)
 		return
 	}
@@ -434,8 +455,7 @@ func (a *app) notebookProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "notebooks not available", http.StatusNotFound)
 		return
 	}
-	mode, name := r.PathValue("mode"), r.PathValue("name")
-	ses, err := c.NotebookTarget(r.Context(), sess.who, name, mode)
+	ses, err := c.NotebookTarget(r.Context(), g.identity(), name, mode)
 	if err != nil {
 		code := nbStatus(err)
 		msg := nbMessage(err)
@@ -445,6 +465,11 @@ func (a *app) notebookProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, code)
 		return
 	}
+	anc := safeOrigin(g.Anc)
+	if anc == "" {
+		anc = "'none'"
+	}
+	w.Header().Set("Content-Security-Policy", nbCSP+anc)
 	target := &url.URL{Scheme: "http", Host: ses.Target}
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -467,7 +492,7 @@ func (a *app) notebookProxy(w http.ResponseWriter, r *http.Request) {
 		},
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			slog.Warn("web: notebook proxy failed", "user", sess.who.User, "notebook", name, "err", err)
+			slog.Warn("web: notebook proxy failed", "user", g.User, "notebook", name, "err", err)
 			http.Error(w, "el proceso del notebook no responde: reabre el notebook desde Duct", http.StatusBadGateway)
 		},
 	}

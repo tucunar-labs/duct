@@ -57,7 +57,7 @@ Duct supervisa **un `marimo edit|run` por usuario, notebook y modo**, y la conso
   (`idle_timeout`, 30 min sin peticiones por el proxy), al llegar a `max_age`, al cerrar sesión (`/logout` detiene todos los
   procesos del usuario), cuando el proceso muere solo y al apagar `duct serve`. Primer arranque: crea el venv gestionado
   si hace falta (`preparePython`). Máximo `max_kernels` procesos vivos.
-- **Proxy con auth para `http` y `websocket`** (`/nb/{modo}/{nombre}/...` en `modules/web`): solo responde con sesión
+- **Proxy con auth para `http` y `websocket`** (`/nb/{modo}/{nombre}/...` en `modules/web`; desde el mismo día en un origen aparte con cookie propia, ver «Sandbox y origen aparte»; lo que sigue describe sus comprobaciones, hoy con la cookie del notebook en lugar de la de la consola): solo responde con sesión
   válida cuyo usuario tenga proceso para ese notebook y modo; sin sesión, 401 (http) y 403 antes del `Upgrade`
   (WebSocket). Además `Sec-Fetch-Site`/`Origin` del mismo origen también en el upgrade (otro `Origin`: 403). Se quitan
   `Cookie`, `Authorization` y `Referer` del navegador y se inyecta la clave de marimo; se descartan `Set-Cookie`, CSP y CORS
@@ -85,13 +85,76 @@ Duct supervisa **un `marimo edit|run` por usuario, notebook y modo**, y la conso
 - **Auditoría**: `NOTEBOOK open mode=... name=...`, `create`, `rename`, `delete`, `restore`, `diff`, `comment`, `resolve|reopen comment`;
   los rechazos salen como `denied`.
 - **Plantilla** de notebook nuevo con `duct.connect()`.
-- **Riesgo asumido, a la vista**: el notebook se sirve en el **mismo origen** de la consola (como pidió el diseño) y un editor ejecuta
-  Python en el host con el usuario del servidor: puede leer los archivos del proyecto, incluido el lago local, y un notebook que
-  inyecte HTML/JS podría actuar con la sesión de quien lo abra. Por eso editar es de roles de confianza (`editors`) y el lago
-  remoto con credenciales de la consola es lo recomendable en producción. Probado: `sandbox` sin `allow-same-origin` rompe marimo
-  (localStorage), así que el aislamiento real exige otro origen (subdominio dedicado) o un contenedor por usuario: pendiente.
+- **Riesgo asumido (resuelto el mismo día, ver «Sandbox y origen aparte» abajo)**: el notebook se servía en el mismo origen de la
+  consola y un editor ejecutaba Python como el usuario del servidor (podía leer el lago local y `.duct/`, y un notebook que inyectara
+  HTML/JS actuaba con la sesión de quien lo abriera). Eso obligaba a limitar `editors` a admins.
 - Evidencia: `cmd/duct/notebooks_console_test.go` — `TestNotebooksConsole` (marimo simulado: visor sin edición, WebSocket sin
   sesión/falsa/otro origen 403, el token del proceso lleva el rol del usuario y no hay otras variables, bloqueo por archivo,
   historial con diff y restauración, logout mata el proceso y revoca el token, comentarios, crear/renombrar/eliminar, auditoría),
   `TestNotebooksIdle` (inactividad), `TestNotebooksMarimo` (marimo real: modo run ejecuta con datos gobernados por rol, modo edición,
   bloqueo, procesos terminan en el logout); pruebas de diff en `core/notebooks`.
+
+## Sandbox y origen aparte (2026-10-18)
+Cierra los dos huecos anteriores. Con ambos activos, `editors = ["duct_admin", "analistas"]` es seguro frente al kernel y frente al
+HTML/JS de un notebook (los residuales están al final).
+
+**1. Sandbox por proceso** (`core/notebooks/sandbox.go`; `[notebooks] sandbox = "auto" | "bwrap" | "none"`, por defecto `auto`).
+- Cada `marimo edit|run` arranca dentro de **bubblewrap** (`bwrap`, detectado en tiempo de ejecución con una prueba real de namespaces):
+  `--unshare-all --share-net --die-with-parent --new-session --cap-drop ALL`, `/usr` y los enlaces `/bin /lib /lib64 /sbin` de solo
+  lectura, unos pocos archivos de `/etc` (certificados, `resolv.conf`, `hosts`, `passwd`), el **venv de Python solo lectura**
+  (más la instalación base a la que apunta `pyvenv.cfg` y los directorios de los `.pth`, p. ej. el SDK editable), `/tmp` y un home
+  (`/home/sandbox`) **privados** en tmpfs de 1 GiB (cuentan como memoria; mueren con el proceso, así que nadie lee el tmp de otro),
+  su propio `/proc` y `/dev`, y el directorio `notebooks/` montado **de lectura y escritura en edición y solo lectura en ejecución**.
+  **Nada más del proyecto**: ni `lake/`, ni `.duct/` (base de estado con hashes, clave de sesión, clave de sharing, catálogo), ni
+  `duct.toml`. La carpeta de trabajo es `notebooks/`. Se rechaza un entorno de Python cuyo directorio contenga la raíz del proyecto.
+- El entorno sigue siendo la lista blanca de `udf.SafeEnv` más `DUCT_URL`/`DUCT_TOKEN`, con `HOME`, `TMPDIR` y `XDG_*` apuntando al
+  tmp privado. La consulta del notebook sigue pasando por `duct serve` con el token del usuario (filtros y máscaras de su rol).
+- `--share-net` es necesario para llegar a `DUCT_URL` en loopback. Consecuencia, a la vista: el notebook también alcanza **otros
+  servicios en loopback** del host y puede salir a Internet (exfiltrar lo que su rol ve). Aislarlo del todo exigiría un proxy de
+  consultas por socket Unix: pendiente.
+- Si `bwrap` no está o el kernel no deja crear namespaces: `auto` registra un aviso al arrancar y **solo `duct_admin` puede editar**
+  (los demás roles de `editors` se ignoran; el modo ejecución sigue, porque solo ejecuta código que escribió un admin);
+  `bwrap` es error de arranque; `none` es la decisión explícita de aceptar el riesgo anterior (aviso al arrancar).
+- Detalles de proceso: `--die-with-parent` y el namespace PID hacen que al detener el proceso (logout, inactividad, apagado) muera
+  todo el árbol, kernel de marimo incluido.
+
+**2. Origen aparte** (`modules/web/nbauth.go`; `[serve.web] notebooks_listen`, `notebooks_url`).
+- Los proxies `/nb/{modo}/{nombre}/...` ya no existen en la consola: viven en un **segundo listener** (`notebooks_listen`, por defecto
+  el host de la consola con puerto+1, es decir `127.0.0.1:8485`; `off` los desactiva; si el puerto derivado está ocupado, los
+  notebooks se desactivan con un aviso) que no tiene ninguna otra ruta. Tras un proxy inverso hay que darle host propio y declararlo
+  con `notebooks_url = "https://nb.ejemplo.com"` (un subdominio hermano de la consola, para que las cookies SameSite lleguen al iframe).
+- Entrada por **ticket**: la página `/notebooks/{nombre}` abre el proceso y emite un ticket (cifrado con la clave de sesión con
+  propósito `ticket`; **30 s, un solo uso**, atado a usuario, notebook, modo, sesión de la consola y origen de la consola). El iframe carga
+  `{origen}/nb-auth?t=...`; ese origen lo canjea una vez, pone su propia cookie `duct_nb` (HttpOnly, `SameSite=Strict`, `Path=/nb/{modo}/{nombre}/`,
+  propósito `cookie`; atada a usuario+notebook+modo; **caduca con la inactividad** (la de la sesión) y **con la sesión de la consola**, y deja de valer
+  en cuanto esta cierra sesión) y redirige al notebook. La consola nunca acepta `duct_nb` y el origen del notebook nunca lee `duct_session`.
+- La consola enmarca solo ese origen (`frame-src` en la página del notebook; el resto conserva `default-src 'self'` y `frame-ancestors 'none'`);
+  el notebook solo se puede enmarcar desde el origen de la consola (`frame-ancestors`, tomado del ticket). Cada petición y cada `Upgrade`
+  de WebSocket exigen la cookie, `Sec-Fetch-Site` same-origin (o la navegación del iframe, same-site) y `Origin` del mismo host.
+- La consola además rechaza lecturas que otro origen haga como script/subrecurso (`Sec-Fetch-Site` ≠ same-origin y modo ≠ navigate), porque en el
+  modo por defecto (mismo host, otro puerto) las cookies **no se aíslan por puerto**: el origen del notebook es otro origen, pero no otro
+  almacén de cookies. Por eso, en producción, `notebooks_url` con host propio; el arranque lo avisa si no está.
+- Probado en Chromium con marimo real: dentro del iframe el JS no lee cookies, no alcanza `window.parent`/`top`, y sus `fetch` a la consola
+  los bloquea la CSP del notebook; desde una página same-site ajena, los `fetch` y el `POST /logout` contra la consola y el origen del
+  notebook devuelven 403 y ambos se niegan a enmarcarse; con host propio las cookies quedan en jarras distintas.
+
+**Residuales (2026-10-18)**
+- **El código de un editor corre con el token de quien lo ejecuta.** El modo ejecución corre `notebooks/x.py` con el rol del visitante: un
+  `analistas` que edita puede hacer que un `duct_admin` ejecute código con el rol de admin (dentro del sandbox, pero con red: puede consultar lo
+  que el admin ve y sacarlo). Es inherente a notebooks compartidos; mitigaciones: que los admins no abran notebooks de otros sin revisarlos, o
+  (pendiente) ejecutar los notebooks de no admin con el rol del autor.
+- **Todos los notebooks comparten el origen del notebook**: el JS de un notebook podría hablar con el proceso de otro notebook que la víctima tenga
+  abierto (la cookie es por ruta, no un límite de seguridad frente a JS del mismo origen). Un origen por notebook queda pendiente.
+- El editor puede cambiar cualquier `notebooks/*.py` (montaje de la carpeta): se registra como versión «externa» del historial, pero el candado por archivo
+  no lo impide.
+- Tareas `notebook`/`python`/`shell` de jobs y los workers de UDF Python **no** usan bubblewrap (corren como el usuario del servidor, con la lista blanca
+  de entorno): son código del repositorio, pero una tarea `notebook` ejecuta un archivo que un editor puede modificar. No tocar el lake desde ahí exige
+  revisar esos notebooks o sandboxear `taskrun`.
+- `--share-net`, namespaces abstractos de Unix compartidos y el tmpfs de 1 GiB contado como memoria (no hay límite de CPU ni de procesos por notebook).
+- El ticket y las cookies se validan en memoria de un solo `duct serve` (un ticket usado vale una vez por instancia).
+- La CLI `duct notebook` y el protocolo `notebook` (montaje ASGI) no usan el sandbox: son herramientas de un solo usuario/rol admin.
+- Evidencia: `core/notebooks/sandbox_test.go` (el sandbox no ve lake/`.duct/`/`duct.toml`, `notebooks/` solo lectura o escritura, tmp y home privados, `/proc`
+  propio, loopback sí, rechazo de un venv que contiene el proyecto, `ResolveSandbox`), `modules/web/nbauth_test.go` (ticket de un solo uso y de 30 s, ligado a la
+  sesión, cookie de la consola inválida allí y viceversa, cookie atada a notebook y modo, inactividad, fin con la sesión, sin rutas de consola, `Sec-Fetch-*`),
+  `TestNotebooksOrigin`, `TestNotebooksConsole`, `TestNotebooksMarimo` (marimo real en bubblewrap: el notebook informa que solo ve `notebooks/`, consulta con su rol y no
+  escribe en la carpeta en modo ejecución) y la comprobación en Chromium descrita arriba.

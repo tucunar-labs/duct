@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +24,9 @@ import (
 // port and a token password (marimo's own authentication, which the proxy of
 // the console answers; nothing else on the machine knows it).
 type execLauncher struct {
-	Python func(ctx context.Context) ([]string, error)
-	Dir    string
+	Python  func(ctx context.Context) ([]string, error)
+	Dir     string // project root
+	Sandbox string // SandboxBwrap wraps the process in bubblewrap (sandbox.go); anything else runs it as is
 }
 
 const startTimeout = 2 * time.Minute
@@ -58,9 +60,23 @@ func (l *execLauncher) Launch(ctx context.Context, spec LaunchSpec) (Process, st
 		args = append(args, "--skip-update-check", "--no-sandbox")
 	}
 	args = append(args, spec.File)
-	cmd := exec.Command(py[0], args...) //nolint:gosec // interpreter from duct.toml / the managed venv
-	cmd.Dir = l.Dir
-	cmd.Env = append(udf.SafeEnv(spec.Env), "MARIMO_SKIP_UPDATE_CHECK=1")
+	env := append(udf.SafeEnv(spec.Env), "MARIMO_SKIP_UPDATE_CHECK=1")
+	argv := append([]string{py[0]}, args...)
+	dir := l.Dir
+	if l.Sandbox == SandboxBwrap {
+		bw, err := BwrapAvailable()
+		if err != nil {
+			return nil, "", err
+		}
+		nbDir := filepath.Dir(spec.File)
+		if argv, err = bwrapArgv(sandboxSpec{Bwrap: bw, Python: py, ProjectRoot: l.Dir, NotebooksDir: nbDir, Writable: spec.Mode == contract.NotebookEdit}, argv); err != nil {
+			return nil, "", err
+		}
+		env, dir = sandboxEnv(env), "" // inside, the working directory is the notebooks dir (bwrap --chdir)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // interpreter from duct.toml / the managed venv, behind bwrap when sandboxed
+	cmd.Dir = dir
+	cmd.Env = env
 	cmd.Stdin = strings.NewReader(spec.Password + "\n")
 	tail := &tailBuffer{max: 4096}
 	cmd.Stdout, cmd.Stderr = tail, tail // marimo prints a URL with the access token: never forwarded

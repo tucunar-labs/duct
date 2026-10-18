@@ -7,7 +7,7 @@
   filters to semantic requests; no I/O besides reading the files). All data goes through `QueryHandler.Query` with the
   session `Identity`; credentials go only through `AuthProvider.Authenticate`
   (`Scheme: "password"`). No data or credentials are ever stored in the browser.
-- **Config:** `listen` (alias `addr`; default `127.0.0.1:8484`, port 0 = random; bound in Init, reported by `Addr()` as `contract.Addresser`), `secure_cookies` (bool; default: Secure
+- **Config:** `notebooks_listen`, `notebooks_url` (above), `listen` (alias `addr`; default `127.0.0.1:8484`, port 0 = random; bound in Init, reported by `Addr()` as `contract.Addresser`), `secure_cookies` (bool; default: Secure
   flag when HTTPS or `X-Forwarded-Proto: https`), `session_ttl` (absolute timeout, default `12h`), `session_idle_timeout` (default `2h`),
   `session_key` / env `DUCT_WEB_SESSION_KEY` (base64 32 bytes), `session_key_file` (generated once, 0600;
   `duct serve` passes `.duct/web_session.key`), `session_key_previous` / env `DUCT_WEB_SESSION_KEY_PREVIOUS`
@@ -58,11 +58,17 @@
   `/notebooks/{name}` (marimo embedded in an `<iframe>` + comments side panel; `?mode=run|edit`), `.../history` (+ diff via
   `?to=`/`?from=`), POSTs `.../rename|delete|restore`, Datastar POSTs `.../comments` and `.../comments/{id}/resolve|reopen`.
   Everything comes through the OPTIONAL `contract.NotebooksConsole` (`core/notebooks` does the authorization — editor roles,
-  admin-only delete, the per-file lock — and `core/governance` audits). `/nb/{mode}/{name}/...` is a reverse proxy
-  (`httputil.ReverseProxy`, http AND websocket) to the user's own marimo process: needs a session cookie but no CSRF token
-  (marimo sends none), refuses cross-site `Sec-Fetch-Site`/`Origin` (upgrades too), 403 before the upgrade without session,
-  strips the browser's `Cookie`/`Authorization`/`Referer`, injects marimo's password and drops its `Set-Cookie`/CSP/CORS. `/nb/`
-  has its own CSP (`nbCSP`, `frame-ancestors 'self'`); everything else keeps the strict one. Logout stops the user's processes.
+  admin-only delete, the per-file lock — and `core/governance` audits). The marimo process is NOT served from the console's
+  origin: `nbauth.go` runs a second listener (`notebooks_listen`, default console port+1, `off` disables; `notebooks_url` = its
+  public origin behind a proxy, ideally a sibling subdomain) with only `GET /nb-auth` and `/nb/{mode}/{name}/...`. The page mints a
+  single-use 30 s ticket (sealed with the session key, purpose `ticket`) that the iframe redeems for a `duct_nb` cookie (HttpOnly,
+  Strict, path = the notebook, purpose `cookie`, idle-limited, ends with the console session and its logout). The proxy
+  (`httputil.ReverseProxy`, http AND websocket) takes only that cookie (never `duct_session`), refuses cross-site
+  `Sec-Fetch-Site`/`Origin` (upgrades too; the console's iframe navigation is the one same-site exception), 403 before the upgrade
+  without it, strips `Cookie`/`Authorization`/`Referer`, injects marimo's password and drops its `Set-Cookie`/CSP/CORS. Its CSP
+  (`nbCSP`) allows framing only from the console's origin (carried by the ticket); the notebook page of the console adds `frame-src`
+  for the notebook origin, the rest keeps the strict CSP, and the console refuses cross-origin script reads (`sameOrigin`).
+  `Web.Handlers` returns both handlers; `NotebooksAddr()` is the second address. Logout stops the user's processes.
 - **Admin (`admin.go`, `admin.templ`):** `/admin` (status), `/admin/users`, `/admin/roles[/{role}]`
   (grants, row filters, masks, quota), `/admin/tokens`, `/admin/audit` (filters + pagination). 403 page for
   non-admins on every verb. Reads and changes go through the OPTIONAL `contract.AdminCaller` (the same code

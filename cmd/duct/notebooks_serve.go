@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,9 +19,25 @@ import (
 // token of that user, which is revoked when the process ends. It does nothing
 // when the web protocol is not running. The returned stop ends every process
 // and must run before the engine closes.
-func wireNotebooks(p *project.Project, h *governance.Handler, tokens notebooks.TokenIssuer, eng contract.Engine, ductURL string, withWeb bool, launcher notebooks.Launcher) (stop func()) {
+func wireNotebooks(p *project.Project, h *governance.Handler, tokens notebooks.TokenIssuer, eng contract.Engine, ductURL string, withWeb bool, launcher notebooks.Launcher) (stop func(), err error) {
 	if !withWeb {
-		return func() {}
+		return func() {}, nil
+	}
+	// Sandbox (ADR 0006): every marimo process runs inside bubblewrap. Without it, only duct_admin may
+	// edit (the others get run mode, which only executes code that an admin wrote). A test launcher is its own thing.
+	sandbox, editors := notebooks.SandboxNone, p.Config.Notebooks.EditorRoles()
+	if launcher == nil {
+		mode, adminOnly, msg, err := notebooks.ResolveSandbox(p.Config.Notebooks.Sandbox)
+		if err != nil {
+			return nil, err
+		}
+		if msg != "" {
+			slog.Warn(msg)
+		}
+		sandbox = mode
+		if adminOnly {
+			editors = []string{notebooks.AdminRole}
+		}
 	}
 	idle, maxAge, _ := p.Config.Notebooks.Durations() // validated by project.Load
 	var (
@@ -33,7 +50,8 @@ func wireNotebooks(p *project.Project, h *governance.Handler, tokens notebooks.T
 		Engine:      eng,
 		Tokens:      tokens,
 		Launcher:    launcher,
-		Editors:     p.Config.Notebooks.EditorRoles(),
+		Editors:     editors,
+		Sandbox:     sandbox,
 		IdleTimeout: idle, MaxAge: maxAge, MaxKernels: p.Config.Notebooks.MaxKernels,
 		DuctURL: func() string { return ductURL },
 		Python: func(ctx context.Context) ([]string, error) { // the venv is created once, on the first process
@@ -50,5 +68,5 @@ func wireNotebooks(p *project.Project, h *governance.Handler, tokens notebooks.T
 		},
 	})
 	h.SetNotebooksConsole(svc)
-	return svc.Close
+	return svc.Close, nil
 }

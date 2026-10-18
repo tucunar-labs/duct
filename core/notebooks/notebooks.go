@@ -69,6 +69,9 @@ type Options struct {
 	DuctURL func() string
 	// Python resolves the interpreter argv (creating the managed venv on first use).
 	Python func(ctx context.Context) ([]string, error)
+	// Sandbox is SandboxBwrap or SandboxNone (the resolved setting, see ResolveSandbox): whether the
+	// default launcher isolates marimo with bubblewrap. Ignored when Launcher is set.
+	Sandbox string
 	// Launcher starts marimo; default: the real thing. Tests plug a fake.
 	Launcher Launcher
 	Now      func() time.Time
@@ -112,7 +115,7 @@ func New(o Options) *Service {
 		o.Editors = []string{AdminRole}
 	}
 	if o.Launcher == nil {
-		o.Launcher = &execLauncher{Python: o.Python, Dir: o.Root}
+		o.Launcher = &execLauncher{Python: o.Python, Dir: o.Root, Sandbox: o.Sandbox}
 	}
 	s := &Service{o: o, editors: map[string]bool{}, now: o.Now, kernels: map[kkey]*kernel{}}
 	if s.now == nil {

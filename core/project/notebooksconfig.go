@@ -13,11 +13,24 @@ import (
 //	idle_timeout = "30m"                         # a user's process dies after this long without requests
 //	max_age      = "12h"                         # hard limit of a process (and of its DUCT_TOKEN)
 //	max_kernels  = 8                             # processes alive at once; more are refused
+//	sandbox      = "auto"                        # "bwrap" | "none" | "auto" (default): see ADR 0006, "Sandbox"
 type NotebooksSettings struct {
 	Editors     []string `toml:"editors"`
 	IdleTimeout string   `toml:"idle_timeout"`
 	MaxAge      string   `toml:"max_age"`
 	MaxKernels  int      `toml:"max_kernels"`
+	// Sandbox isolates every marimo process with bubblewrap: "bwrap" (error if it is missing), "none" (editors
+	// run Python as the server's OS user) or "auto"/"" (bwrap when it works; otherwise only duct_admin edits).
+	Sandbox string `toml:"sandbox"`
+}
+
+// CheckSandbox validates the sandbox setting.
+func (n NotebooksSettings) CheckSandbox() error {
+	switch n.Sandbox {
+	case "", "auto", "bwrap", "none":
+		return nil
+	}
+	return fmt.Errorf("[notebooks] sandbox: %q is not \"auto\", \"bwrap\" or \"none\"", n.Sandbox)
 }
 
 // Durations returns idle_timeout and max_age with their defaults applied.

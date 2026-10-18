@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -112,6 +114,7 @@ func (l *fakeLauncher) last(mode, name string) *fakeProc {
 
 type nbServer struct {
 	web, http string
+	nb        string // the separate origin of the notebooks
 	root      string
 	launcher  *fakeLauncher
 }
@@ -175,7 +178,7 @@ func startNotebookServer(t *testing.T, idle string, launcher notebooks.Launcher)
 			t.Error("serve did not shut down")
 		}
 	})
-	return &nbServer{web: addrs["web"], http: addrs["http"], root: root}
+	return &nbServer{web: addrs["web"], http: addrs["http"], nb: addrs["web-notebooks"], root: root}
 }
 
 func (s *nbServer) login(t *testing.T, user, pass string) *webConsole {
@@ -273,6 +276,76 @@ func (w *webConsole) postSignals(path string, signals map[string]any) (int, stri
 	return resp.StatusCode, string(out)
 }
 
+// nbBrowser is a browser on the notebook origin: its own cookie jar, entered with the
+// ticket the console page puts in its iframe.
+type nbBrowser struct {
+	t    *testing.T
+	base string
+	c    *http.Client
+}
+
+var iframeSrc = regexp.MustCompile(`<iframe src="([^"]+)"`)
+
+func newNBBrowser(t *testing.T, addr string) *nbBrowser {
+	jar, _ := cookiejar.New(nil)
+	return &nbBrowser{t: t, base: "http://" + addr, c: &http.Client{Jar: jar, Timeout: 60 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+}
+
+// ticketOf opens the console page of a notebook and returns the iframe address (the ticket URL) and the page.
+func ticketOf(t *testing.T, w *webConsole, name, query string) (src, page string) {
+	t.Helper()
+	code, body, _ := w.get("/notebooks/" + name + query)
+	if code != 200 {
+		t.Fatalf("notebook page %s%s: %d %s", name, query, code, flashText(body))
+	}
+	m := iframeSrc.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no iframe in the page of %s: %s", name, textOnly(body))
+	}
+	return html.UnescapeString(m[1]), body
+}
+
+// enter opens a notebook as the console does and redeems the ticket in a fresh browser on the notebook origin.
+func (s *nbServer) enter(t *testing.T, w *webConsole, name, query string) (*nbBrowser, string) {
+	t.Helper()
+	src, page := ticketOf(t, w, name, query)
+	if !strings.HasPrefix(src, "http://"+s.nb+"/nb-auth?t=") {
+		t.Fatalf("iframe src = %s, want the notebook origin %s", src, s.nb)
+	}
+	b := newNBBrowser(t, s.nb)
+	resp, err := b.c.Get(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || !strings.HasPrefix(resp.Header.Get("Location"), "/nb/") {
+		t.Fatalf("redeeming the ticket: %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	return b, page
+}
+
+func (b *nbBrowser) get(path string) (int, string, http.Header) {
+	b.t.Helper()
+	resp, err := b.c.Get(b.base + path)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(out), resp.Header
+}
+
+// cookie is the Cookie header the browser would send for path.
+func (b *nbBrowser) cookie(path string) string {
+	u, _ := url.Parse(b.base + path)
+	var parts []string
+	for _, c := range b.c.Jar.Cookies(u) {
+		parts = append(parts, c.Name+"="+c.Value)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func nbWait(t *testing.T, what string, d time.Duration, ok func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(d)
@@ -296,6 +369,7 @@ func TestNotebooksConsole(t *testing.T) {
 	bea := s.login(t, "bea", "pw-bea-123")
 	jefa := s.login(t, "jefa", "pw-jefa-123")
 	nadie := s.login(t, "nadie", "pw-nadie-123")
+	var nviewer *nbBrowser // nadie on the notebook origin, in run mode (set by the first subtest that needs it)
 
 	t.Run("list", func(t *testing.T) {
 		code, body, _ := nadie.get("/notebooks")
@@ -318,17 +392,19 @@ func TestNotebooksConsole(t *testing.T) {
 		if p := s.launcher.last("edit", "hello"); p != nil {
 			t.Fatal("an edit process started for a viewer")
 		}
-		// Even asking the proxy directly there is nothing to reach in edit mode.
-		if code, _, _ := nadie.get("/nb/edit/hello/"); code != 403 {
-			t.Errorf("viewer /nb/edit: %d, want 403", code)
+		// The viewer gets run mode, with its own process and its own token...
+		vb, body := s.enter(t, nadie, "hello", "")
+		if !strings.Contains(body, "Solo ejecución") || strings.Contains(body, "Historial") {
+			t.Fatalf("viewer page: %s", textOnly(body))
 		}
-		// The viewer gets run mode, with its own process and its own token.
-		code, body, _ := nadie.get("/notebooks/hello")
-		if code != 200 || !strings.Contains(body, `src="/nb/run/hello/"`) || !strings.Contains(body, "Solo ejecución") || strings.Contains(body, "Historial") {
-			t.Fatalf("viewer page: %d", code)
-		}
-		if code, body, _ := nadie.get("/nb/run/hello/index"); code != 200 || !strings.Contains(body, "kernel run hello") {
+		nviewer = vb
+		if code, body, _ := vb.get("/nb/run/hello/index"); code != 200 || !strings.Contains(body, "kernel run hello") {
 			t.Errorf("viewer proxy: %d %q", code, body)
+		}
+		// ...and even asking the notebook origin directly there is nothing to reach in edit mode:
+		// its cookie is for run mode only.
+		if code, _, _ := vb.get("/nb/edit/hello/"); code != 401 {
+			t.Errorf("viewer /nb/edit: %d, want 401", code)
 		}
 		// no history, no diff, no restore for viewers
 		if code, _, _ := nadie.get("/notebooks/hello/history"); code != 403 {
@@ -346,35 +422,46 @@ func TestNotebooksConsole(t *testing.T) {
 	})
 
 	t.Run("proxy auth", func(t *testing.T) {
-		// No session: 401 for http, 403 before the upgrade for the websocket.
-		resp, err := http.Get("http://" + s.web + "/nb/run/hello/")
+		// No cookie: 401 for http, 403 before the upgrade for the websocket.
+		resp, err := http.Get("http://" + s.nb + "/nb/run/hello/")
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = resp.Body.Close()
 		if resp.StatusCode != 401 {
-			t.Errorf("http without session: %d", resp.StatusCode)
+			t.Errorf("http without cookie: %d", resp.StatusCode)
 		}
 		for _, path := range []string{"/nb/run/hello/ws?session_id=a", "/nb/edit/hello/ws", "/nb/run/hello/ws_sync"} {
-			if c, _ := wsGet(t, s.web, path, nil); c != 403 {
-				t.Errorf("ws %s without session: %d, want 403", path, c)
+			if c, _ := wsGet(t, s.nb, path, nil); c != 403 {
+				t.Errorf("ws %s without cookie: %d, want 403", path, c)
 			}
-			if c, _ := wsGet(t, s.web, path, map[string]string{"Cookie": "duct_session=forged"}); c != 403 {
+			if c, _ := wsGet(t, s.nb, path, map[string]string{"Cookie": "duct_nb=forged"}); c != 403 {
 				t.Errorf("ws %s forged cookie: %d, want 403", path, c)
 			}
+			// the console's session cookie is not a credential of the notebook origin
+			if c, _ := wsGet(t, s.nb, path, map[string]string{"Cookie": nadie.cookie()}); c != 403 {
+				t.Errorf("ws %s with the console cookie: %d, want 403", path, c)
+			}
 		}
-		// A real session still needs a same-origin upgrade.
-		if c, _ := wsGet(t, s.web, "/nb/run/hello/ws", map[string]string{"Cookie": nadie.cookie(), "Origin": "http://evil.example"}); c != 403 {
+		// A real cookie still needs a same-origin upgrade.
+		ck := nviewer.cookie("/nb/run/hello/ws")
+		if ck == "" {
+			t.Fatal("the notebook browser has no cookie")
+		}
+		if c, _ := wsGet(t, s.nb, "/nb/run/hello/ws", map[string]string{"Cookie": ck, "Origin": "http://evil.example"}); c != 403 {
 			t.Errorf("cross-origin ws: %d, want 403", c)
 		}
-		// With the session it reaches the process (which only accepts marimo's password).
-		c, frame := wsGet(t, s.web, "/nb/run/hello/ws", map[string]string{"Cookie": nadie.cookie(), "Origin": "http://" + s.web})
+		// With the cookie it reaches the process (which only accepts marimo's password).
+		c, frame := wsGet(t, s.nb, "/nb/run/hello/ws", map[string]string{"Cookie": ck, "Origin": "http://" + s.nb})
 		if c != 101 || frame != "hello-from-kernel" {
 			t.Errorf("authenticated ws: %d %q", c, frame)
 		}
-		// Another user never reaches nadie's process: there is none of theirs for that notebook/mode.
-		if code, _, _ := bea.get("/nb/run/hello/"); code != 404 {
-			t.Errorf("bea reaches nadie's process? %d", code)
+		// The cookie is for one notebook and one mode.
+		if c, _ := wsGet(t, s.nb, "/nb/run/other/ws", map[string]string{"Cookie": ck, "Origin": "http://" + s.nb}); c != 403 {
+			t.Errorf("ws of another notebook with this cookie: %d, want 403", c)
+		}
+		if c, _ := wsGet(t, s.nb, "/nb/edit/hello/ws", map[string]string{"Cookie": ck, "Origin": "http://" + s.nb}); c != 403 {
+			t.Errorf("ws of the edit mode with a run cookie: %d, want 403", c)
 		}
 		// The browser's credentials and the process's headers do not cross.
 		p := s.launcher.last("run", "hello")
@@ -385,8 +472,9 @@ func TestNotebooksConsole(t *testing.T) {
 			}
 		}
 		p.mu.Unlock()
-		_, _, hdr := nadie.get("/nb/run/hello/x")
-		if hdr.Get("Set-Cookie") != "" || strings.Contains(hdr.Get("Content-Security-Policy"), "default-src 'none'") || !strings.Contains(hdr.Get("Content-Security-Policy"), "frame-ancestors 'self'") {
+		_, _, hdr := nviewer.get("/nb/run/hello/x")
+		csp := hdr.Get("Content-Security-Policy")
+		if hdr.Get("Set-Cookie") != "" || strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors http://"+s.web) {
 			t.Errorf("response headers: %v", hdr)
 		}
 		// The Duct pages keep the strict policy.
@@ -438,15 +526,15 @@ func TestNotebooksConsole(t *testing.T) {
 
 	t.Run("lock per file", func(t *testing.T) {
 		// ana holds the edit lock (opened above). bea gets run mode and a banner.
-		code, body, _ := bea.get("/notebooks/hello")
-		if code != 200 || !strings.Contains(body, `src="/nb/run/hello/"`) || !strings.Contains(body, "está editando") || !strings.Contains(body, "ana") {
-			t.Errorf("bea sees: %d lock banner missing", code)
+		bb, body := s.enter(t, bea, "hello", "")
+		if !strings.Contains(body, "está editando") || !strings.Contains(body, "ana") || bb.cookie("/nb/run/hello/") == "" {
+			t.Errorf("bea sees: lock banner or run mode missing")
 		}
-		code, body, _ = bea.get("/notebooks/hello?mode=edit")
-		if code != 200 || !strings.Contains(body, `src="/nb/run/hello/"`) || !strings.Contains(body, "está editando") {
-			t.Errorf("bea ?mode=edit while locked: %d", code)
+		bb, body = s.enter(t, bea, "hello", "?mode=edit")
+		if !strings.Contains(body, "está editando") || bb.cookie("/nb/run/hello/") == "" || bb.cookie("/nb/edit/hello/") != "" {
+			t.Errorf("bea ?mode=edit while locked must get run mode")
 		}
-		if code, _, _ := bea.get("/nb/edit/hello/"); code != 404 {
+		if code, _, _ := bb.get("/nb/edit/hello/"); code != 401 {
 			t.Errorf("bea reaches ana's edit process: %d", code)
 		}
 		if _, body, _ := bea.get("/notebooks"); !strings.Contains(body, "Editando: ana") {
@@ -711,16 +799,14 @@ func TestNotebooksIdle(t *testing.T) {
 	s := startNotebookConsole(t, "2s")
 	bea := s.login(t, "bea", "pw-bea-123")
 	ana := s.login(t, "ana", "pw-ana-123")
-	if code, _, _ := bea.get("/notebooks/hello"); code != 200 {
-		t.Fatal("bea opens")
-	}
+	bb, _ := s.enter(t, bea, "hello", "")
 	e := s.launcher.last("edit", "hello")
 	if e == nil || e.stopped.Load() {
 		t.Fatal("bea has no edit process")
 	}
 	for range 4 { // activity keeps it alive well past the 2 s timeout
 		time.Sleep(time.Second)
-		if code, _, _ := bea.get("/nb/edit/hello/ping"); code != 200 {
+		if code, _, _ := bb.get("/nb/edit/hello/ping"); code != 200 {
 			t.Fatalf("proxy while active: %d", code)
 		}
 	}
@@ -734,7 +820,7 @@ func TestNotebooksIdle(t *testing.T) {
 		t.Fatal(err)
 	}
 	nbWait(t, "idle kill", 15*time.Second, func() bool { return e.stopped.Load() })
-	if code, _, _ := bea.get("/nb/edit/hello/ping"); code != 404 {
+	if code, _, _ := bb.get("/nb/edit/hello/ping"); code != 404 {
 		t.Errorf("proxy to a dead process: %d", code)
 	}
 	rows := queryRows(t, s.root, "SELECT author FROM duct.duct_notebook_versions WHERE notebook = 'hello' AND action = 'save'")
@@ -802,6 +888,9 @@ func procsWith(s string) int {
 	return n
 }
 
+// marimoTestNotebook runs a governed query and probes its surroundings, then POSTs what it found to
+// the test's own listener on loopback (the sandbox shares the network, and has no other way to write
+// to the host). __ROOT__ and __REPORT__ are replaced by the test.
 const marimoTestNotebook = `import marimo
 
 app = marimo.App()
@@ -809,14 +898,40 @@ app = marimo.App()
 
 @app.cell
 def _():
+    import json
     import os
+    import urllib.request
 
     import duct
 
+    root = "__ROOT__"
     with duct.connect() as con:
         res = con.sql("SELECT name, rut FROM customers ORDER BY name")
-    with open("nb_out.txt", "a") as f:
-        f.write(repr([(r["name"], r["rut"]) for r in res.rows]) + " " + repr(sorted(k for k in os.environ if k.startswith(("DUCT_", "AWS_", "PG")))) + "\n")
+
+    def tryit(f):
+        try:
+            return f()
+        except Exception as e:
+            return "ERR " + type(e).__name__
+
+    def write(path):
+        with open(path, "a") as f:
+            f.write("x")
+        return "ok"
+
+    nbdir = os.path.join(root, "notebooks")
+    report = {
+        "rows": [(r["name"], r["rut"]) for r in res.rows],
+        "env": sorted(k for k in os.environ if k.startswith(("DUCT_", "AWS_", "PG"))),
+        "root": tryit(lambda: sorted(os.listdir(root))),
+        "duct_dir": tryit(lambda: os.listdir(os.path.join(root, ".duct"))),
+        "lake": tryit(lambda: os.listdir(os.path.join(root, "lake"))),
+        "config": tryit(lambda: open(os.path.join(root, "duct.toml")).read()[:20]),
+        "nb_write": tryit(lambda: write(os.path.join(nbdir, "intruso.txt"))),
+        "tmp_write": tryit(lambda: write("/tmp/probe")),
+        "procs": len([p for p in os.listdir("/proc") if p.isdigit()]),
+    }
+    urllib.request.urlopen(urllib.request.Request("__REPORT__", data=json.dumps(report).encode()), timeout=10).read()
     return
 
 
@@ -824,71 +939,115 @@ if __name__ == "__main__":
     app.run()
 `
 
-// TestNotebooksMarimo runs the real marimo behind the console: edit and run mode
-// per user, the proxy for http and websocket, governed queries with the user's own
-// token, the lock, and the process ending at logout. Needs python/.venv (marimo).
+// TestNotebooksMarimo runs the real marimo behind the console, sandboxed (bubblewrap) when
+// it is available: edit and run mode per user, the proxy for http and websocket on the notebook
+// origin, governed queries with the user's own token, the sandbox (no lake, no .duct/, the
+// notebooks dir read-only in run mode and writable in edit mode), the lock, and the process
+// ending at logout. Needs python/.venv (marimo).
 func TestNotebooksMarimo(t *testing.T) {
 	pythonEnv(t)
 	t.Setenv("DUCT_S3_SECRET_ACCESS_KEY", "super-secret")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "super-secret")
 	t.Setenv("PGPASSWORD", "super-secret")
+	sandboxed := false
+	if _, err := notebooks.BwrapAvailable(); err == nil {
+		sandboxed = true
+	} else {
+		t.Logf("bubblewrap not usable (%v): running the notebooks unsandboxed", err)
+	}
 	s := startNotebookServer(t, "10m", nil)
-	writeFile(t, filepath.Join(s.root, "notebooks", "clientes.py"), marimoTestNotebook)
-	out := filepath.Join(s.root, "nb_out.txt")
-	lines := func() []string {
-		b, _ := os.ReadFile(out)
-		return strings.Split(strings.TrimSpace(string(b)), "\n")
+	reports := make(chan map[string]any, 8)
+	rl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		if json.NewDecoder(r.Body).Decode(&m) == nil {
+			reports <- m
+		}
+	}))
+	defer rl.Close()
+	src := strings.NewReplacer("__ROOT__", s.root, "__REPORT__", rl.URL).Replace(marimoTestNotebook)
+	writeFile(t, filepath.Join(s.root, "notebooks", "clientes.py"), src)
+	// the lake and .duct/ hold something worth stealing (a real project has both)
+	writeFile(t, filepath.Join(s.root, "lake", "secreto.txt"), "datos del lago")
+	next := func(what string) map[string]any {
+		t.Helper()
+		select {
+		case m := <-reports:
+			return m
+		case <-time.After(60 * time.Second):
+			t.Fatalf("no report from %s", what)
+			return nil
+		}
 	}
 	ana := s.login(t, "ana", "pw-ana-123")
 	jefa := s.login(t, "jefa", "pw-jefa-123")
 	nadie := s.login(t, "nadie", "pw-nadie-123")
 
 	// Run mode: ana's process runs the notebook as analistas; jefa's as the admin.
-	if code, body, _ := ana.get("/notebooks/clientes?mode=run"); code != 200 || !strings.Contains(body, `src="/nb/run/clientes/"`) {
-		t.Fatalf("ana run page: %d %s", code, flashText(body))
-	}
-	if code, body, hdr := ana.get("/nb/run/clientes/"); code != 200 || !strings.Contains(body, "marimo") || !strings.Contains(hdr.Get("Content-Security-Policy"), "frame-ancestors 'self'") {
+	anaRun, _ := s.enter(t, ana, "clientes", "?mode=run")
+	if code, body, hdr := anaRun.get("/nb/run/clientes/"); code != 200 || !strings.Contains(body, "marimo") || !strings.Contains(hdr.Get("Content-Security-Policy"), "frame-ancestors http://"+s.web) {
 		t.Fatalf("marimo through the proxy: %d %.200s", code, body)
 	}
-	if code := wsHold(t, s.web, "/nb/run/clientes/ws?session_id=ana1", map[string]string{"Cookie": ana.cookie(), "Origin": "http://" + s.web}, 6*time.Second); code != 101 {
+	if code := wsHold(t, s.nb, "/nb/run/clientes/ws?session_id=ana1", map[string]string{"Cookie": anaRun.cookie("/nb/run/clientes/ws"), "Origin": "http://" + s.nb}, 6*time.Second); code != 101 {
 		t.Fatalf("ana ws: %d", code)
 	}
-	nbWait(t, "ana's notebook ran", 30*time.Second, func() bool { return len(lines()) >= 1 && lines()[0] != "" })
-	if got := lines()[0]; !strings.Contains(got, "('Ana', '***'), ('Cami', '***')") || strings.Contains(got, "Beto") || !strings.Contains(got, "['DUCT_TOKEN', 'DUCT_URL']") {
-		t.Errorf("ana's run = %s", got)
+	got := next("ana's run")
+	if rows := fmt.Sprint(got["rows"]); !strings.Contains(rows, "Ana ***") || !strings.Contains(rows, "Cami ***") || strings.Contains(rows, "Beto") || fmt.Sprint(got["env"]) != "[DUCT_TOKEN DUCT_URL]" {
+		t.Errorf("ana's run = %v", got)
 	}
-	if code, _, _ := jefa.get("/notebooks/clientes?mode=run"); code != 200 {
-		t.Fatalf("jefa run page: %d", code)
+	if sandboxed {
+		// The sandbox: only the notebooks dir exists, read-only in run mode; /tmp is private; /proc is its own.
+		if fmt.Sprint(got["root"]) != "[notebooks]" || !strings.HasPrefix(fmt.Sprint(got["duct_dir"]), "ERR ") || !strings.HasPrefix(fmt.Sprint(got["lake"]), "ERR ") ||
+			!strings.HasPrefix(fmt.Sprint(got["config"]), "ERR ") {
+			t.Errorf("the sandbox exposes the project: root=%v .duct=%v lake=%v duct.toml=%v", got["root"], got["duct_dir"], got["lake"], got["config"])
+		}
+		if !strings.HasPrefix(fmt.Sprint(got["nb_write"]), "ERR ") || got["tmp_write"] != "ok" {
+			t.Errorf("run mode: notebooks dir write=%v (want an error), private tmp write=%v (want ok)", got["nb_write"], got["tmp_write"])
+		}
+		if n, _ := got["procs"].(float64); n > 12 {
+			t.Errorf("the sandbox sees %v processes of the host", got["procs"])
+		}
+	} else if fmt.Sprint(got["root"]) == "[notebooks]" {
+		t.Errorf("unsandboxed notebook sees a sandboxed project: %v", got["root"])
 	}
-	if code := wsHold(t, s.web, "/nb/run/clientes/ws?session_id=jefa1", map[string]string{"Cookie": jefa.cookie(), "Origin": "http://" + s.web}, 6*time.Second); code != 101 {
+	if _, err := os.Stat(filepath.Join(s.root, "notebooks", "intruso.txt")); err == nil && sandboxed {
+		t.Error("a run-mode notebook wrote into the notebooks dir")
+	}
+	jefaRun, _ := s.enter(t, jefa, "clientes", "?mode=run")
+	if code := wsHold(t, s.nb, "/nb/run/clientes/ws?session_id=jefa1", map[string]string{"Cookie": jefaRun.cookie("/nb/run/clientes/ws"), "Origin": "http://" + s.nb}, 6*time.Second); code != 101 {
 		t.Fatalf("jefa ws: %d", code)
 	}
-	nbWait(t, "jefa's notebook ran", 30*time.Second, func() bool { return len(lines()) >= 2 })
-	if got := lines()[1]; !strings.Contains(got, "Beto") || !strings.Contains(got, "11.111.111-1") {
-		t.Errorf("the admin's run should see everything: %s", got)
+	if rows := fmt.Sprint(next("jefa's run")["rows"]); !strings.Contains(rows, "Beto") || !strings.Contains(rows, "11.111.111-1") {
+		t.Errorf("the admin's run should see everything: %s", rows)
 	}
 	// A viewer cannot reach edit mode, with marimo or without it.
 	if code, _, _ := nadie.get("/notebooks/clientes?mode=edit"); code != 403 {
 		t.Errorf("viewer edit page: %d", code)
 	}
-	if code, _, _ := nadie.get("/nb/edit/clientes/"); code != 403 {
+	nadieRun, _ := s.enter(t, nadie, "clientes", "?mode=run")
+	if code, _, _ := nadieRun.get("/nb/edit/clientes/"); code != 401 {
 		t.Errorf("viewer edit proxy: %d", code)
 	}
-	if c, _ := wsGet(t, s.web, "/nb/edit/clientes/ws?session_id=x", map[string]string{"Cookie": nadie.cookie(), "Origin": "http://" + s.web}); c != 403 {
+	if c, _ := wsGet(t, s.nb, "/nb/edit/clientes/ws?session_id=x", map[string]string{"Cookie": nadieRun.cookie("/nb/run/clientes/ws"), "Origin": "http://" + s.nb}); c != 403 {
 		t.Errorf("viewer edit websocket: %d", c)
 	}
 
 	// Edit mode: ana edits (real marimo edit), jefa is told the file is locked.
-	if code, body, _ := ana.get("/notebooks/clientes"); code != 200 || !strings.Contains(body, `src="/nb/edit/clientes/"`) {
-		t.Fatalf("ana edit page: %d %s", code, flashText(body))
-	}
-	if code, body, _ := ana.get("/nb/edit/clientes/"); code != 200 || !strings.Contains(body, "marimo") {
+	anaEdit, _ := s.enter(t, ana, "clientes", "")
+	if code, body, _ := anaEdit.get("/nb/edit/clientes/"); code != 200 || !strings.Contains(body, "marimo") {
 		t.Fatalf("edit mode through the proxy: %d", code)
 	}
-	if c := wsHold(t, s.web, "/nb/edit/clientes/ws?session_id=ed1", map[string]string{"Cookie": ana.cookie(), "Origin": "http://" + s.web}, time.Second); c != 101 {
+	if c := wsHold(t, s.nb, "/nb/edit/clientes/ws?session_id=ed1", map[string]string{"Cookie": anaEdit.cookie("/nb/edit/clientes/ws"), "Origin": "http://" + s.nb}, 8*time.Second); c != 101 {
 		t.Errorf("edit websocket: %d", c)
 	}
-	if _, body, _ := jefa.get("/notebooks/clientes"); !strings.Contains(body, "está editando") || !strings.Contains(body, `src="/nb/run/clientes/"`) {
+	select { // marimo edit runs the notebook when it opens: its notebooks dir is writable
+	case m := <-reports:
+		if sandboxed && (m["nb_write"] != "ok" || fmt.Sprint(m["root"]) != "[notebooks]") {
+			t.Errorf("edit mode in the sandbox: notebooks dir write=%v root=%v", m["nb_write"], m["root"])
+		}
+	case <-time.After(20 * time.Second):
+		t.Log("marimo edit did not run the notebook on open: edit-mode probes skipped")
+	}
+	if _, body := s.enter(t, jefa, "clientes", ""); !strings.Contains(body, "está editando") {
 		t.Errorf("jefa should get the lock banner and run mode")
 	}
 	if n := procsWith("--base-url /nb/edit/clientes"); n == 0 {
@@ -898,12 +1057,90 @@ func TestNotebooksMarimo(t *testing.T) {
 	if n := procsWith("--token-password "); n != 0 {
 		t.Errorf("marimo's password is on a command line (%d)", n)
 	}
-	// Logout ends every process of the user (the kernel too), within the grace period.
+	// Logout ends every process of the user (the kernel too), within the grace period, and
+	// the notebook cookie she holds stops working at once.
 	if resp, _ := ana.post("/logout", nil); resp.StatusCode != 303 {
 		t.Fatalf("logout: %d", resp.StatusCode)
 	}
+	if code, _, _ := anaEdit.get("/nb/edit/clientes/"); code != 401 {
+		t.Errorf("the notebook cookie survived the console logout: %d", code)
+	}
 	nbWait(t, "marimo processes gone after logout", 20*time.Second, func() bool { return procsWith("--base-url /nb/edit/clientes") == 0 })
-	if code, _, _ := jefa.get("/nb/edit/clientes/"); code != 404 && code != 200 { // jefa is an editor: her own page may open it
-		t.Errorf("after the logout: %d", code)
+}
+
+// TestNotebooksOrigin: the notebooks live on their own origin, entered with a one-time ticket;
+// the console serves none of /nb, the console's cookie is worth nothing on the notebook origin and
+// the notebook cookie dies with the console session.
+func TestNotebooksOrigin(t *testing.T) {
+	s := startNotebookConsole(t, "10m")
+	ana := s.login(t, "ana", "pw-ana-123")
+	if s.nb == "" || s.nb == s.web {
+		t.Fatalf("notebook origin = %q (console %q)", s.nb, s.web)
+	}
+	// the console has no notebook proxy any more, session or not
+	for _, p := range []string{"/nb/run/hello/", "/nb/edit/hello/ws"} {
+		if code, _, _ := ana.get(p); code != 404 {
+			t.Errorf("console %s: %d, want 404", p, code)
+		}
+	}
+	src, page := ticketOf(t, ana, "hello", "")
+	_, _, hdr := ana.get("/notebooks/hello")
+	if csp := hdr.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-src http://"+s.nb+";") || !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("the notebook page's CSP: %s", csp)
+	}
+	if !strings.Contains(page, "Notebook hello") {
+		t.Error("iframe missing")
+	}
+	// the ticket opens once
+	b1 := newNBBrowser(t, s.nb)
+	for i, want := range []int{303, 403} {
+		resp, err := b1.c.Get(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("redeem #%d: %d, want %d", i+1, resp.StatusCode, want)
+		}
+	}
+	if code, body, _ := b1.get("/nb/edit/hello/index"); code != 200 || !strings.Contains(body, "kernel edit hello") {
+		t.Errorf("notebook through its origin: %d %q", code, body)
+	}
+	// the console's cookie is not a credential on the notebook origin, and the notebook origin has no console
+	anon := newNBBrowser(t, s.nb)
+	req, _ := http.NewRequest("GET", anon.base+"/nb/edit/hello/index", http.NoBody)
+	req.Header.Set("Cookie", ana.cookie())
+	resp, err := anon.c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Errorf("console cookie on the notebook origin: %d", resp.StatusCode)
+	}
+	for _, p := range []string{"/catalog", "/notebooks", "/sql/run", "/logout"} {
+		if code, _, _ := b1.get(p); code != 404 {
+			t.Errorf("notebook origin %s: %d, want 404", p, code)
+		}
+	}
+	// cross-site and cross-origin requests to the notebook origin are refused even with the cookie
+	req, _ = http.NewRequest("GET", b1.base+"/nb/edit/hello/index", http.NoBody)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	if resp, err = b1.c.Do(req); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Errorf("cross-site request: %d", resp.StatusCode)
+	}
+	// logging out of the console ends the notebook session at once
+	if resp, _ := ana.post("/logout", nil); resp.StatusCode != 303 {
+		t.Fatalf("logout: %d", resp.StatusCode)
+	}
+	if code, _, _ := b1.get("/nb/edit/hello/index"); code != 401 {
+		t.Errorf("notebook cookie after the console logout: %d, want 401", code)
+	}
+	if c, _ := wsGet(t, s.nb, "/nb/edit/hello/ws", map[string]string{"Cookie": b1.cookie("/nb/edit/hello/ws"), "Origin": "http://" + s.nb}); c != 403 {
+		t.Errorf("websocket after the console logout: %d, want 403", c)
 	}
 }

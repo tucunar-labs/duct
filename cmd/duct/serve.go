@@ -242,12 +242,19 @@ func serve(ctx context.Context, p *project.Project, opt serveOptions) error {
 	mountOperability(p, eng, handler, auth, byName)  // /admin/v1, /readyz, DB-backed metrics
 	jobsHolder := wireConsole(p, eng, handler, auth) // web console: admin API and jobs (console.go)
 	// web console: notebooks, one marimo process per user (notebooks_serve.go)
-	defer wireNotebooks(p, handler, auth, eng, httpURLOf(p, names, protocols), byName["web"] != nil, opt.NotebookLauncher)()
+	stopNotebooks, err := wireNotebooks(p, handler, auth, eng, httpURLOf(p, names, protocols), byName["web"] != nil, opt.NotebookLauncher)
+	if err != nil {
+		return err
+	}
+	defer stopNotebooks()
 	if opt.Ready != nil {
 		addrs := map[string]string{}
 		for i, proto := range protocols {
 			if a, ok := proto.(contract.Addresser); ok {
 				addrs[names[i]] = a.Addr()
+			}
+			if nb, ok := proto.(interface{ NotebooksAddr() string }); ok && nb.NotebooksAddr() != "" {
+				addrs[names[i]+"-notebooks"] = nb.NotebooksAddr() // the separate origin of the notebooks
 			}
 		}
 		opt.Ready(addrs)

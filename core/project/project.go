@@ -163,6 +163,9 @@ func Load(dir string) (*Project, error) {
 	if _, _, err := cfg.Notebooks.Durations(); err != nil {
 		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
 	}
+	if err := cfg.Notebooks.CheckSandbox(); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigFile, err)
+	}
 	return &Project{Root: root, Config: cfg}, nil
 }
 
