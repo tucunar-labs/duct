@@ -1032,6 +1032,17 @@ func TestNotebooksMarimo(t *testing.T) {
 		t.Errorf("viewer edit websocket: %d", c)
 	}
 
+	// Without a usable sandbox only duct_admin may edit (fail closed): ana, a
+	// non-admin editor, must be refused and the rest of the edit flow does not apply.
+	if !sandboxed {
+		anaNoBox, _ := s.enter(t, ana, "clientes", "")
+		if code, _, _ := anaNoBox.get("/nb/edit/clientes/"); code == 200 {
+			t.Fatalf("non-admin edit without a sandbox must be refused, got 200")
+		}
+		t.Log("no sandbox: non-admin edit refused as designed; skipping the edit-mode checks")
+		return
+	}
+
 	// Edit mode: ana edits (real marimo edit), jefa is told the file is locked.
 	anaEdit, _ := s.enter(t, ana, "clientes", "")
 	if code, body, _ := anaEdit.get("/nb/edit/clientes/"); code != 200 || !strings.Contains(body, "marimo") {

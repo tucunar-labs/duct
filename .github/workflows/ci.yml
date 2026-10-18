@@ -50,6 +50,11 @@ jobs:
           working_directory: duct
       - name: Python env for UDF/notebook/SDK tests
         run: cd python && uv sync
+      - name: bubblewrap for the user-code sandbox tests
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: just test
 
   e2e:
